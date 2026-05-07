@@ -1262,6 +1262,76 @@ test "tick: restarting with binary_path spawns new process" {
     }
 }
 
+test "tick: restarting waits for backoff window before spawning" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const now = std_compat.time.milliTimestamp();
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "comp", "backoff-wait" });
+    try mgr.instances.put(key, .{
+        .component = "comp",
+        .name = "backoff-wait",
+        .status = .restarting,
+        .restart_count = 2,
+        .max_restarts = 5,
+        .binary_path = "/bin/sleep",
+        .launch_args = &.{"60"},
+        .last_restart_attempt = now - 500,
+    });
+
+    mgr.tick();
+
+    const inst = mgr.instances.get("comp/backoff-wait").?;
+    try std.testing.expectEqual(Status.restarting, inst.status);
+    try std.testing.expectEqual(@as(u32, 2), inst.restart_count);
+    try std.testing.expectEqual(now - 500, inst.last_restart_attempt.?);
+    try std.testing.expectEqual(@as(?std_compat.process.Child.Id, null), inst.pid);
+    try std.testing.expect(inst.child == null);
+}
+
+test "tick: restarting uses capped backoff before spawning" {
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "comp", "backoff-cap" });
+    try mgr.instances.put(key, .{
+        .component = "comp",
+        .name = "backoff-cap",
+        .status = .restarting,
+        .restart_count = 8,
+        .max_restarts = 10,
+        .binary_path = "/bin/sleep",
+        .launch_args = &.{"60"},
+        .last_restart_attempt = std_compat.time.milliTimestamp() - 20_000,
+    });
+
+    mgr.tick();
+
+    const inst_ptr = mgr.instances.getPtr("comp/backoff-cap").?;
+    try std.testing.expectEqual(Status.starting, inst_ptr.status);
+    try std.testing.expect(inst_ptr.pid != null);
+    try std.testing.expectEqual(@as(u32, 9), inst_ptr.restart_count);
+    try std.testing.expect(inst_ptr.last_restart_attempt != null);
+    try std.testing.expect(inst_ptr.last_restart_attempt.? >= std_compat.time.milliTimestamp() - 5_000);
+
+    if (inst_ptr.child) |*child| {
+        process.terminate(child.id) catch {};
+        _ = child.wait() catch {};
+        inst_ptr.child = null;
+    }
+}
+
 test "tick: running instance with dead pid transitions to restarting" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
