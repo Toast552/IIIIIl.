@@ -317,3 +317,30 @@ test "integration harness covers orchestration proxy not configured" {
     try std.testing.expectEqual(std.http.Status.service_unavailable, resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "NullBoiler not configured") != null);
 }
+
+test "integration harness covers utility and versions routes" {
+    var server = try IntegrationServer.start(std.testing.allocator);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/free-port" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"port\":") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/wizard/nullclaw/versions" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"value\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"label\":") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/wizard/missing-component/versions" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
+    }
+}
