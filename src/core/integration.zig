@@ -187,8 +187,7 @@ pub fn extractLocalPort(url: []const u8) ?u16 {
     const port = uri.port orelse return null;
 
     return switch (host) {
-        .raw => |value| if (isLocalHost(value)) port else null,
-        else => null,
+        .raw, .percent_encoded => |value| if (isLocalHost(value)) port else null,
     };
 }
 
