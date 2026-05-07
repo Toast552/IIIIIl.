@@ -188,13 +188,14 @@ pub const Server = struct {
 
     fn normalizedLaunchModeForRestore(component: []const u8, launch_mode: []const u8) []const u8 {
         const known = registry.findKnownComponent(component) orelse return launch_mode;
-        if (!std.mem.eql(u8, known.default_launch_command, "gateway") and std.mem.eql(u8, launch_mode, "gateway")) {
+        const normalized = registry.normalizeLaunchCommand(component, launch_mode);
+        if (!std.mem.eql(u8, known.default_launch_command, "gateway") and std.mem.eql(u8, normalized, "gateway")) {
             return known.default_launch_command;
         }
-        if (std.mem.eql(u8, component, "nullwatch") and std.mem.eql(u8, launch_mode, "nullwatch")) {
+        if (std.mem.eql(u8, component, "nullwatch") and std.mem.eql(u8, normalized, "nullwatch")) {
             return known.default_launch_command;
         }
-        return launch_mode;
+        return normalized;
     }
 
     fn terminatePersistedRuntime(
@@ -581,6 +582,87 @@ pub const Server = struct {
         return getEnv("NULLTICKETS_TOKEN");
     }
 
+    const ManagedBackendConfig = struct {
+        url: []u8,
+        token: ?[]u8 = null,
+
+        fn deinit(self: *ManagedBackendConfig, allocator: std.mem.Allocator) void {
+            allocator.free(self.url);
+            if (self.token) |token| allocator.free(token);
+            self.* = undefined;
+        }
+    };
+
+    fn resolveManagedBackend(self: *Server, allocator: std.mem.Allocator, component: []const u8, requested_name: ?[]const u8) ?ManagedBackendConfig {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (std.mem.eql(u8, component, "nullboiler")) {
+            const configs = integration_mod.listNullBoilers(allocator, self.state, self.paths) catch return null;
+            defer integration_mod.deinitNullBoilerConfigs(allocator, configs);
+            return self.resolveManagedBackendFromConfigs(allocator, "nullboiler", requested_name, configs);
+        }
+
+        if (std.mem.eql(u8, component, "nulltickets")) {
+            const configs = integration_mod.listNullTickets(allocator, self.state, self.paths) catch return null;
+            defer integration_mod.deinitNullTicketsConfigs(allocator, configs);
+            return self.resolveManagedBackendFromConfigs(allocator, "nulltickets", requested_name, configs);
+        }
+
+        return null;
+    }
+
+    fn resolveManagedBackendFromConfigs(self: *Server, allocator: std.mem.Allocator, component: []const u8, requested_name: ?[]const u8, configs: anytype) ?ManagedBackendConfig {
+        if (configs.len == 0) return null;
+        if (requested_name) |wanted| {
+            for (configs) |cfg| {
+                if (std.mem.eql(u8, cfg.name, wanted)) {
+                    return managedBackendFromConfig(allocator, cfg.port, cfg.api_token);
+                }
+            }
+            return null;
+        }
+
+        const selected = self.selectManagedBackendIndex(component, configs);
+        return managedBackendFromConfig(allocator, configs[selected].port, configs[selected].api_token);
+    }
+
+    fn selectManagedBackendIndex(self: *Server, component: []const u8, configs: anytype) usize {
+        var fallback: usize = 0;
+        for (configs, 0..) |cfg, idx| {
+            if (std.mem.eql(u8, cfg.name, "default")) fallback = idx;
+            const status = self.manager.getStatus(component, cfg.name) orelse continue;
+            if (status.status == .running) return idx;
+        }
+        return fallback;
+    }
+
+    fn managedBackendFromConfig(allocator: std.mem.Allocator, port: u16, token: ?[]const u8) ?ManagedBackendConfig {
+        const url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port}) catch return null;
+        const owned_token = if (token) |value| allocator.dupe(u8, value) catch {
+            allocator.free(url);
+            return null;
+        } else null;
+        return .{
+            .url = url,
+            .token = owned_token,
+        };
+    }
+
+    fn shouldResolveManagedBackend(env_url: ?[]const u8, requested_name: ?[]const u8) bool {
+        return requested_name != null or env_url == null;
+    }
+
+    fn selectBackendUrl(env_url: ?[]const u8, managed: ?ManagedBackendConfig, requested_name: ?[]const u8) ?[]const u8 {
+        if (requested_name != null) return if (managed) |cfg| cfg.url else null;
+        return env_url orelse if (managed) |cfg| cfg.url else null;
+    }
+
+    fn selectBackendToken(env_token: ?[]const u8, managed: ?ManagedBackendConfig, requested_name: ?[]const u8) ?[]const u8 {
+        if (requested_name != null) return if (managed) |cfg| cfg.token else null;
+        return env_token orelse if (managed) |cfg| cfg.token else null;
+    }
+
     const WatchTarget = struct {
         url: ?[]const u8 = null,
         url_owned: bool = false,
@@ -705,6 +787,8 @@ pub const Server = struct {
 
     fn routeWithoutServerMutex(target: []const u8) bool {
         return instances_api.isIntegrationPath(target) or
+            instances_api.isTicketsActionPath(target) or
+            logs_api.isLogsPath(target) or
             orchestration_api.isProxyPath(target) or
             observability_api.isProxyPath(target);
     }
@@ -1018,7 +1102,7 @@ pub const Server = struct {
         if (wizard_api.isWizardPath(target)) {
             if (wizard_api.extractComponentName(target)) |comp_name| {
                 if (std.mem.eql(u8, method, "GET")) {
-                    if (wizard_api.handleGetWizard(allocator, comp_name, self.paths, self.state)) |json| {
+                    if (wizard_api.handleGetWizard(allocator, comp_name, target, self.paths, self.state)) |json| {
                         const status = if (std.mem.indexOf(u8, json, "\"error\"") != null)
                             "400 Bad Request"
                         else
@@ -1275,11 +1359,31 @@ pub const Server = struct {
         }
 
         if (orchestration_api.isProxyPath(target)) {
+            const env_boiler_url = self.getBoilerUrl();
+            const env_boiler_token = self.getBoilerToken();
+            const env_tickets_url = self.getTicketsUrl();
+            const env_tickets_token = self.getTicketsToken();
+            const requested_boiler = orchestration_api.requestedBoilerInstance(allocator, target) catch null;
+            defer if (requested_boiler) |value| allocator.free(value);
+            const requested_tickets = orchestration_api.requestedTicketsInstance(allocator, target) catch null;
+            defer if (requested_tickets) |value| allocator.free(value);
+
+            var managed_boiler = if (shouldResolveManagedBackend(env_boiler_url, requested_boiler))
+                self.resolveManagedBackend(allocator, "nullboiler", requested_boiler)
+            else
+                null;
+            defer if (managed_boiler) |*cfg| cfg.deinit(allocator);
+            var managed_tickets = if (shouldResolveManagedBackend(env_tickets_url, requested_tickets))
+                self.resolveManagedBackend(allocator, "nulltickets", requested_tickets)
+            else
+                null;
+            defer if (managed_tickets) |*cfg| cfg.deinit(allocator);
+
             const resp = orchestration_api.handle(allocator, method, target, body, .{
-                .boiler_url = self.getBoilerUrl(),
-                .boiler_token = self.getBoilerToken(),
-                .tickets_url = self.getTicketsUrl(),
-                .tickets_token = self.getTicketsToken(),
+                .boiler_url = selectBackendUrl(env_boiler_url, managed_boiler, requested_boiler),
+                .boiler_token = selectBackendToken(env_boiler_token, managed_boiler, requested_boiler),
+                .tickets_url = selectBackendUrl(env_tickets_url, managed_tickets, requested_tickets),
+                .tickets_token = selectBackendToken(env_tickets_token, managed_tickets, requested_tickets),
             });
             return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
         }
@@ -2084,7 +2188,35 @@ test "routeWithoutServerMutex keeps orchestration proxy requests off global lock
     try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration/store/search"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/observability/v1/runs"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nullclaw/demo/logs"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nulltickets/tracker-a/tickets"));
     try std.testing.expect(!Server.routeWithoutServerMutex("/api/components"));
+}
+
+test "explicit managed orchestration backend selection overrides env fallback" {
+    const allocator = std.testing.allocator;
+    var managed = Server.ManagedBackendConfig{
+        .url = try allocator.dupe(u8, "http://127.0.0.1:8081"),
+        .token = try allocator.dupe(u8, "managed-token"),
+    };
+    defer managed.deinit(allocator);
+
+    try std.testing.expect(Server.shouldResolveManagedBackend("http://env.example", "worker-a"));
+    try std.testing.expectEqualStrings(
+        "http://127.0.0.1:8081",
+        Server.selectBackendUrl("http://env.example", managed, "worker-a").?,
+    );
+    try std.testing.expectEqualStrings(
+        "managed-token",
+        Server.selectBackendToken("env-token", managed, "worker-a").?,
+    );
+    try std.testing.expectEqualStrings(
+        "http://env.example",
+        Server.selectBackendUrl("http://env.example", managed, null).?,
+    );
+    try std.testing.expectEqualStrings(
+        "env-token",
+        Server.selectBackendToken("env-token", managed, null).?,
+    );
 }
 
 test "managed NullWatch target is discovered from supervisor state" {

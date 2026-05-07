@@ -1,10 +1,35 @@
 import { orchestrationApiPaths } from '$lib/orchestration/routes';
+import { getSelectedBoilerInstance } from '$lib/orchestration/backendSelection';
 
 type RequestFn = <T>(path: string, options?: RequestInit) => Promise<T>;
 type WithQueryFn = (
   path: string,
   params: Record<string, string | number | boolean | null | undefined>,
 ) => string;
+type QueryParams = Record<string, string | number | boolean | null | undefined>;
+type BoilerOptions = { boilerInstance?: string };
+type RunListParams = {
+  status?: string;
+  workflow_id?: string;
+  limit?: number;
+  offset?: number;
+  boilerInstance?: string;
+};
+
+export type RunListPage = {
+  items: any[];
+  limit?: number;
+  offset?: number;
+  nextOffset?: number;
+  hasMore: boolean;
+};
+
+export type RunStreamHandle = {
+  close: () => void;
+  readonly closed: boolean;
+};
+
+const orchestrationStorePrefix = '/orchestration/store';
 
 function msToIso(ms: number | undefined | null): string | undefined {
   if (ms == null) return undefined;
@@ -55,6 +80,21 @@ function normalizeRun(raw: any): any {
   };
 }
 
+function normalizeRunListPage(raw: any): RunListPage {
+  const list = Array.isArray(raw) ? raw : raw?.items ?? raw?.runs ?? [];
+  return {
+    items: (list || []).map(normalizeRun),
+    limit: typeof raw?.limit === 'number' ? raw.limit : undefined,
+    offset: typeof raw?.offset === 'number' ? raw.offset : undefined,
+    nextOffset: typeof raw?.next_offset === 'number'
+      ? raw.next_offset
+      : typeof raw?.nextOffset === 'number'
+        ? raw.nextOffset
+        : undefined,
+    hasMore: Boolean(raw?.has_more ?? raw?.hasMore),
+  };
+}
+
 function normalizeCheckpoint(raw: any): any {
   if (!raw) return raw;
   return {
@@ -97,40 +137,88 @@ function normalizeStreamEvent(raw: any): { type: string; data: any; timestamp?: 
 }
 
 export function createOrchestrationApi(request: RequestFn, withQuery: WithQueryFn) {
+  function withBoilerQuery(path: string, params: QueryParams = {}, boilerInstance?: string) {
+    const selectedBoiler = path.startsWith(orchestrationStorePrefix)
+      ? ''
+      : boilerInstance ?? getSelectedBoilerInstance();
+    return withQuery(path, { ...params, boiler_instance: selectedBoiler || undefined });
+  }
+
+  async function listRunsPage(params?: RunListParams): Promise<RunListPage> {
+    const { boilerInstance, ...query } = params ?? {};
+    const raw = await request<any>(withBoilerQuery(orchestrationApiPaths.runs(), query, boilerInstance));
+    return normalizeRunListPage(raw);
+  }
+
   return {
-    listWorkflows: async () => {
-      const raw = await request<any>(orchestrationApiPaths.workflows());
+    listWorkflows: async (options?: BoilerOptions) => {
+      const raw = await request<any>(withBoilerQuery(orchestrationApiPaths.workflows(), {}, options?.boilerInstance));
       const list = Array.isArray(raw) ? raw : raw?.items ?? [];
       return list.map(normalizeWorkflow);
     },
-    getWorkflow: async (id: string) => normalizeWorkflow(await request<any>(orchestrationApiPaths.workflow(id))),
-    createWorkflow: (data: any) => request<any>(orchestrationApiPaths.workflows(), { method: 'POST', body: JSON.stringify(data) }),
-    updateWorkflow: (id: string, data: any) => request<any>(orchestrationApiPaths.workflow(id), { method: 'PUT', body: JSON.stringify(data) }),
-    deleteWorkflow: (id: string) => request<any>(orchestrationApiPaths.workflow(id), { method: 'DELETE' }),
-    validateWorkflow: async (id: string) => normalizeValidation(await request<any>(orchestrationApiPaths.workflowValidate(id), { method: 'POST' })),
-    runWorkflow: (id: string, input: any) => request<any>(orchestrationApiPaths.workflowRun(id), { method: 'POST', body: JSON.stringify(input) }),
-    listRuns: async (params?: { status?: string; workflow_id?: string }) => {
-      const raw = await request<any>(withQuery(orchestrationApiPaths.runs(), params ?? {}));
-      const list = Array.isArray(raw) ? raw : raw?.items ?? [];
-      return list.map(normalizeRun);
-    },
-    getRun: async (id: string) => normalizeRun(await request<any>(orchestrationApiPaths.run(id))),
-    cancelRun: (id: string) => request<any>(orchestrationApiPaths.runCancel(id), { method: 'POST' }),
-    resumeRun: (id: string, updates: any) => request<any>(orchestrationApiPaths.runResume(id), { method: 'POST', body: JSON.stringify({ state_updates: updates }) }),
-    forkRun: (checkpointId: string, overrides?: any) => request<any>(orchestrationApiPaths.runsFork(), { method: 'POST', body: JSON.stringify({ checkpoint_id: checkpointId, state_overrides: overrides }) }),
-    replayRun: (id: string, checkpointId: string) => request<any>(orchestrationApiPaths.runReplay(id), { method: 'POST', body: JSON.stringify({ from_checkpoint_id: checkpointId }) }),
-    injectState: (id: string, updates: any, afterStep?: string) => request<any>(orchestrationApiPaths.runState(id), { method: 'POST', body: JSON.stringify({ updates, apply_after_step: afterStep }) }),
-    listCheckpoints: async (runId: string) => {
-      const cps = await request<any[]>(orchestrationApiPaths.runCheckpoints(runId));
+    getWorkflow: async (id: string, options?: BoilerOptions) =>
+      normalizeWorkflow(await request<any>(withBoilerQuery(orchestrationApiPaths.workflow(id), {}, options?.boilerInstance))),
+    createWorkflow: (data: any, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.workflows(), {}, options?.boilerInstance), { method: 'POST', body: JSON.stringify(data) }),
+    updateWorkflow: (id: string, data: any, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.workflow(id), {}, options?.boilerInstance), { method: 'PUT', body: JSON.stringify(data) }),
+    deleteWorkflow: (id: string, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.workflow(id), {}, options?.boilerInstance), { method: 'DELETE' }),
+    validateWorkflow: async (id: string, options?: BoilerOptions) =>
+      normalizeValidation(await request<any>(withBoilerQuery(orchestrationApiPaths.workflowValidate(id), {}, options?.boilerInstance), { method: 'POST' })),
+    runWorkflow: (id: string, input: any, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.workflowRun(id), {}, options?.boilerInstance), { method: 'POST', body: JSON.stringify(input) }),
+    listRunsPage,
+    listRuns: async (params?: RunListParams) => (await listRunsPage(params)).items,
+    getRun: async (id: string, options?: BoilerOptions) =>
+      normalizeRun(await request<any>(withBoilerQuery(orchestrationApiPaths.run(id), {}, options?.boilerInstance))),
+    cancelRun: (id: string, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.runCancel(id), {}, options?.boilerInstance), { method: 'POST' }),
+    retryRun: (id: string, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.runRetry(id), {}, options?.boilerInstance), { method: 'POST' }),
+    resumeRun: (id: string, updates: any, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.runResume(id), {}, options?.boilerInstance), { method: 'POST', body: JSON.stringify({ state_updates: updates }) }),
+    forkRun: (checkpointId: string, overrides?: any, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.runsFork(), {}, options?.boilerInstance), { method: 'POST', body: JSON.stringify({ checkpoint_id: checkpointId, state_overrides: overrides }) }),
+    replayRun: (id: string, checkpointId: string, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.runReplay(id), {}, options?.boilerInstance), { method: 'POST', body: JSON.stringify({ from_checkpoint_id: checkpointId }) }),
+    injectState: (id: string, updates: any, afterStep?: string, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.runState(id), {}, options?.boilerInstance), { method: 'POST', body: JSON.stringify({ updates, apply_after_step: afterStep }) }),
+    listCheckpoints: async (runId: string, options?: BoilerOptions) => {
+      const cps = await request<any[]>(withBoilerQuery(orchestrationApiPaths.runCheckpoints(runId), {}, options?.boilerInstance));
       return (cps || []).map(normalizeCheckpoint);
     },
-    getCheckpoint: async (runId: string, cpId: string) => normalizeCheckpoint(await request<any>(orchestrationApiPaths.runCheckpoint(runId, cpId))),
-    storeList: (namespace: string) => request<any[]>(orchestrationApiPaths.storeNamespace(namespace)),
-    storeGet: (namespace: string, key: string) => request<any>(orchestrationApiPaths.storeEntry(namespace, key)),
-    storePut: (namespace: string, key: string, value: any) => request<void>(orchestrationApiPaths.storeEntry(namespace, key), { method: 'PUT', body: JSON.stringify({ value }) }),
-    storeDelete: (namespace: string, key: string) => request<void>(orchestrationApiPaths.storeEntry(namespace, key), { method: 'DELETE' }),
-    streamRun: (runId: string, onEvent: (event: { type: string; data: any; timestamp?: number }) => void) => {
+    getCheckpoint: async (runId: string, cpId: string, options?: BoilerOptions) =>
+      normalizeCheckpoint(await request<any>(withBoilerQuery(orchestrationApiPaths.runCheckpoint(runId, cpId), {}, options?.boilerInstance))),
+    getBoilerTrackerStatus: (options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.trackerStatus(), {}, options?.boilerInstance)),
+    getBoilerTrackerTasks: (options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.trackerTasks(), {}, options?.boilerInstance)),
+    getBoilerTrackerStats: (options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.trackerStats(), {}, options?.boilerInstance)),
+    refreshBoilerTracker: (options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.trackerRefresh(), {}, options?.boilerInstance), { method: 'POST' }),
+    listWorkers: (options?: BoilerOptions) =>
+      request<any[]>(withBoilerQuery(orchestrationApiPaths.workers(), {}, options?.boilerInstance)),
+    registerWorker: (data: any, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.workers(), {}, options?.boilerInstance), { method: 'POST', body: JSON.stringify(data) }),
+    deleteWorker: (id: string, options?: BoilerOptions) =>
+      request<any>(withBoilerQuery(orchestrationApiPaths.worker(id), {}, options?.boilerInstance), { method: 'DELETE' }),
+    storeList: (namespace: string, ticketsInstance?: string) =>
+      request<any[]>(withQuery(orchestrationApiPaths.storeNamespace(namespace), { tickets_instance: ticketsInstance })),
+    storeGet: (namespace: string, key: string, ticketsInstance?: string) =>
+      request<any>(withQuery(orchestrationApiPaths.storeEntry(namespace, key), { tickets_instance: ticketsInstance })),
+    storePut: (namespace: string, key: string, value: any, ticketsInstance?: string) =>
+      request<void>(withQuery(orchestrationApiPaths.storeEntry(namespace, key), { tickets_instance: ticketsInstance }), { method: 'PUT', body: JSON.stringify({ value }) }),
+    storeDelete: (namespace: string, key: string, ticketsInstance?: string) =>
+      request<void>(withQuery(orchestrationApiPaths.storeEntry(namespace, key), { tickets_instance: ticketsInstance }), { method: 'DELETE' }),
+    streamRun: (
+      runId: string,
+      onEvent: (event: { type: string; data: any; timestamp?: number }) => void,
+      options?: BoilerOptions,
+    ) => {
       let active = true;
+      let closed = false;
       let deliveredInitialSnapshot = false;
       let afterSeq = 0;
 
@@ -142,9 +230,9 @@ export function createOrchestrationApi(request: RequestFn, withQuery: WithQueryF
       const poll = async () => {
         while (active) {
           try {
-            const res = await request<any>(withQuery(orchestrationApiPaths.runStream(runId), {
+            const res = await request<any>(withBoilerQuery(orchestrationApiPaths.runStream(runId), {
               after_seq: afterSeq > 0 ? afterSeq : undefined,
-            }));
+            }, options?.boilerInstance));
             if (!active) break;
             if (res?.stream_events) {
               for (const ev of res.stream_events) emitEvent(ev);
@@ -157,6 +245,7 @@ export function createOrchestrationApi(request: RequestFn, withQuery: WithQueryF
               afterSeq = Math.max(afterSeq, res.next_stream_seq);
             }
             if (res?.status && ['completed', 'failed', 'cancelled'].includes(res.status)) {
+              active = false;
               break;
             }
           } catch {
@@ -166,10 +255,19 @@ export function createOrchestrationApi(request: RequestFn, withQuery: WithQueryF
           if (!active) break;
           await new Promise(r => setTimeout(r, 1000));
         }
+        closed = true;
       };
 
       void poll();
-      return { close: () => { active = false; } } as EventSource;
+      return {
+        close: () => {
+          active = false;
+          closed = true;
+        },
+        get closed() {
+          return closed;
+        },
+      };
     },
   };
 }

@@ -130,13 +130,23 @@ fn isImportedStandalone(
 
 fn standalonePortConfigKey(component: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, component, "nullclaw")) return "gateway.port";
-    if (std.mem.eql(u8, component, "nullwatch")) return "port";
+    if (std.mem.eql(u8, component, "nullwatch") or
+        std.mem.eql(u8, component, "nullboiler") or
+        std.mem.eql(u8, component, "nulltickets"))
+    {
+        return "port";
+    }
     return null;
 }
 
 fn isStandaloneLaunchMode(component: []const u8, launch_mode: []const u8, default_launch_mode: []const u8) bool {
     if (standalonePortConfigKey(component) == null) return false;
     if (std.mem.eql(u8, launch_mode, default_launch_mode)) return true;
+    if ((std.mem.eql(u8, component, "nullboiler") or std.mem.eql(u8, component, "nulltickets")) and
+        (std.mem.eql(u8, launch_mode, component) or std.mem.eql(u8, launch_mode, "serve")))
+    {
+        return true;
+    }
     if (std.mem.eql(u8, component, "nullwatch")) {
         return std.mem.eql(u8, launch_mode, "gateway") or
             std.mem.eql(u8, launch_mode, "nullwatch");
@@ -167,7 +177,10 @@ fn deriveImportedStandaloneSnapshot(
 
     const known = registry.findKnownComponent(component) orelse return null;
     const port_key = standalonePortConfigKey(component) orelse return null;
-    const port = readPortFromConfig(allocator, paths, component, name, port_key) orelse known.default_port;
+    const port = readPortFromConfig(allocator, paths, component, name, port_key) orelse
+        readPortFromConfig(allocator, paths, component, name, "gateway.port") orelse
+        readPortFromConfig(allocator, paths, component, name, "port") orelse
+        known.default_port;
     if (port == 0) return null;
 
     const configured_host = readStringFromConfig(allocator, paths, component, name, "host") orelse
@@ -204,13 +217,17 @@ pub fn resolve(
 test "standalone runtime metadata covers nullclaw and nullwatch" {
     try std.testing.expectEqualStrings("gateway.port", standalonePortConfigKey("nullclaw").?);
     try std.testing.expectEqualStrings("port", standalonePortConfigKey("nullwatch").?);
-    try std.testing.expect(standalonePortConfigKey("nullboiler") == null);
+    try std.testing.expectEqualStrings("port", standalonePortConfigKey("nullboiler").?);
+    try std.testing.expectEqualStrings("port", standalonePortConfigKey("nulltickets").?);
 
     try std.testing.expect(isStandaloneLaunchMode("nullclaw", "gateway", "gateway"));
     try std.testing.expect(isStandaloneLaunchMode("nullwatch", "serve", "serve"));
     try std.testing.expect(isStandaloneLaunchMode("nullwatch", "gateway", "serve"));
     try std.testing.expect(isStandaloneLaunchMode("nullwatch", "nullwatch", "serve"));
-    try std.testing.expect(!isStandaloneLaunchMode("nullboiler", "gateway", "gateway"));
+    try std.testing.expect(isStandaloneLaunchMode("nullboiler", "server", "server"));
+    try std.testing.expect(isStandaloneLaunchMode("nullboiler", "nullboiler", "server"));
+    try std.testing.expect(isStandaloneLaunchMode("nulltickets", "serve", "server"));
+    try std.testing.expect(!isStandaloneLaunchMode("nullboiler", "gateway", "server"));
 }
 
 test "readPortFromConfig accepts string ports" {

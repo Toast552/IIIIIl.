@@ -1,4 +1,6 @@
 import { createOrchestrationApi } from '$lib/api/orchestration';
+import { createNullTicketsApi } from '$lib/api/nulltickets';
+import { encodePathSegment } from '$lib/orchestration/routes';
 
 const BASE = '/api';
 
@@ -12,7 +14,7 @@ function withQuery(path: string, params: Record<string, string | number | boolea
   return query ? `${path}?${query}` : path;
 }
 
-export { encodePathSegment } from '$lib/orchestration/routes';
+export { encodePathSegment };
 
 export type LogSource = 'instance' | 'nullhub';
 export type ReportOption = { value: string; label: string };
@@ -22,8 +24,15 @@ type InstanceStartOptions = {
   launch_mode?: string;
   verbose?: boolean;
 };
+type InstanceDeleteOptions = {
+  force?: boolean;
+};
 type ObservabilityTarget = {
   watch?: string;
+};
+export type ApiRequestError = Error & {
+  status?: number;
+  body?: any;
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -39,7 +48,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
         : typeof body?.error === 'string'
           ? body.error
           : body?.error?.message || `HTTP ${res.status}`;
-    throw new Error(errMsg);
+    const error = new Error(errMsg) as ApiRequestError;
+    error.status = res.status;
+    error.body = body;
+    throw error;
   }
   if (res.status === 204) return undefined as T;
   const text = await res.text();
@@ -53,7 +65,8 @@ export const api = {
     request<any>(`/usage?window=${window}`),
   getComponents: () => request<any>('/components'),
   getInstances: () => request<any>('/instances'),
-  getWizard: (component: string) => request<any>(`/wizard/${component}`),
+  getWizard: (component: string, version = '') =>
+    request<any>(withQuery(`/wizard/${component}`, { version })),
   getVersions: (component: string) => request<any>(`/wizard/${component}/versions`),
   getWizardModels: (component: string, provider: string, apiKey = '') =>
     request<any>(`/wizard/${component}/models`, {
@@ -80,8 +93,10 @@ export const api = {
       method: 'POST',
       body: options ? JSON.stringify(options) : undefined
     }),
-  deleteInstance: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}`, { method: 'DELETE' }),
+  deleteInstance: (c: string, n: string, options?: InstanceDeleteOptions) =>
+    request<any>(withQuery(`/instances/${c}/${n}`, { force: options?.force ? 1 : undefined }), {
+      method: 'DELETE'
+    }),
   getConfig: (c: string, n: string) => request<any>(`/instances/${c}/${n}/config`),
   getProviderHealth: (c: string, n: string) =>
     request<any>(`/instances/${c}/${n}/provider-health`),
@@ -141,6 +156,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  ...createNullTicketsApi((c, n, payload) =>
+    request<any>(`/instances/${c}/${n}/tickets`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  ),
   putConfig: (c: string, n: string, config: any) =>
     request<any>(`/instances/${c}/${n}/config`, { method: 'PUT', body: JSON.stringify(config) }),
   getLogs: (c: string, n: string, lines = 100, source: LogSource = 'instance') =>

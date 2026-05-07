@@ -4,6 +4,7 @@
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
   import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
   import CheckpointTimeline from '$lib/components/orchestration/CheckpointTimeline.svelte';
   import StateInspector from '$lib/components/orchestration/StateInspector.svelte';
 
@@ -18,17 +19,26 @@
   let forking = $state(false);
   let error = $state<string | null>(null);
 
-  onMount(async () => {
+  async function loadCheckpoints() {
+    loading = true;
+    error = null;
+    checkpoints = [];
+    selectedCp = '';
+    selectedState = null;
     try {
       checkpoints = await api.listCheckpoints(runId) || [];
       if (checkpoints.length > 0) {
-        selectCheckpoint(checkpoints[checkpoints.length - 1].id);
+        await selectCheckpoint(checkpoints[checkpoints.length - 1].id);
       }
     } catch (e) {
       error = (e as Error).message;
     } finally {
       loading = false;
     }
+  }
+
+  onMount(() => {
+    void loadCheckpoints();
   });
 
   async function selectCheckpoint(cpId: string) {
@@ -81,6 +91,7 @@
       <span class="page-title">Fork</span>
     </div>
     <div class="toolbar-actions">
+      <BoilerInstanceSelector onChange={() => { void loadCheckpoints(); }} />
       <button
         class="fork-btn"
         onclick={forkRun}
@@ -177,6 +188,7 @@
   }
   .toolbar-actions {
     display: flex;
+    align-items: center;
     gap: 0.5rem;
   }
   .fork-btn {

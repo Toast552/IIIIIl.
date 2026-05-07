@@ -194,10 +194,10 @@ pub fn install(
         parsed_manifest = manifest_mod.parseManifest(allocator, json) catch null;
     } else |_| {}
 
-    // Use parsed manifest values or fall back to registry defaults
+    // Use parsed manifest values or fall back to registry defaults.
     var owned_launch_command: ?[]const u8 = null;
     defer if (owned_launch_command) |value| allocator.free(value);
-    const launch_command = if (parsed_manifest) |pm| blk: {
+    const raw_launch_command = if (parsed_manifest) |pm| blk: {
         owned_launch_command = launch_args_mod.fromManifestLaunch(
             allocator,
             opts.component,
@@ -206,6 +206,7 @@ pub fn install(
         ) catch null;
         break :blk owned_launch_command orelse comp.default_launch_command;
     } else comp.default_launch_command;
+    const launch_command = registry.normalizeLaunchCommand(opts.component, raw_launch_command);
     const health_endpoint = if (parsed_manifest) |pm| pm.value.health.endpoint else comp.default_health_endpoint;
     const default_port = if (parsed_manifest) |pm| (if (pm.value.ports.len > 0) pm.value.ports[0].default else comp.default_port) else comp.default_port;
     defer if (parsed_manifest) |pm| pm.deinit();
@@ -485,7 +486,7 @@ fn persistAndStartInstance(
     };
 }
 
-fn findNextAvailablePort(
+pub fn findNextAvailablePort(
     allocator: std.mem.Allocator,
     start: u16,
     paths: paths_mod.Paths,
@@ -541,7 +542,8 @@ fn readConfiguredInstancePort(
     const config_path = paths.instanceConfig(allocator, component, instance_name) catch return null;
     defer allocator.free(config_path);
 
-    const manifest_info = readManifestPortInfo(allocator, paths, component, version);
+    var manifest_info = readManifestPortInfo(allocator, paths, component, version);
+    defer manifest_info.deinit(allocator);
     if (manifest_info.port_from_config.len > 0) {
         if (readPortFromConfigPath(allocator, config_path, manifest_info.port_from_config)) |port| {
             return port;
@@ -555,7 +557,13 @@ fn readConfiguredInstancePort(
 
 const ManifestPortInfo = struct {
     port_from_config: []const u8 = "",
+    owns_port_from_config: bool = false,
     default_port: ?u16 = null,
+
+    fn deinit(self: *ManifestPortInfo, allocator: std.mem.Allocator) void {
+        if (self.owns_port_from_config) allocator.free(self.port_from_config);
+        self.* = .{};
+    }
 };
 
 fn readManifestPortInfo(
@@ -579,8 +587,14 @@ fn readManifestPortInfo(
     };
     defer parsed_manifest.deinit();
 
+    const raw_port_from_config = parsed_manifest.value.health.port_from_config;
+    const port_from_config = if (raw_port_from_config.len > 0)
+        allocator.dupe(u8, raw_port_from_config) catch ""
+    else
+        "";
     return .{
-        .port_from_config = parsed_manifest.value.health.port_from_config,
+        .port_from_config = port_from_config,
+        .owns_port_from_config = port_from_config.len > 0,
         .default_port = if (parsed_manifest.value.ports.len > 0) parsed_manifest.value.ports[0].default else null,
     };
 }
