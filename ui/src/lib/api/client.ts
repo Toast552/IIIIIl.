@@ -24,8 +24,15 @@ type InstanceStartOptions = {
   launch_mode?: string;
   verbose?: boolean;
 };
+type InstanceDeleteOptions = {
+  force?: boolean;
+};
 type ObservabilityTarget = {
   watch?: string;
+};
+export type ApiRequestError = Error & {
+  status?: number;
+  body?: any;
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -41,7 +48,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
         : typeof body?.error === 'string'
           ? body.error
           : body?.error?.message || `HTTP ${res.status}`;
-    throw new Error(errMsg);
+    const error = new Error(errMsg) as ApiRequestError;
+    error.status = res.status;
+    error.body = body;
+    throw error;
   }
   if (res.status === 204) return undefined as T;
   const text = await res.text();
@@ -83,8 +93,10 @@ export const api = {
       method: 'POST',
       body: options ? JSON.stringify(options) : undefined
     }),
-  deleteInstance: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}`, { method: 'DELETE' }),
+  deleteInstance: (c: string, n: string, options?: InstanceDeleteOptions) =>
+    request<any>(withQuery(`/instances/${c}/${n}`, { force: options?.force ? 1 : undefined }), {
+      method: 'DELETE'
+    }),
   getConfig: (c: string, n: string) => request<any>(`/instances/${c}/${n}/config`),
   getProviderHealth: (c: string, n: string) =>
     request<any>(`/instances/${c}/${n}/provider-health`),

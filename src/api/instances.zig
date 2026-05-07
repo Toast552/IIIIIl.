@@ -890,6 +890,19 @@ fn ensureObjectField(
     return &parent.getPtr(key).?.object;
 }
 
+fn writeJsonConfigValue(allocator: std.mem.Allocator, config_path: []const u8, value: std.json.Value) !void {
+    const rendered = try std.json.Stringify.valueAlloc(allocator, value, .{
+        .whitespace = .indent_2,
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(rendered);
+
+    const out = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer out.close();
+    try out.writeAll(rendered);
+    try out.writeAll("\n");
+}
+
 fn resolvePathFromConfig(allocator: std.mem.Allocator, config_path: []const u8, value: []const u8) ![]const u8 {
     if (value.len == 0 or std.fs.path.isAbsolute(value)) return allocator.dupe(u8, value);
     const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
@@ -3546,13 +3559,277 @@ pub fn handleSkills(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
     });
 }
 
+const DeleteDependent = struct {
+    component: []const u8,
+    name: []const u8,
+    relation: []const u8,
+};
+
+const DeleteDependencyList = struct {
+    items: std.ArrayListUnmanaged(DeleteDependent) = .empty,
+
+    fn append(
+        self: *DeleteDependencyList,
+        allocator: std.mem.Allocator,
+        component: []const u8,
+        name: []const u8,
+        relation: []const u8,
+    ) !void {
+        const owned_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_name);
+        try self.items.append(allocator, .{
+            .component = component,
+            .name = owned_name,
+            .relation = relation,
+        });
+    }
+
+    fn deinit(self: *DeleteDependencyList, allocator: std.mem.Allocator) void {
+        for (self.items.items) |dep| allocator.free(dep.name);
+        self.items.deinit(allocator);
+        self.* = .{};
+    }
+};
+
+const DeleteImpact = struct {
+    dependents: DeleteDependencyList = .{},
+    nullwatch: ?integration_mod.NullWatchConfig = null,
+    nulltickets: ?integration_mod.NullTicketsConfig = null,
+
+    fn deinit(self: *DeleteImpact, allocator: std.mem.Allocator) void {
+        self.dependents.deinit(allocator);
+        if (self.nullwatch) |*cfg| integration_mod.deinitNullWatchConfig(allocator, cfg);
+        if (self.nulltickets) |*cfg| integration_mod.deinitNullTicketsConfig(allocator, cfg);
+        self.* = .{};
+    }
+};
+
+fn collectDeleteImpact(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+) !DeleteImpact {
+    var impact: DeleteImpact = .{};
+    errdefer impact.deinit(allocator);
+
+    if (std.mem.eql(u8, component, "nullwatch")) {
+        impact.nullwatch = try integration_mod.loadNullWatchConfig(allocator, paths, name) orelse return impact;
+        const watch_cfg = impact.nullwatch.?;
+
+        if (try s.instanceNames("nullclaw")) |claw_names| {
+            defer s.allocator.free(claw_names);
+            for (claw_names) |claw_name| {
+                var link = integration_mod.loadNullClawTelemetryLink(allocator, paths, claw_name) catch |err| switch (err) {
+                    error.NotFound => continue,
+                    else => return err,
+                };
+                defer link.deinit(allocator);
+
+                if (integration_mod.findNullWatchByEndpoint(&.{watch_cfg}, link.endpoint) != null) {
+                    try impact.dependents.append(allocator, "nullclaw", claw_name, "telemetry");
+                }
+            }
+        }
+    } else if (std.mem.eql(u8, component, "nulltickets")) {
+        impact.nulltickets = try integration_mod.loadNullTicketsConfig(allocator, paths, name) orelse return impact;
+        const tickets_cfg = impact.nulltickets.?;
+
+        if (try s.instanceNames("nullboiler")) |boiler_names| {
+            defer s.allocator.free(boiler_names);
+            for (boiler_names) |boiler_name| {
+                var boiler_cfg = try integration_mod.loadNullBoilerConfig(allocator, paths, boiler_name) orelse continue;
+                defer integration_mod.deinitNullBoilerConfig(allocator, &boiler_cfg);
+
+                if (integration_mod.matchNullTicketsTarget(boiler_cfg, &.{tickets_cfg}) != null) {
+                    try impact.dependents.append(allocator, "nullboiler", boiler_name, "tracker");
+                }
+            }
+        }
+    }
+
+    return impact;
+}
+
+fn deleteDependencyConflict(allocator: std.mem.Allocator, dependents: []const DeleteDependent) ApiResponse {
+    const body = std.json.Stringify.valueAlloc(allocator, .{
+        .@"error" = "instance has dependent links",
+        .force_required = true,
+        .dependents = dependents,
+    }, .{}) catch return helpers.serverError();
+
+    return .{
+        .status = "409 Conflict",
+        .content_type = "application/json",
+        .body = body,
+    };
+}
+
+fn unlinkNullClawTelemetryForDeletedWatch(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    claw_name: []const u8,
+    watch_cfg: integration_mod.NullWatchConfig,
+) !bool {
+    var link = integration_mod.loadNullClawTelemetryLink(allocator, paths, claw_name) catch |err| switch (err) {
+        error.NotFound => return false,
+        else => return err,
+    };
+    defer link.deinit(allocator);
+    if (integration_mod.findNullWatchByEndpoint(&.{watch_cfg}, link.endpoint) == null) return false;
+
+    const config_path = try paths.instanceConfig(allocator, "nullclaw", claw_name);
+    defer allocator.free(config_path);
+    const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer file.close();
+
+    const config_bytes = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(config_bytes);
+
+    var parsed_config = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed_config.deinit();
+    if (parsed_config.value != .object) return error.InvalidConfig;
+
+    if (parsed_config.value.object.getPtr("diagnostics")) |diagnostics_value| {
+        if (diagnostics_value.* == .object) {
+            if (jsonString(diagnostics_value.object, "backend")) |backend| {
+                if (std.mem.eql(u8, backend, "otel") or std.mem.eql(u8, backend, "otlp")) {
+                    try diagnostics_value.object.put(allocator, "backend", .{ .string = "jsonl" });
+                }
+            }
+            _ = diagnostics_value.object.swapRemove("otel");
+        }
+    }
+
+    try writeJsonConfigValue(allocator, config_path, parsed_config.value);
+    return true;
+}
+
+fn unlinkNullBoilerTrackerForDeletedTickets(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    boiler_name: []const u8,
+    tickets_cfg: integration_mod.NullTicketsConfig,
+) !bool {
+    var boiler_cfg = try integration_mod.loadNullBoilerConfig(allocator, paths, boiler_name) orelse return false;
+    defer integration_mod.deinitNullBoilerConfig(allocator, &boiler_cfg);
+    if (integration_mod.matchNullTicketsTarget(boiler_cfg, &.{tickets_cfg}) == null) return false;
+
+    const config_path = try paths.instanceConfig(allocator, "nullboiler", boiler_name);
+    defer allocator.free(config_path);
+    const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer file.close();
+
+    const config_bytes = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(config_bytes);
+
+    var parsed_config = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed_config.deinit();
+    if (parsed_config.value != .object) return error.InvalidConfig;
+
+    _ = parsed_config.value.object.swapRemove("tracker");
+    try writeJsonConfigValue(allocator, config_path, parsed_config.value);
+    return true;
+}
+
+fn unlinkDeleteImpact(allocator: std.mem.Allocator, paths: paths_mod.Paths, component: []const u8, impact: DeleteImpact) !void {
+    if (std.mem.eql(u8, component, "nullwatch")) {
+        const watch_cfg = impact.nullwatch orelse return;
+        for (impact.dependents.items.items) |dep| {
+            if (!std.mem.eql(u8, dep.component, "nullclaw")) continue;
+            _ = try unlinkNullClawTelemetryForDeletedWatch(allocator, paths, dep.name, watch_cfg);
+        }
+    } else if (std.mem.eql(u8, component, "nulltickets")) {
+        const tickets_cfg = impact.nulltickets orelse return;
+        for (impact.dependents.items.items) |dep| {
+            if (!std.mem.eql(u8, dep.component, "nullboiler")) continue;
+            _ = try unlinkNullBoilerTrackerForDeletedTickets(allocator, paths, dep.name, tickets_cfg);
+        }
+    }
+}
+
+fn restartRunningDeleteDependents(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    manager: *manager_mod.Manager,
+    paths: paths_mod.Paths,
+    impact: DeleteImpact,
+) void {
+    for (impact.dependents.items.items) |dep| {
+        const status = manager.getStatus(dep.component, dep.name) orelse continue;
+        if (status.status != .running) continue;
+
+        const resp = handleRestart(allocator, s, manager, paths, dep.component, dep.name, "");
+        if (!std.mem.eql(u8, resp.status, "200 OK")) {
+            std.log.warn("unlinked dependent {s}/{s} but failed to restart after delete: {s}", .{
+                dep.component,
+                dep.name,
+                resp.status,
+            });
+        }
+    }
+}
+
+fn restoreDeletedInstance(
+    s: *state_mod.State,
+    component: []const u8,
+    name: []const u8,
+    rollback_version: []const u8,
+    rollback_auto_start: bool,
+    rollback_launch_mode: []const u8,
+    rollback_verbose: bool,
+    inst_dir: []const u8,
+    hidden_inst_dir: ?[]const u8,
+) void {
+    _ = s.addInstance(component, name, .{
+        .version = rollback_version,
+        .auto_start = rollback_auto_start,
+        .launch_mode = rollback_launch_mode,
+        .verbose = rollback_verbose,
+    }) catch {};
+    _ = s.save() catch {};
+    if (hidden_inst_dir) |path| {
+        std_compat.fs.renameAbsolute(path, inst_dir) catch {};
+    }
+}
+
 /// DELETE /api/instances/{component}/{name}
-pub fn handleDelete(allocator: std.mem.Allocator, s: *state_mod.State, manager: *manager_mod.Manager, paths: paths_mod.Paths, component: []const u8, name: []const u8) ApiResponse {
+pub fn handleDelete(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    manager: *manager_mod.Manager,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    target: []const u8,
+) ApiResponse {
     const existing = s.getInstance(component, name) orelse return notFound();
     const rollback_version = allocator.dupe(u8, existing.version) catch return helpers.serverError();
     defer allocator.free(rollback_version);
+    const rollback_auto_start = existing.auto_start;
     const rollback_launch_mode = allocator.dupe(u8, existing.launch_mode) catch return helpers.serverError();
     defer allocator.free(rollback_launch_mode);
+    const rollback_verbose = existing.verbose;
+
+    var delete_impact = collectDeleteImpact(allocator, s, paths, component, name) catch return helpers.serverError();
+    defer delete_impact.deinit(allocator);
+    const force = query_api.boolValue(target, "force");
+    if (delete_impact.dependents.items.items.len > 0 and !force) {
+        return deleteDependencyConflict(allocator, delete_impact.dependents.items.items);
+    }
 
     const inst_dir = paths.instanceDir(allocator, component, name) catch return helpers.serverError();
     defer allocator.free(inst_dir);
@@ -3568,18 +3845,18 @@ pub fn handleDelete(allocator: std.mem.Allocator, s: *state_mod.State, manager: 
         return notFound();
     }
     s.save() catch {
-        _ = s.addInstance(component, name, .{
-            .version = rollback_version,
-            .auto_start = existing.auto_start,
-            .launch_mode = rollback_launch_mode,
-            .verbose = existing.verbose,
-        }) catch {};
-        _ = s.save() catch {};
-        if (hidden_inst_dir) |path| {
-            std_compat.fs.renameAbsolute(path, inst_dir) catch {};
-        }
+        restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, inst_dir, hidden_inst_dir);
         return helpers.serverError();
     };
+
+    if (delete_impact.dependents.items.items.len > 0) {
+        unlinkDeleteImpact(allocator, paths, component, delete_impact) catch {
+            restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, inst_dir, hidden_inst_dir);
+            _ = s.save() catch {};
+            return helpers.serverError();
+        };
+        restartRunningDeleteDependents(allocator, s, manager, paths, delete_impact);
+    }
 
     if (hidden_inst_dir) |path| {
         std_compat.fs.deleteTreeAbsolute(path) catch |err| {
@@ -4618,7 +4895,7 @@ pub fn dispatch(
 
     // No action — CRUD on the instance itself.
     if (std.mem.eql(u8, method, "GET")) return handleGet(allocator, s, manager, paths, parsed.component, parsed.name);
-    if (std.mem.eql(u8, method, "DELETE")) return handleDelete(allocator, s, manager, paths, parsed.component, parsed.name);
+    if (std.mem.eql(u8, method, "DELETE")) return handleDelete(allocator, s, manager, paths, parsed.component, parsed.name, target);
     if (std.mem.eql(u8, method, "PATCH")) return handlePatch(s, parsed.component, parsed.name, body);
 
     return methodNotAllowed();
@@ -5349,7 +5626,7 @@ test "handleDelete removes instance" {
 
     try s.addInstance("nullclaw", "my-agent", .{ .version = "1.0.0" });
 
-    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent");
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent", "/api/instances/nullclaw/my-agent");
     try std.testing.expectEqualStrings("200 OK", resp.status);
     try std.testing.expectEqualStrings("{\"status\":\"deleted\"}", resp.body);
 
@@ -5374,7 +5651,7 @@ test "handleDelete removes instance directory from active path" {
     const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "my-agent");
     defer allocator.free(inst_dir);
 
-    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent");
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent", "/api/instances/nullclaw/my-agent");
     try std.testing.expectEqualStrings("200 OK", resp.status);
 
     std_compat.fs.accessAbsolute(inst_dir, .{}) catch |err| switch (err) {
@@ -5403,7 +5680,7 @@ test "handleDelete restores instance when state save fails" {
     const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "my-agent");
     defer allocator.free(inst_dir);
 
-    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent");
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent", "/api/instances/nullclaw/my-agent");
     try std.testing.expectEqualStrings("500 Internal Server Error", resp.status);
     try std.testing.expect(s.getInstance("nullclaw", "my-agent") != null);
     try std_compat.fs.accessAbsolute(inst_dir, .{});
@@ -5420,8 +5697,125 @@ test "handleDelete returns 404 for missing instance" {
     var mctx = TestManagerCtx.init(allocator);
     defer mctx.deinit(allocator);
 
-    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nope", "nope");
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nope", "nope", "/api/instances/nope/nope");
     try std.testing.expectEqualStrings("404 Not Found", resp.status);
+}
+
+test "handleDelete blocks nulltickets while nullboiler is linked" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nulltickets", "tracker-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullboiler", "boiler-a", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nulltickets", "tracker-a", "{\"port\":7711,\"api_token\":\"admin-token\"}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullboiler", "boiler-a", "{\"port\":8811,\"tracker\":{\"url\":\"http://127.0.0.1:7711\",\"api_token\":\"admin-token\"}}");
+
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nulltickets", "tracker-a", "/api/instances/nulltickets/tracker-a");
+    try std.testing.expectEqualStrings("409 Conflict", resp.status);
+    defer allocator.free(resp.body);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"force_required\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"name\":\"boiler-a\"") != null);
+    try std.testing.expect(s.getInstance("nulltickets", "tracker-a") != null);
+}
+
+test "handleDelete force unlinks nullboiler before deleting nulltickets" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nulltickets", "tracker-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullboiler", "boiler-a", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nulltickets", "tracker-a", "{\"port\":7711,\"api_token\":\"admin-token\"}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullboiler", "boiler-a", "{\"port\":8811,\"tracker\":{\"url\":\"http://127.0.0.1:7711\",\"api_token\":\"admin-token\",\"agent_id\":\"worker\"}}");
+
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nulltickets", "tracker-a", "/api/instances/nulltickets/tracker-a?force=1");
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(s.getInstance("nulltickets", "tracker-a") == null);
+    try std.testing.expect(s.getInstance("nullboiler", "boiler-a") != null);
+
+    const config_path = try mctx.paths.instanceConfig(allocator, "nullboiler", "boiler-a");
+    defer allocator.free(config_path);
+    const config_bytes = try std.fs.readFileAbsolute(allocator, config_path, 1024 * 1024);
+    defer allocator.free(config_bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("tracker") == null);
+}
+
+test "handleDelete blocks nullwatch while nullclaw telemetry is linked" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "observer-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "agent-a", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "observer-a", "{\"port\":7712,\"api_token\":\"watch-token\"}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "agent-a", "{\"diagnostics\":{\"backend\":\"otel\",\"otel\":{\"endpoint\":\"http://127.0.0.1:7712\",\"service_name\":\"nullclaw/agent-a\"}}}");
+
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullwatch", "observer-a", "/api/instances/nullwatch/observer-a");
+    try std.testing.expectEqualStrings("409 Conflict", resp.status);
+    defer allocator.free(resp.body);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"force_required\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"name\":\"agent-a\"") != null);
+    try std.testing.expect(s.getInstance("nullwatch", "observer-a") != null);
+}
+
+test "handleDelete force unlinks nullclaw telemetry before deleting nullwatch" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "observer-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "agent-a", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "observer-a", "{\"port\":7712,\"api_token\":\"watch-token\"}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "agent-a", "{\"diagnostics\":{\"backend\":\"otel\",\"log_tool_calls\":true,\"otel\":{\"endpoint\":\"http://127.0.0.1:7712\",\"service_name\":\"nullclaw/agent-a\",\"headers\":{\"Authorization\":\"Bearer watch-token\"}}}}");
+
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullwatch", "observer-a", "/api/instances/nullwatch/observer-a?force=1");
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(s.getInstance("nullwatch", "observer-a") == null);
+    try std.testing.expect(s.getInstance("nullclaw", "agent-a") != null);
+
+    const config_path = try mctx.paths.instanceConfig(allocator, "nullclaw", "agent-a");
+    defer allocator.free(config_path);
+    const config_bytes = try std.fs.readFileAbsolute(allocator, config_path, 1024 * 1024);
+    defer allocator.free(config_bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    const diagnostics = parsed.value.object.get("diagnostics").?.object;
+    try std.testing.expectEqualStrings("jsonl", diagnostics.get("backend").?.string);
+    try std.testing.expect(diagnostics.get("log_tool_calls").?.bool);
+    try std.testing.expect(diagnostics.get("otel") == null);
 }
 
 test "handlePatch updates auto_start" {

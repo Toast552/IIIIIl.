@@ -11,7 +11,7 @@
   import InstanceSkillsPanel from "$lib/components/InstanceSkillsPanel.svelte";
   import NullBoilerPanel from "$lib/components/NullBoilerPanel.svelte";
   import NullTicketsPanel from "$lib/components/NullTicketsPanel.svelte";
-  import { api } from "$lib/api/client";
+  import { api, type ApiRequestError } from "$lib/api/client";
   import {
     orchestrationUiRoutes,
     withBoilerInstance,
@@ -963,13 +963,40 @@
       loading = false;
     }
   }
+  function formatDeleteDependents(body: any): string {
+    const dependents = Array.isArray(body?.dependents) ? body.dependents : [];
+    if (dependents.length === 0) return "linked instances";
+    return dependents
+      .map((dep: any) => {
+        const id = `${dep?.component || "instance"}/${dep?.name || "unknown"}`;
+        return dep?.relation ? `${id} (${dep.relation})` : id;
+      })
+      .join(", ");
+  }
   async function remove() {
     if (confirm("Are you sure you want to delete this instance?")) {
       loading = true;
       try {
         await api.deleteInstance(component, name);
-        window.location.href = "/";
+        await goto("/");
       } catch (e) {
+        const error = e as ApiRequestError;
+        if (error.status === 409 && error.body?.force_required) {
+          const dependents = formatDeleteDependents(error.body);
+          if (
+            confirm(
+              `This instance is linked by ${dependents}. Delete it anyway and unlink those references?`,
+            )
+          ) {
+            try {
+              await api.deleteInstance(component, name, { force: true });
+              await goto("/");
+            } catch (forceError) {
+              console.error(forceError);
+            }
+          }
+          return;
+        }
         console.error(e);
       } finally {
         loading = false;
