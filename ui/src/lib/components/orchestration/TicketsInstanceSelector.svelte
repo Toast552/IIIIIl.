@@ -1,8 +1,8 @@
 <script lang="ts">
   import ManagedInstanceSelector from "./ManagedInstanceSelector.svelte";
   import {
-    getSelectedBoilerInstance,
-    setSelectedBoilerInstance,
+    getSelectedTicketsInstance,
+    setSelectedTicketsInstance,
   } from "$lib/orchestration/backendSelection";
 
   let {
@@ -13,9 +13,9 @@
 </script>
 
 <ManagedInstanceSelector
-  component="nullboiler"
-  label="NullBoiler"
-  getSelected={getSelectedBoilerInstance}
-  setSelected={setSelectedBoilerInstance}
+  component="nulltickets"
+  label="NullTickets"
+  getSelected={getSelectedTicketsInstance}
+  setSelected={setSelectedTicketsInstance}
   {onChange}
 />

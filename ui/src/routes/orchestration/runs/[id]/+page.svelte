@@ -50,6 +50,7 @@
   }
 
   function connectStream() {
+    eventSource?.close();
     try {
       eventSource = api.streamRun(id, (event) => {
         events = [...events, { ...event, timestamp: event.timestamp ?? Date.now() / 1000 }];
@@ -61,6 +62,18 @@
     } catch {
       // SSE not available, rely on polling
     }
+  }
+
+  function handleBoilerChange() {
+    loading = true;
+    error = null;
+    events = [];
+    run = null;
+    previousState = null;
+    workflow = { nodes: {}, edges: [] };
+    nodeStatus = {};
+    void loadRun();
+    connectStream();
   }
 
   onMount(() => {
@@ -123,7 +136,7 @@
       {/if}
     </div>
     <div class="toolbar-actions">
-      <BoilerInstanceSelector />
+      <BoilerInstanceSelector onChange={handleBoilerChange} />
       {#if isActive}
         <button class="tool-btn cancel" onclick={cancelRun}>Cancel</button>
       {/if}

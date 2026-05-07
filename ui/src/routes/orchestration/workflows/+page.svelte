@@ -47,7 +47,7 @@
   <div class="header">
     <h1>Workflows</h1>
     <div class="header-actions">
-      <BoilerInstanceSelector />
+      <BoilerInstanceSelector onChange={() => { loading = true; error = null; void loadWorkflows(); }} />
       <a href={orchestrationUiRoutes.newWorkflow()} class="action-btn">+ New Workflow</a>
     </div>
   </div>

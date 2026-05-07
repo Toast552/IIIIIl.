@@ -67,7 +67,7 @@
   <div class="header">
     <h1>Orchestration</h1>
     <div class="header-actions">
-      <BoilerInstanceSelector />
+      <BoilerInstanceSelector onChange={() => { loading = true; error = null; void loadRuns(); }} />
       <a href={orchestrationUiRoutes.workflows()} class="action-btn">New Run</a>
     </div>
   </div>

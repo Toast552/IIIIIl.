@@ -69,7 +69,7 @@
 <div class="page">
   <div class="header">
     <h1>Runs</h1>
-    <BoilerInstanceSelector />
+    <BoilerInstanceSelector onChange={() => { loading = true; error = null; void loadData(); }} />
   </div>
 
   {#if error}

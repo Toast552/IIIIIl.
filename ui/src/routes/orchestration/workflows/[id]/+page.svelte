@@ -28,19 +28,35 @@
   let validating = $state(false);
   let validationResult = $state<{ valid: boolean; errors?: string[] } | null>(null);
 
-  onMount(async () => {
-    if (!isNew) {
-      try {
-        const wf = await api.getWorkflow(id);
-        parsedWorkflow = wf;
-        jsonValue = JSON.stringify(wf, null, 2);
-        error = null;
-      } catch (e) {
-        error = (e as Error).message;
-      }
+  async function loadWorkflow() {
+    loading = true;
+    error = null;
+    validationResult = null;
+    if (isNew) {
+      parsedWorkflow = emptyWorkflow;
+      jsonValue = JSON.stringify(emptyWorkflow, null, 2);
+      loading = false;
+      return;
     }
-    loading = false;
+
+    try {
+      const wf = await api.getWorkflow(id);
+      parsedWorkflow = wf;
+      jsonValue = JSON.stringify(wf, null, 2);
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      loading = false;
+    }
+  }
+
+  onMount(() => {
+    void loadWorkflow();
   });
+
+  function handleBoilerChange() {
+    void loadWorkflow();
+  }
 
   function onJsonChange() {
     try {
@@ -109,7 +125,7 @@
       <span class="page-title">{isNew ? 'New Workflow' : (parsedWorkflow?.name || id)}</span>
     </div>
     <div class="toolbar-actions">
-      <BoilerInstanceSelector />
+      <BoilerInstanceSelector onChange={handleBoilerChange} />
       {#if !isNew}
         <button class="tool-btn" onclick={validate} disabled={validating || !!parseError}>
           {validating ? 'Validating...' : 'Validate'}

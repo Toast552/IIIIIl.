@@ -7,7 +7,9 @@
   let instances = $state<Record<string, any>>({});
   let installedComponents = $state<Record<string, any>>({});
   let currentPath = $derived($page.url.pathname);
-  let showOrchestration = $derived(Boolean(installedComponents["nullboiler"]?.installed));
+  let showBoilerOrchestration = $derived(Boolean(installedComponents["nullboiler"]?.installed));
+  let showTicketsStore = $derived(Boolean(installedComponents["nulltickets"]?.installed));
+  let showStore = $derived(showBoilerOrchestration || showTicketsStore);
 
   async function loadSidebarState() {
     const [statusResult, componentsResult] = await Promise.allSettled([
@@ -65,13 +67,17 @@
     {/each}
   </div>
 
-  {#if showOrchestration}
+  {#if showStore}
     <div class="nav-section">
       <h3>Orchestration</h3>
-      <a href={orchestrationUiRoutes.dashboard()} class:active={currentPath === orchestrationUiRoutes.dashboard()}>Dashboard</a>
-      <a href={orchestrationUiRoutes.workflows()} class:active={currentPath.startsWith(orchestrationUiRoutes.workflows())}>Workflows</a>
-      <a href={orchestrationUiRoutes.runs()} class:active={currentPath.startsWith(orchestrationUiRoutes.runs())}>Runs</a>
-      <a href={orchestrationUiRoutes.store()} class:active={currentPath.startsWith(orchestrationUiRoutes.store())}>Store</a>
+      {#if showBoilerOrchestration}
+        <a href={orchestrationUiRoutes.dashboard()} class:active={currentPath === orchestrationUiRoutes.dashboard()}>Dashboard</a>
+        <a href={orchestrationUiRoutes.workflows()} class:active={currentPath.startsWith(orchestrationUiRoutes.workflows())}>Workflows</a>
+        <a href={orchestrationUiRoutes.runs()} class:active={currentPath.startsWith(orchestrationUiRoutes.runs())}>Runs</a>
+      {/if}
+      {#if showStore}
+        <a href={orchestrationUiRoutes.store()} class:active={currentPath.startsWith(orchestrationUiRoutes.store())}>Store</a>
+      {/if}
     </div>
   {/if}
 
