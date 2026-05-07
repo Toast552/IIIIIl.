@@ -927,6 +927,29 @@ test "status reporting for manually-added instance" {
     try std.testing.expectEqual(@as(u32, 1), s.health_consecutive_failures);
 }
 
+test "adoptInstance returns false for dead persisted pid" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    var runtime = runtime_state.PersistedRuntime{
+        .pid = 99999999,
+        .port = 0,
+        .health_endpoint = try allocator.dupe(u8, "/health"),
+        .binary_path = try allocator.dupe(u8, "/bin/sleep"),
+        .launch_command = try allocator.dupe(u8, "/bin/sleep"),
+        .launch_args = try allocator.alloc([]u8, 1),
+    };
+    defer runtime.deinit(allocator);
+    runtime.launch_args[0] = try allocator.dupe(u8, "60");
+
+    try std.testing.expect(!(try mgr.adoptInstance("comp", "stale", runtime)));
+    try std.testing.expect(mgr.getStatus("comp", "stale") == null);
+}
+
 test "restart preserves launch args with spaces" {
     const builtin = @import("builtin");
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
@@ -1284,4 +1307,29 @@ test "tick: running instance with dead pid transitions to restarting" {
 
     const inst = mgr.instances.get("comp/crashed").?;
     try std.testing.expectEqual(Status.restarting, inst.status);
+}
+
+test "tick: running instance with null pid transitions to restarting" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "comp", "pid-lost" });
+    try mgr.instances.put(key, .{
+        .component = "comp",
+        .name = "pid-lost",
+        .status = .running,
+        .pid = null,
+        .port = 0,
+    });
+
+    mgr.tick();
+
+    const inst = mgr.instances.get("comp/pid-lost").?;
+    try std.testing.expectEqual(Status.restarting, inst.status);
+    try std.testing.expect(inst.last_restart_attempt != null);
+    try std.testing.expectEqual(@as(u32, 0), inst.health_consecutive_failures);
 }
