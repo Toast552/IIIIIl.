@@ -1,11 +1,18 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { api } from '$lib/api/client';
+  import {
+    getSelectedTicketsInstance,
+    setSelectedTicketsInstance,
+  } from '$lib/orchestration/backendSelection';
 
   let namespace = $state('');
   let browsedNamespace = $state('');
   let entries = $state<any[]>([]);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  let ticketInstances = $state<any[]>([]);
+  let selectedTicketsInstance = $state('');
 
   // Selected entry detail modal
   let selectedEntry = $state<{ key: string; value: any } | null>(null);
@@ -18,6 +25,44 @@
   let addSuccess = $state(false);
   let addLoading = $state(false);
 
+  onMount(() => {
+    void loadTicketInstances();
+  });
+
+  async function loadTicketInstances() {
+    try {
+      const data = await api.getInstances();
+      const tickets = data?.instances?.nulltickets || {};
+      ticketInstances = Object.entries(tickets).map(([name, info]: [string, any]) => ({
+        name,
+        status: info?.status || 'stopped',
+        port: info?.port,
+      }));
+      const savedSelection = getSelectedTicketsInstance();
+      const preferred =
+        ticketInstances.find((item) => item.name === savedSelection) ||
+        ticketInstances.find((item) => item.status === 'running') ||
+        ticketInstances.find((item) => item.name === 'default') ||
+        ticketInstances[0];
+      selectedTicketsInstance = preferred?.name || '';
+      setSelectedTicketsInstance(selectedTicketsInstance);
+    } catch {
+      ticketInstances = [];
+      selectedTicketsInstance = '';
+      setSelectedTicketsInstance('');
+    }
+  }
+
+  function ticketsTarget(): string | undefined {
+    return selectedTicketsInstance || undefined;
+  }
+
+  function handleTicketsInstanceChange(event: Event) {
+    selectedTicketsInstance = (event.currentTarget as HTMLSelectElement).value;
+    setSelectedTicketsInstance(selectedTicketsInstance);
+    if (browsedNamespace) void browse();
+  }
+
   async function browse() {
     if (!namespace.trim()) return;
     browsedNamespace = namespace.trim();
@@ -25,7 +70,7 @@
     error = null;
     entries = [];
     try {
-      const result = await api.storeList(browsedNamespace);
+      const result = await api.storeList(browsedNamespace, ticketsTarget());
       entries = result || [];
     } catch (e) {
       error = (e as Error).message;
@@ -37,7 +82,7 @@
   async function deleteEntry(key: string) {
     if (!confirm(`Delete key "${key}" from namespace "${browsedNamespace}"?`)) return;
     try {
-      await api.storeDelete(browsedNamespace, key);
+      await api.storeDelete(browsedNamespace, key, ticketsTarget());
       entries = entries.filter((e) => e.key !== key);
       if (selectedEntry?.key === key) selectedEntry = null;
     } catch (e) {
@@ -47,7 +92,7 @@
 
   async function viewEntry(entry: any) {
     try {
-      const full = await api.storeGet(browsedNamespace, entry.key);
+      const full = await api.storeGet(browsedNamespace, entry.key, ticketsTarget());
       // nulltickets returns a StoreEntry {namespace, key, value, ...} — extract .value
       selectedEntry = { key: entry.key, value: full?.value ?? full };
     } catch (e) {
@@ -72,7 +117,7 @@
     }
     addLoading = true;
     try {
-      await api.storePut(addNamespace.trim(), addKey.trim(), parsed);
+      await api.storePut(addNamespace.trim(), addKey.trim(), parsed, ticketsTarget());
       addSuccess = true;
       addKey = '';
       addValue = '';
@@ -118,6 +163,18 @@
     <div class="left-panel">
       <div class="panel-section">
         <h2 class="panel-title">Browse Namespace</h2>
+        {#if ticketInstances.length > 0}
+          <label class="form-field">
+            <span class="form-label">NullTickets</span>
+            <select class="form-input" value={selectedTicketsInstance} onchange={handleTicketsInstanceChange}>
+              {#each ticketInstances as instance}
+                <option value={instance.name}>
+                  {instance.name}{instance.port ? ` :${instance.port}` : ''}{instance.status === 'running' ? '' : ` ${instance.status}`}
+                </option>
+              {/each}
+            </select>
+          </label>
+        {/if}
         <div class="input-row">
           <input
             class="ns-input"

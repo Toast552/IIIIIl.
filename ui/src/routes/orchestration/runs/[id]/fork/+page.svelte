@@ -4,6 +4,7 @@
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
   import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
   import CheckpointTimeline from '$lib/components/orchestration/CheckpointTimeline.svelte';
   import StateInspector from '$lib/components/orchestration/StateInspector.svelte';
 
@@ -81,6 +82,7 @@
       <span class="page-title">Fork</span>
     </div>
     <div class="toolbar-actions">
+      <BoilerInstanceSelector />
       <button
         class="fork-btn"
         onclick={forkRun}
@@ -177,6 +179,7 @@
   }
   .toolbar-actions {
     display: flex;
+    align-items: center;
     gap: 0.5rem;
   }
   .fork-btn {

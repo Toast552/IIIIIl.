@@ -1,10 +1,14 @@
 import { orchestrationApiPaths } from '$lib/orchestration/routes';
+import { getSelectedBoilerInstance } from '$lib/orchestration/backendSelection';
 
 type RequestFn = <T>(path: string, options?: RequestInit) => Promise<T>;
 type WithQueryFn = (
   path: string,
   params: Record<string, string | number | boolean | null | undefined>,
 ) => string;
+type QueryParams = Record<string, string | number | boolean | null | undefined>;
+
+const orchestrationStorePrefix = '/orchestration/store';
 
 function msToIso(ms: number | undefined | null): string | undefined {
   if (ms == null) return undefined;
@@ -97,38 +101,49 @@ function normalizeStreamEvent(raw: any): { type: string; data: any; timestamp?: 
 }
 
 export function createOrchestrationApi(request: RequestFn, withQuery: WithQueryFn) {
+  function withBoilerQuery(path: string, params: QueryParams = {}) {
+    const selectedBoiler = path.startsWith(orchestrationStorePrefix)
+      ? ''
+      : getSelectedBoilerInstance();
+    return withQuery(path, { ...params, boiler_instance: selectedBoiler || undefined });
+  }
+
   return {
     listWorkflows: async () => {
-      const raw = await request<any>(orchestrationApiPaths.workflows());
+      const raw = await request<any>(withBoilerQuery(orchestrationApiPaths.workflows()));
       const list = Array.isArray(raw) ? raw : raw?.items ?? [];
       return list.map(normalizeWorkflow);
     },
-    getWorkflow: async (id: string) => normalizeWorkflow(await request<any>(orchestrationApiPaths.workflow(id))),
-    createWorkflow: (data: any) => request<any>(orchestrationApiPaths.workflows(), { method: 'POST', body: JSON.stringify(data) }),
-    updateWorkflow: (id: string, data: any) => request<any>(orchestrationApiPaths.workflow(id), { method: 'PUT', body: JSON.stringify(data) }),
-    deleteWorkflow: (id: string) => request<any>(orchestrationApiPaths.workflow(id), { method: 'DELETE' }),
-    validateWorkflow: async (id: string) => normalizeValidation(await request<any>(orchestrationApiPaths.workflowValidate(id), { method: 'POST' })),
-    runWorkflow: (id: string, input: any) => request<any>(orchestrationApiPaths.workflowRun(id), { method: 'POST', body: JSON.stringify(input) }),
+    getWorkflow: async (id: string) => normalizeWorkflow(await request<any>(withBoilerQuery(orchestrationApiPaths.workflow(id)))),
+    createWorkflow: (data: any) => request<any>(withBoilerQuery(orchestrationApiPaths.workflows()), { method: 'POST', body: JSON.stringify(data) }),
+    updateWorkflow: (id: string, data: any) => request<any>(withBoilerQuery(orchestrationApiPaths.workflow(id)), { method: 'PUT', body: JSON.stringify(data) }),
+    deleteWorkflow: (id: string) => request<any>(withBoilerQuery(orchestrationApiPaths.workflow(id)), { method: 'DELETE' }),
+    validateWorkflow: async (id: string) => normalizeValidation(await request<any>(withBoilerQuery(orchestrationApiPaths.workflowValidate(id)), { method: 'POST' })),
+    runWorkflow: (id: string, input: any) => request<any>(withBoilerQuery(orchestrationApiPaths.workflowRun(id)), { method: 'POST', body: JSON.stringify(input) }),
     listRuns: async (params?: { status?: string; workflow_id?: string }) => {
-      const raw = await request<any>(withQuery(orchestrationApiPaths.runs(), params ?? {}));
+      const raw = await request<any>(withBoilerQuery(orchestrationApiPaths.runs(), params ?? {}));
       const list = Array.isArray(raw) ? raw : raw?.items ?? [];
       return list.map(normalizeRun);
     },
-    getRun: async (id: string) => normalizeRun(await request<any>(orchestrationApiPaths.run(id))),
-    cancelRun: (id: string) => request<any>(orchestrationApiPaths.runCancel(id), { method: 'POST' }),
-    resumeRun: (id: string, updates: any) => request<any>(orchestrationApiPaths.runResume(id), { method: 'POST', body: JSON.stringify({ state_updates: updates }) }),
-    forkRun: (checkpointId: string, overrides?: any) => request<any>(orchestrationApiPaths.runsFork(), { method: 'POST', body: JSON.stringify({ checkpoint_id: checkpointId, state_overrides: overrides }) }),
-    replayRun: (id: string, checkpointId: string) => request<any>(orchestrationApiPaths.runReplay(id), { method: 'POST', body: JSON.stringify({ from_checkpoint_id: checkpointId }) }),
-    injectState: (id: string, updates: any, afterStep?: string) => request<any>(orchestrationApiPaths.runState(id), { method: 'POST', body: JSON.stringify({ updates, apply_after_step: afterStep }) }),
+    getRun: async (id: string) => normalizeRun(await request<any>(withBoilerQuery(orchestrationApiPaths.run(id)))),
+    cancelRun: (id: string) => request<any>(withBoilerQuery(orchestrationApiPaths.runCancel(id)), { method: 'POST' }),
+    resumeRun: (id: string, updates: any) => request<any>(withBoilerQuery(orchestrationApiPaths.runResume(id)), { method: 'POST', body: JSON.stringify({ state_updates: updates }) }),
+    forkRun: (checkpointId: string, overrides?: any) => request<any>(withBoilerQuery(orchestrationApiPaths.runsFork()), { method: 'POST', body: JSON.stringify({ checkpoint_id: checkpointId, state_overrides: overrides }) }),
+    replayRun: (id: string, checkpointId: string) => request<any>(withBoilerQuery(orchestrationApiPaths.runReplay(id)), { method: 'POST', body: JSON.stringify({ from_checkpoint_id: checkpointId }) }),
+    injectState: (id: string, updates: any, afterStep?: string) => request<any>(withBoilerQuery(orchestrationApiPaths.runState(id)), { method: 'POST', body: JSON.stringify({ updates, apply_after_step: afterStep }) }),
     listCheckpoints: async (runId: string) => {
-      const cps = await request<any[]>(orchestrationApiPaths.runCheckpoints(runId));
+      const cps = await request<any[]>(withBoilerQuery(orchestrationApiPaths.runCheckpoints(runId)));
       return (cps || []).map(normalizeCheckpoint);
     },
-    getCheckpoint: async (runId: string, cpId: string) => normalizeCheckpoint(await request<any>(orchestrationApiPaths.runCheckpoint(runId, cpId))),
-    storeList: (namespace: string) => request<any[]>(orchestrationApiPaths.storeNamespace(namespace)),
-    storeGet: (namespace: string, key: string) => request<any>(orchestrationApiPaths.storeEntry(namespace, key)),
-    storePut: (namespace: string, key: string, value: any) => request<void>(orchestrationApiPaths.storeEntry(namespace, key), { method: 'PUT', body: JSON.stringify({ value }) }),
-    storeDelete: (namespace: string, key: string) => request<void>(orchestrationApiPaths.storeEntry(namespace, key), { method: 'DELETE' }),
+    getCheckpoint: async (runId: string, cpId: string) => normalizeCheckpoint(await request<any>(withBoilerQuery(orchestrationApiPaths.runCheckpoint(runId, cpId)))),
+    storeList: (namespace: string, ticketsInstance?: string) =>
+      request<any[]>(withQuery(orchestrationApiPaths.storeNamespace(namespace), { tickets_instance: ticketsInstance })),
+    storeGet: (namespace: string, key: string, ticketsInstance?: string) =>
+      request<any>(withQuery(orchestrationApiPaths.storeEntry(namespace, key), { tickets_instance: ticketsInstance })),
+    storePut: (namespace: string, key: string, value: any, ticketsInstance?: string) =>
+      request<void>(withQuery(orchestrationApiPaths.storeEntry(namespace, key), { tickets_instance: ticketsInstance }), { method: 'PUT', body: JSON.stringify({ value }) }),
+    storeDelete: (namespace: string, key: string, ticketsInstance?: string) =>
+      request<void>(withQuery(orchestrationApiPaths.storeEntry(namespace, key), { tickets_instance: ticketsInstance }), { method: 'DELETE' }),
     streamRun: (runId: string, onEvent: (event: { type: string; data: any; timestamp?: number }) => void) => {
       let active = true;
       let deliveredInitialSnapshot = false;
@@ -142,7 +157,7 @@ export function createOrchestrationApi(request: RequestFn, withQuery: WithQueryF
       const poll = async () => {
         while (active) {
           try {
-            const res = await request<any>(withQuery(orchestrationApiPaths.runStream(runId), {
+            const res = await request<any>(withBoilerQuery(orchestrationApiPaths.runStream(runId), {
               after_seq: afterSeq > 0 ? afterSeq : undefined,
             }));
             if (!active) break;

@@ -2,6 +2,7 @@
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
   import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
 
   let runs = $state<any[]>([]);
   let workflows = $state<any[]>([]);
@@ -68,6 +69,7 @@
 <div class="page">
   <div class="header">
     <h1>Runs</h1>
+    <BoilerInstanceSelector />
   </div>
 
   {#if error}

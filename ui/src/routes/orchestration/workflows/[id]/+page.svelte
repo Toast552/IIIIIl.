@@ -4,6 +4,7 @@
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
   import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
   import GraphViewer from '$lib/components/orchestration/GraphViewer.svelte';
   import WorkflowJsonEditor from '$lib/components/orchestration/WorkflowJsonEditor.svelte';
 
@@ -108,6 +109,7 @@
       <span class="page-title">{isNew ? 'New Workflow' : (parsedWorkflow?.name || id)}</span>
     </div>
     <div class="toolbar-actions">
+      <BoilerInstanceSelector />
       {#if !isNew}
         <button class="tool-btn" onclick={validate} disabled={validating || !!parseError}>
           {validating ? 'Validating...' : 'Validate'}
@@ -203,6 +205,7 @@
   }
   .toolbar-actions {
     display: flex;
+    align-items: center;
     gap: 0.5rem;
   }
   .tool-btn {

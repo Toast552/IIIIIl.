@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from "$app/stores";
+  import { goto } from "$app/navigation";
   import { onMount } from "svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import LogViewer from "$lib/components/LogViewer.svelte";
@@ -9,6 +10,11 @@
   import InstanceMemoryPanel from "$lib/components/InstanceMemoryPanel.svelte";
   import InstanceSkillsPanel from "$lib/components/InstanceSkillsPanel.svelte";
   import { api } from "$lib/api/client";
+  import { orchestrationUiRoutes } from "$lib/orchestration/routes";
+  import {
+    setSelectedBoilerInstance,
+    setSelectedTicketsInstance,
+  } from "$lib/orchestration/backendSelection";
 
   let component = $derived($page.params.component);
   let name = $derived($page.params.name);
@@ -455,6 +461,18 @@
     } finally {
       linkingIntegration = false;
     }
+  }
+
+  async function openBoilerRoute(route: string) {
+    if (component !== "nullboiler") return;
+    setSelectedBoilerInstance(name);
+    await goto(route);
+  }
+
+  async function openTicketsStore() {
+    if (component !== "nulltickets") return;
+    setSelectedTicketsInstance(name);
+    await goto(orchestrationUiRoutes.store());
   }
 
   async function refreshProviderHealth(cfgOverride: any = config) {
@@ -948,6 +966,21 @@
                 </div>
               {/if}
 
+              <div class="integration-actions">
+                <button
+                  class="btn integration-btn"
+                  onclick={() => openBoilerRoute(orchestrationUiRoutes.workflows())}
+                >
+                  Workflows
+                </button>
+                <button
+                  class="btn integration-btn"
+                  onclick={() => openBoilerRoute(orchestrationUiRoutes.runs())}
+                >
+                  Runs
+                </button>
+              </div>
+
               <div class="integration-form">
                 <label class="integration-field">
                   <span>Local tracker</span>
@@ -1036,6 +1069,12 @@
                 {:else}
                   <span class="integration-muted">Queue stats appear when the tracker is running.</span>
                 {/if}
+              </div>
+
+              <div class="integration-actions">
+                <button class="btn integration-btn" onclick={openTicketsStore}>
+                  Store
+                </button>
               </div>
 
               {#if linkedBoilers.length > 0}
@@ -1439,6 +1478,11 @@
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 0.75rem;
     align-items: end;
+  }
+  .integration-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
   }
   .integration-field {
     display: flex;

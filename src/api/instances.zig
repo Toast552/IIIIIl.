@@ -1196,6 +1196,14 @@ fn jsonCliConflict(
     };
 }
 
+fn conflict(body: []const u8) ApiResponse {
+    return .{
+        .status = "409 Conflict",
+        .content_type = "application/json",
+        .body = body,
+    };
+}
+
 const ParsedCronPath = struct {
     component: []const u8,
     name: []const u8,
@@ -1896,9 +1904,11 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
     const bin_path = paths.binary(allocator, component, entry.version) catch return helpers.serverError();
     defer allocator.free(bin_path);
 
-    // Read manifest from binary to get health endpoint and port
-    var health_endpoint: []const u8 = "/health";
-    var port: u16 = 0;
+    // Read manifest from binary to get health endpoint and port, falling back
+    // to registry/config defaults for older binaries without manifest support.
+    const known_component = registry.findKnownComponent(component);
+    var health_endpoint: []const u8 = if (known_component) |known| known.default_health_endpoint else "/health";
+    var port: u16 = if (known_component) |known| known.default_port else 0;
     var port_from_config: []const u8 = "";
     const manifest_json = component_cli.exportManifest(allocator, bin_path) catch null;
     var parsed_manifest: ?std.json.Parsed(manifest_mod.Manifest) = null;
@@ -1913,9 +1923,16 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
     defer if (manifest_json) |mj| allocator.free(mj);
     defer if (parsed_manifest) |*pm| pm.deinit();
 
-    // Try to read actual port from instance config.json using port_from_config key
+    // Try to read actual port from instance config.json using port_from_config key.
+    // If manifest probing failed, fall back to the common service port keys.
     if (port_from_config.len > 0) {
         if (instance_runtime.readPortFromConfig(allocator, paths, component, name, port_from_config)) |config_port| {
+            port = config_port;
+        }
+    } else {
+        if (instance_runtime.readPortFromConfig(allocator, paths, component, name, "port")) |config_port| {
+            port = config_port;
+        } else if (instance_runtime.readPortFromConfig(allocator, paths, component, name, "gateway.port")) |config_port| {
             port = config_port;
         }
     }
@@ -3175,6 +3192,10 @@ fn resolveImportBinaryVersion(allocator: std.mem.Allocator, paths: paths_mod.Pat
 /// Copies config and data from ~/.{component}/ into the nullhub instance directory.
 /// A runnable binary is staged during import so the managed instance can start.
 pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8) ApiResponse {
+    if (s.getInstance(component, "default") != null) {
+        return conflict("{\"error\":\"default instance already exists\"}");
+    }
+
     const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch blk: {
         if (builtin.os.tag == .windows) {
             break :blk std_compat.process.getEnvVarOwned(allocator, "USERPROFILE") catch return helpers.serverError();
@@ -3191,6 +3212,12 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
     // 2. Create instance directory structure
     const inst_dir = paths.instanceDir(allocator, component, "default") catch return helpers.serverError();
     defer allocator.free(inst_dir);
+    if (std_compat.fs.accessAbsolute(inst_dir, .{})) |_| {
+        return conflict("{\"error\":\"default instance directory already exists\"}");
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return helpers.serverError(),
+    }
 
     // Ensure parent component dir exists
     const comp_dir = std.fs.path.join(allocator, &.{ paths.root, "instances", component }) catch return helpers.serverError();
@@ -3207,8 +3234,6 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
     // 4. Symlink the entire standalone dir as the instance dir
     //    ~/.nullclaw → ~/.nullhub/instances/nullclaw/default
     //    This preserves all data in place (config, auth, workspace, state, logs)
-    std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
-    std_compat.fs.deleteTreeAbsolute(inst_dir) catch {};
     std_compat.fs.symLinkAbsolute(dot_dir, inst_dir, .{ .is_directory = true }) catch return helpers.serverError();
 
     // 5. Register in state
@@ -3222,8 +3247,15 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
         .auto_start = false,
         .launch_mode = default_launch_mode,
         .verbose = false,
-    }) catch return helpers.serverError();
-    s.save() catch return helpers.serverError();
+    }) catch {
+        std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
+        return helpers.serverError();
+    };
+    s.save() catch {
+        _ = s.removeInstance(component, "default");
+        std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
+        return helpers.serverError();
+    };
 
     return jsonOk("{\"status\":\"imported\",\"instance\":\"default\"}");
 }

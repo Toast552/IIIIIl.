@@ -565,7 +565,7 @@ pub const Server = struct {
         }
     };
 
-    fn resolveManagedBackend(self: *Server, allocator: std.mem.Allocator, component: []const u8) ?ManagedBackendConfig {
+    fn resolveManagedBackend(self: *Server, allocator: std.mem.Allocator, component: []const u8, requested_name: ?[]const u8) ?ManagedBackendConfig {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -573,6 +573,14 @@ pub const Server = struct {
             const configs = integration_mod.listNullBoilers(allocator, self.state, self.paths) catch return null;
             defer integration_mod.deinitNullBoilerConfigs(allocator, configs);
             if (configs.len == 0) return null;
+            if (requested_name) |wanted| {
+                for (configs) |cfg| {
+                    if (std.mem.eql(u8, cfg.name, wanted)) {
+                        return managedBackendFromConfig(allocator, cfg.port, cfg.api_token);
+                    }
+                }
+                return null;
+            }
 
             const selected = self.selectManagedBackendIndex("nullboiler", configs);
             return managedBackendFromConfig(allocator, configs[selected].port, configs[selected].api_token);
@@ -582,6 +590,14 @@ pub const Server = struct {
             const configs = integration_mod.listNullTickets(allocator, self.state, self.paths) catch return null;
             defer integration_mod.deinitNullTicketsConfigs(allocator, configs);
             if (configs.len == 0) return null;
+            if (requested_name) |wanted| {
+                for (configs) |cfg| {
+                    if (std.mem.eql(u8, cfg.name, wanted)) {
+                        return managedBackendFromConfig(allocator, cfg.port, cfg.api_token);
+                    }
+                }
+                return null;
+            }
 
             const selected = self.selectManagedBackendIndex("nulltickets", configs);
             return managedBackendFromConfig(allocator, configs[selected].port, configs[selected].api_token);
@@ -1186,10 +1202,14 @@ pub const Server = struct {
             const env_boiler_token = self.getBoilerToken();
             const env_tickets_url = self.getTicketsUrl();
             const env_tickets_token = self.getTicketsToken();
+            const requested_boiler = orchestration_api.requestedBoilerInstance(allocator, target) catch null;
+            defer if (requested_boiler) |value| allocator.free(value);
+            const requested_tickets = orchestration_api.requestedTicketsInstance(allocator, target) catch null;
+            defer if (requested_tickets) |value| allocator.free(value);
 
-            var managed_boiler = if (env_boiler_url == null) self.resolveManagedBackend(allocator, "nullboiler") else null;
+            var managed_boiler = if (env_boiler_url == null) self.resolveManagedBackend(allocator, "nullboiler", requested_boiler) else null;
             defer if (managed_boiler) |*cfg| cfg.deinit(allocator);
-            var managed_tickets = if (env_tickets_url == null) self.resolveManagedBackend(allocator, "nulltickets") else null;
+            var managed_tickets = if (env_tickets_url == null) self.resolveManagedBackend(allocator, "nulltickets", requested_tickets) else null;
             defer if (managed_tickets) |*cfg| cfg.deinit(allocator);
 
             const resp = orchestration_api.handle(allocator, method, target, body, .{

@@ -7,6 +7,13 @@
   let componentName = $derived($page.params.component);
   let wizardData = $state<any>(null);
   let wizardError = $state('');
+  let wizardSteps = $derived(
+    (wizardData?.wizard?.steps || wizardData?.steps || []).filter((step: any) => {
+      if (step.id === 'gateway_port') return false;
+      if (step.id === 'port') return componentName === 'nullboiler' || componentName === 'nulltickets';
+      return true;
+    }),
+  );
 
   $effect(() => {
     const comp = componentName;
@@ -33,7 +40,7 @@
   {:else if wizardData}
     <WizardRenderer
       component={componentName}
-      steps={(wizardData?.wizard?.steps || wizardData?.steps || []).filter((s: any) => s.id !== 'gateway_port' && s.id !== 'port')}
+      steps={wizardSteps}
       onComplete={() => goto('/')}
     />
   {:else}

@@ -7,6 +7,7 @@
   import StateInspector from '$lib/components/orchestration/StateInspector.svelte';
   import RunEventLog from '$lib/components/orchestration/RunEventLog.svelte';
   import InterruptPanel from '$lib/components/orchestration/InterruptPanel.svelte';
+  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
 
   let id = $derived($page.params.id);
 
@@ -122,6 +123,7 @@
       {/if}
     </div>
     <div class="toolbar-actions">
+      <BoilerInstanceSelector />
       {#if isActive}
         <button class="tool-btn cancel" onclick={cancelRun}>Cancel</button>
       {/if}
@@ -205,6 +207,7 @@
   }
   .toolbar-actions {
     display: flex;
+    align-items: center;
     gap: 0.5rem;
   }
   .tool-btn {
