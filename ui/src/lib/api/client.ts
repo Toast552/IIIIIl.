@@ -22,6 +22,9 @@ type InstanceStartOptions = {
   launch_mode?: string;
   verbose?: boolean;
 };
+type ObservabilityTarget = {
+  watch?: string;
+};
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -159,11 +162,14 @@ export const api = {
 
   refreshComponents: () => request<any>('/components/refresh', { method: 'POST' }),
 
-  getObservabilityHealth: () => request<any>('/observability/health'),
-  getObservabilitySummary: () => request<any>('/observability/v1/summary'),
-  getObservabilityRuns: (params?: { run_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; verdict?: string; dataset?: string; limit?: number }) =>
+  getObservabilityHealth: (params?: ObservabilityTarget) =>
+    request<any>(withQuery('/observability/health', { nullhub_watch: params?.watch })),
+  getObservabilitySummary: (params?: ObservabilityTarget) =>
+    request<any>(withQuery('/observability/v1/summary', { nullhub_watch: params?.watch })),
+  getObservabilityRuns: (params?: ObservabilityTarget & { run_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; verdict?: string; dataset?: string; limit?: number }) =>
     request<any>(
       withQuery('/observability/v1/runs', {
+        nullhub_watch: params?.watch,
         run_id: params?.run_id,
         source: params?.source,
         operation: params?.operation,
@@ -175,10 +181,16 @@ export const api = {
         limit: params?.limit,
       }),
     ),
-  getObservabilityRun: (runId: string) => request<any>(`/observability/v1/runs/${encodeURIComponent(runId)}`),
-  getObservabilitySpans: (params?: { run_id?: string; trace_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; task_id?: string; session_id?: string; agent_id?: string; limit?: number }) =>
+  getObservabilityRun: (runId: string, params?: ObservabilityTarget) =>
+    request<any>(
+      withQuery(`/observability/v1/runs/${encodeURIComponent(runId)}`, {
+        nullhub_watch: params?.watch,
+      }),
+    ),
+  getObservabilitySpans: (params?: ObservabilityTarget & { run_id?: string; trace_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; task_id?: string; session_id?: string; agent_id?: string; limit?: number }) =>
     request<any>(
       withQuery('/observability/v1/spans', {
+        nullhub_watch: params?.watch,
         run_id: params?.run_id,
         trace_id: params?.trace_id,
         source: params?.source,
@@ -192,9 +204,10 @@ export const api = {
         limit: params?.limit,
       }),
     ),
-  getObservabilityEvals: (params?: { run_id?: string; verdict?: string; eval_key?: string; scorer?: string; dataset?: string; limit?: number }) =>
+  getObservabilityEvals: (params?: ObservabilityTarget & { run_id?: string; verdict?: string; eval_key?: string; scorer?: string; dataset?: string; limit?: number }) =>
     request<any>(
       withQuery('/observability/v1/evals', {
+        nullhub_watch: params?.watch,
         run_id: params?.run_id,
         verdict: params?.verdict,
         eval_key: params?.eval_key,

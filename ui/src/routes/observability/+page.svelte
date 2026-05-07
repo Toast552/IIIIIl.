@@ -6,11 +6,24 @@
   let runs = $state<any[]>([]);
   let selectedRunId = $state('');
   let selectedRun = $state<any>(null);
+  let status = $state<any>(null);
+  let selectedWatchName = $state('');
+  let watchSelectionInitialized = $state(false);
   let loading = $state(true);
   let loadingRun = $state(false);
   let error = $state<string | null>(null);
   let pollInterval: ReturnType<typeof setInterval> | null = null;
 
+  type WatchOption = {
+    name: string;
+    status: string;
+    port: number;
+  };
+
+  let watchOptions = $derived(extractWatchOptions(status));
+  let selectedWatch = $derived(
+    watchOptions.find((watch) => watch.name === selectedWatchName) || null,
+  );
   const selectedSummary = $derived(selectedRun?.summary || null);
   const sortedSpans = $derived(
     (selectedRun?.spans || []).slice().sort((a: any, b: any) => (a.started_at_ms || 0) - (b.started_at_ms || 0)),
@@ -19,15 +32,77 @@
     (selectedRun?.evals || []).slice().sort((a: any, b: any) => (a.recorded_at_ms || 0) - (b.recorded_at_ms || 0)),
   );
 
+  function extractWatchOptions(value: any): WatchOption[] {
+    const instances = value?.instances?.nullwatch || {};
+    return Object.entries(instances)
+      .map(([name, info]: [string, any]) => ({
+        name,
+        status: info?.status || 'stopped',
+        port: info?.port || 0,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  function preferredWatch(options: WatchOption[], requested: string): string {
+    if (requested && options.some((watch) => watch.name === requested)) return requested;
+    const running = options.find((watch) => watch.status === 'running');
+    if (running) return running.name;
+    const starting = options.find((watch) => watch.status === 'starting' || watch.status === 'restarting');
+    if (starting) return starting.name;
+    return options[0]?.name || '';
+  }
+
+  function urlWatchName(): string {
+    try {
+      return new URLSearchParams(window.location.search).get('watch') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function setUrlWatchName(name: string) {
+    try {
+      const url = new URL(window.location.href);
+      if (name) {
+        url.searchParams.set('watch', name);
+      } else {
+        url.searchParams.delete('watch');
+      }
+      window.history.replaceState(null, '', url);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function refreshWatchSelection(): Promise<string | undefined> {
+    try {
+      const statusResult = await api.getStatus();
+      status = statusResult;
+      const options = extractWatchOptions(statusResult);
+      const requested = watchSelectionInitialized ? selectedWatchName : urlWatchName();
+      selectedWatchName = preferredWatch(options, requested);
+      watchSelectionInitialized = true;
+    } catch {
+      watchSelectionInitialized = true;
+    }
+    return selectedWatchName || undefined;
+  }
+
   async function loadOverview() {
     try {
+      const watch = await refreshWatchSelection();
       const [summaryResult, runsResult] = await Promise.all([
-        api.getObservabilitySummary(),
-        api.getObservabilityRuns({ limit: 50 }),
+        api.getObservabilitySummary({ watch }),
+        api.getObservabilityRuns({ limit: 50, watch }),
       ]);
       summary = summaryResult;
       runs = runsResult?.items || [];
       error = null;
+
+      if (selectedRunId && !runs.some((run) => run.run_id === selectedRunId)) {
+        selectedRunId = '';
+        selectedRun = null;
+      }
 
       if (!selectedRunId && runs.length > 0) {
         await selectRun(runs[0].run_id);
@@ -44,7 +119,7 @@
   async function loadRun(runId: string, showSpinner = true) {
     if (showSpinner) loadingRun = true;
     try {
-      selectedRun = await api.getObservabilityRun(runId);
+      selectedRun = await api.getObservabilityRun(runId, { watch: selectedWatchName || undefined });
       error = null;
     } catch (e) {
       error = (e as Error).message;
@@ -56,6 +131,15 @@
   async function selectRun(runId: string) {
     selectedRunId = runId;
     await loadRun(runId);
+  }
+
+  async function handleWatchChange(event: Event) {
+    selectedWatchName = (event.currentTarget as HTMLSelectElement).value;
+    setUrlWatchName(selectedWatchName);
+    selectedRunId = '';
+    selectedRun = null;
+    loading = true;
+    await loadOverview();
   }
 
   onMount(() => {
@@ -108,7 +192,27 @@
       <h1>Flight Recorder</h1>
       <p class="subtitle">NullWatch traces, evals, cost, and failure context</p>
     </div>
-    <button class="action-btn" onclick={loadOverview}>Refresh</button>
+    <div class="header-actions">
+      {#if watchOptions.length > 1}
+        <label class="watch-picker">
+          <span>NullWatch</span>
+          <select value={selectedWatchName} onchange={handleWatchChange}>
+            {#each watchOptions as watch}
+              <option value={watch.name}>
+                {watch.name} · {watch.status}{watch.port ? ` :${watch.port}` : ''}
+              </option>
+            {/each}
+          </select>
+        </label>
+      {:else if watchOptions.length === 1}
+        <div class="watch-chip">
+          <span>NullWatch</span>
+          <strong>{watchOptions[0].name}</strong>
+          <em>{watchOptions[0].status}</em>
+        </div>
+      {/if}
+      <button class="action-btn" onclick={loadOverview}>Refresh</button>
+    </div>
   </div>
 
   {#if error}
@@ -149,7 +253,7 @@
       <section class="runs-panel">
         <div class="panel-title">
           <h2>Runs</h2>
-          <span>{runs.length}</span>
+          <span>{selectedWatch ? `${selectedWatch.name} / ${runs.length}` : runs.length}</span>
         </div>
         {#if runs.length === 0}
           <div class="empty-state">No NullWatch runs found.</div>
@@ -297,6 +401,57 @@
 
   .subtitle {
     margin: 0.25rem 0 0;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .watch-picker,
+  .watch-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 2.1rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-surface);
+  }
+
+  .watch-picker span,
+  .watch-chip span {
+    color: var(--fg-muted);
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .watch-picker select {
+    min-width: 12rem;
+    max-width: 22rem;
+    border: 0;
+    background: transparent;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+
+  .watch-chip strong {
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 700;
+  }
+
+  .watch-chip em {
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+    font-style: normal;
   }
 
   .action-btn {
@@ -602,6 +757,20 @@
     .detail-header {
       align-items: flex-start;
       flex-direction: column;
+    }
+
+    .header-actions {
+      justify-content: flex-start;
+      width: 100%;
+    }
+
+    .watch-picker {
+      width: 100%;
+    }
+
+    .watch-picker select {
+      min-width: 0;
+      width: 100%;
     }
   }
 </style>

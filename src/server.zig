@@ -601,13 +601,15 @@ pub const Server = struct {
         }
     };
 
-    fn getWatchTarget(self: *Server, allocator: std.mem.Allocator) WatchTarget {
+    fn getWatchTarget(self: *Server, allocator: std.mem.Allocator, selected_name: ?[]const u8) WatchTarget {
         const env_token = getEnv("NULLWATCH_TOKEN");
-        if (getEnv("NULLWATCH_URL")) |url| return .{ .url = url, .token = env_token };
-        return self.getManagedWatchTarget(allocator, env_token) catch .{ .token = env_token };
+        if (selected_name == null) {
+            if (getEnv("NULLWATCH_URL")) |url| return .{ .url = url, .token = env_token };
+        }
+        return self.getManagedWatchTarget(allocator, env_token, selected_name) catch .{ .token = env_token };
     }
 
-    fn getManagedWatchTarget(self: *Server, allocator: std.mem.Allocator, token_override: ?[]const u8) !WatchTarget {
+    fn getManagedWatchTarget(self: *Server, allocator: std.mem.Allocator, token_override: ?[]const u8, selected_name: ?[]const u8) !WatchTarget {
         const Candidate = struct {
             name: []const u8,
             port: u16,
@@ -620,6 +622,7 @@ pub const Server = struct {
 
         var running: ?Candidate = null;
         var starting: ?Candidate = null;
+        var selected: ?Candidate = null;
 
         if (self.state.instances.getPtr("nullwatch")) |watch_instances| {
             var state_it = watch_instances.iterator();
@@ -636,8 +639,18 @@ pub const Server = struct {
 
                 const candidate = Candidate{ .name = entry.key_ptr.*, .port = snapshot.port };
                 switch (snapshot.status) {
-                    .running => running = Candidate.prefer(running, candidate),
-                    .starting, .restarting => starting = Candidate.prefer(starting, candidate),
+                    .running => {
+                        if (selected_name) |name| {
+                            if (std.mem.eql(u8, name, candidate.name)) selected = candidate;
+                        }
+                        running = Candidate.prefer(running, candidate);
+                    },
+                    .starting, .restarting => {
+                        if (selected_name) |name| {
+                            if (std.mem.eql(u8, name, candidate.name)) selected = candidate;
+                        }
+                        starting = Candidate.prefer(starting, candidate);
+                    },
                     .stopped, .stopping, .failed => {},
                 }
             }
@@ -651,12 +664,28 @@ pub const Server = struct {
 
             const candidate = Candidate{ .name = inst.name, .port = inst.port };
             switch (inst.status) {
-                .running => running = Candidate.prefer(running, candidate),
-                .starting, .restarting => starting = Candidate.prefer(starting, candidate),
+                .running => {
+                    if (selected_name) |name| {
+                        if (std.mem.eql(u8, name, candidate.name)) selected = candidate;
+                    }
+                    running = Candidate.prefer(running, candidate);
+                },
+                .starting, .restarting => {
+                    if (selected_name) |name| {
+                        if (std.mem.eql(u8, name, candidate.name)) selected = candidate;
+                    }
+                    starting = Candidate.prefer(starting, candidate);
+                },
                 .stopped, .stopping, .failed => {},
             }
         }
 
+        if (selected_name != null) {
+            if (selected) |candidate| {
+                return try self.buildManagedWatchTarget(allocator, candidate.name, candidate.port, token_override);
+            }
+            return .{ .token = token_override };
+        }
         if (running) |candidate| {
             return try self.buildManagedWatchTarget(allocator, candidate.name, candidate.port, token_override);
         }
@@ -1311,7 +1340,10 @@ pub const Server = struct {
         }
 
         if (observability_api.isProxyPath(target)) {
-            const watch_target = self.getWatchTarget(allocator);
+            const selected_watch = observability_api.selectedWatchNameAlloc(allocator, target) catch
+                return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
+            defer if (selected_watch) |value| allocator.free(value);
+            const watch_target = self.getWatchTarget(allocator, selected_watch);
             defer watch_target.deinit(allocator);
             const resp = observability_api.handle(allocator, method, target, body, .{
                 .watch_url = watch_target.url,
@@ -2111,7 +2143,7 @@ test "managed NullWatch target is discovered from supervisor state" {
         .port = 7710,
     });
 
-    const target = try ctx.server.getManagedWatchTarget(allocator, null);
+    const target = try ctx.server.getManagedWatchTarget(allocator, null, null);
     defer target.deinit(allocator);
     try std.testing.expect(target.url != null);
     try std.testing.expectEqualStrings("http://127.0.0.1:7710", target.url.?);
@@ -2138,9 +2170,34 @@ test "managed NullWatch target prefers first running instance by name" {
         .port = 7711,
     });
 
-    const target = try ctx.server.getManagedWatchTarget(allocator, null);
+    const target = try ctx.server.getManagedWatchTarget(allocator, null, null);
     defer target.deinit(allocator);
     try std.testing.expectEqualStrings("http://127.0.0.1:7711", target.url.?);
+}
+
+test "managed NullWatch target can select a specific running instance" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+
+    const key_alpha = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "nullwatch", "alpha" });
+    try ctx.manager.instances.put(key_alpha, .{
+        .component = "nullwatch",
+        .name = "alpha",
+        .status = .running,
+        .port = 7711,
+    });
+    const key_zulu = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "nullwatch", "zulu" });
+    try ctx.manager.instances.put(key_zulu, .{
+        .component = "nullwatch",
+        .name = "zulu",
+        .status = .running,
+        .port = 7712,
+    });
+
+    const target = try ctx.server.getManagedWatchTarget(allocator, null, "zulu");
+    defer target.deinit(allocator);
+    try std.testing.expectEqualStrings("http://127.0.0.1:7712", target.url.?);
 }
 
 test "managed NullWatch target reads host and token from config" {
@@ -2167,7 +2224,7 @@ test "managed NullWatch target reads host and token from config" {
         .port = 7710,
     });
 
-    const target = try ctx.server.getManagedWatchTarget(allocator, null);
+    const target = try ctx.server.getManagedWatchTarget(allocator, null, null);
     defer target.deinit(allocator);
     try std.testing.expectEqualStrings("http://127.0.0.1:7710", target.url.?);
     try std.testing.expectEqualStrings("managed-secret", target.token.?);
@@ -2197,7 +2254,7 @@ test "managed NullWatch target brackets IPv6 host and lets env token override co
         .port = 7710,
     });
 
-    const target = try ctx.server.getManagedWatchTarget(allocator, "env-secret");
+    const target = try ctx.server.getManagedWatchTarget(allocator, "env-secret", null);
     defer target.deinit(allocator);
     try std.testing.expectEqualStrings("http://[::1]:7710", target.url.?);
     try std.testing.expectEqualStrings("env-secret", target.token.?);

@@ -740,7 +740,7 @@
       <button class="btn" onclick={stop} disabled={loading}>Stop</button>
       <button class="btn" onclick={restart} disabled={loading}>Restart</button>
       {#if component === "nullwatch"}
-        <a class="btn" href="/observability">Observability</a>
+        <a class="btn" href={`/observability?watch=${encodeURIComponent(name)}`}>Observability</a>
       {/if}
       <button class="btn danger" onclick={remove} disabled={loading}
         >Delete</button

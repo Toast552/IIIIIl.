@@ -1,5 +1,6 @@
 const std = @import("std");
 const http_proxy = @import("proxy.zig");
+const query = @import("query.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -13,7 +14,42 @@ pub const Config = struct {
 };
 
 pub fn isProxyPath(target: []const u8) bool {
-    return http_proxy.isPathInNamespace(target, prefix);
+    return http_proxy.isPathInNamespace(target, prefix) or
+        (target.len > prefix.len and
+            std.mem.startsWith(u8, target, prefix) and
+            target[prefix.len] == '?');
+}
+
+pub fn selectedWatchNameAlloc(allocator: Allocator, target: []const u8) !?[]u8 {
+    if (try query.valueAlloc(allocator, target, "nullhub_watch")) |value| return value;
+    if (try query.valueAlloc(allocator, target, "watch")) |value| return value;
+    return try query.valueAlloc(allocator, target, "instance");
+}
+
+fn isSelectorParam(param: []const u8) bool {
+    const key = if (std.mem.indexOfScalar(u8, param, '=')) |idx| param[0..idx] else param;
+    return std.mem.eql(u8, key, "nullhub_watch") or
+        std.mem.eql(u8, key, "watch") or
+        std.mem.eql(u8, key, "instance");
+}
+
+fn stripSelectorParamsAlloc(allocator: Allocator, target: []const u8) ![]u8 {
+    const qmark = std.mem.indexOfScalar(u8, target, '?') orelse return allocator.dupe(u8, target);
+
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    try buf.appendSlice(target[0..qmark]);
+
+    var wrote_query = false;
+    var params = std.mem.splitScalar(u8, target[qmark + 1 ..], '&');
+    while (params.next()) |param| {
+        if (param.len == 0 or isSelectorParam(param)) continue;
+        try buf.append(if (wrote_query) '&' else '?');
+        wrote_query = true;
+        try buf.appendSlice(param);
+    }
+
+    return buf.toOwnedSlice();
 }
 
 /// Proxies observability API requests to a managed or configured NullWatch instance.
@@ -27,7 +63,11 @@ pub fn handle(allocator: Allocator, method: []const u8, target: []const u8, body
     const base_url = cfg.watch_url orelse
         return .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = "{\"error\":\"NullWatch not configured\"}" };
 
-    const proxied_path = target[prefix.len..];
+    const forward_target = stripSelectorParamsAlloc(allocator, target) catch
+        return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
+    defer allocator.free(forward_target);
+
+    const proxied_path = forward_target[prefix.len..];
     const path = if (proxied_path.len == 0) "/v1/summary" else proxied_path;
     return http_proxy.forward(allocator, .{
         .method = method,
@@ -41,6 +81,7 @@ pub fn handle(allocator: Allocator, method: []const u8, target: []const u8, body
 
 test "isProxyPath matches observability namespace" {
     try std.testing.expect(isProxyPath("/api/observability"));
+    try std.testing.expect(isProxyPath("/api/observability?watch=default"));
     try std.testing.expect(isProxyPath("/api/observability/v1/runs"));
     try std.testing.expect(isProxyPath("/api/observability/health"));
     try std.testing.expect(!isProxyPath("/api/orchestration/v1/runs"));
@@ -57,4 +98,22 @@ test "handle rejects non-observability paths" {
         .watch_url = "http://127.0.0.1:7710",
     });
     try std.testing.expectEqualStrings("404 Not Found", resp.status);
+}
+
+test "selectedWatchNameAlloc reads hub selector query params" {
+    const allocator = std.testing.allocator;
+    const selected = (try selectedWatchNameAlloc(allocator, "/api/observability/v1/runs?limit=1&nullhub_watch=watch+one")).?;
+    defer allocator.free(selected);
+    try std.testing.expectEqualStrings("watch one", selected);
+}
+
+test "stripSelectorParamsAlloc removes only NullHub watch selector" {
+    const allocator = std.testing.allocator;
+    const stripped = try stripSelectorParamsAlloc(allocator, "/api/observability/v1/runs?limit=50&nullhub_watch=alpha&status=ok");
+    defer allocator.free(stripped);
+    try std.testing.expectEqualStrings("/api/observability/v1/runs?limit=50&status=ok", stripped);
+
+    const root = try stripSelectorParamsAlloc(allocator, "/api/observability?watch=alpha");
+    defer allocator.free(root);
+    try std.testing.expectEqualStrings("/api/observability", root);
 }
