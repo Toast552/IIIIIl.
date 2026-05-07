@@ -538,6 +538,7 @@ fn prepareWizardBody(
     }) catch return null;
     defer parsed.deinit();
     if (parsed.value != .object) return null;
+    const json_allocator = parsed.arena.allocator();
 
     const tracker_instance = if (parsed.value.object.get("tracker_instance")) |value|
         if (value == .string and value.string.len > 0) value.string else null
@@ -545,7 +546,7 @@ fn prepareWizardBody(
         null;
     if (tracker_instance == null) {
         if (parsed.value.object.get("tracker_instance") == null) return null;
-        parsed.value.object.put(allocator, "tracker_enabled", .{ .string = "false" }) catch return null;
+        parsed.value.object.put(json_allocator, "tracker_enabled", .{ .string = "false" }) catch return null;
         removeNullBoilerTrackerAnswerFields(&parsed.value.object);
         return std.json.Stringify.valueAlloc(allocator, parsed.value, .{}) catch return null;
     }
@@ -554,18 +555,18 @@ fn prepareWizardBody(
     defer integration_mod.deinitNullTicketsConfig(allocator, &tracker_cfg);
 
     var root = &parsed.value.object;
-    const tracker_url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{tracker_cfg.port}) catch return null;
-    defer allocator.free(tracker_url);
-    root.put(allocator, "tracker_enabled", .{ .string = "true" }) catch return null;
-    root.put(allocator, "tracker_url", .{ .string = tracker_url }) catch return null;
+    const tracker_url = std.fmt.allocPrint(json_allocator, "http://127.0.0.1:{d}", .{tracker_cfg.port}) catch return null;
+    root.put(json_allocator, "tracker_enabled", .{ .string = "true" }) catch return null;
+    root.put(json_allocator, "tracker_url", .{ .string = tracker_url }) catch return null;
     if (tracker_cfg.api_token) |token| {
-        root.put(allocator, "tracker_api_token", .{ .string = token }) catch return null;
+        const owned_token = json_allocator.dupe(u8, token) catch return null;
+        root.put(json_allocator, "tracker_api_token", .{ .string = owned_token }) catch return null;
     } else {
         _ = root.swapRemove("tracker_api_token");
     }
-    putDefaultStringIfMissingOrEmpty(allocator, root, "tracker_claim_role", "coder") catch return null;
-    putDefaultStringIfMissingOrEmpty(allocator, root, "tracker_success_trigger", "complete") catch return null;
-    putDefaultStringIfMissingOrEmpty(allocator, root, "tracker_max_concurrent_tasks", "1") catch return null;
+    putDefaultStringIfMissingOrEmpty(json_allocator, root, "tracker_claim_role", "coder") catch return null;
+    putDefaultStringIfMissingOrEmpty(json_allocator, root, "tracker_success_trigger", "complete") catch return null;
+    putDefaultStringIfMissingOrEmpty(json_allocator, root, "tracker_max_concurrent_tasks", "1") catch return null;
 
     return std.json.Stringify.valueAlloc(allocator, parsed.value, .{}) catch return null;
 }

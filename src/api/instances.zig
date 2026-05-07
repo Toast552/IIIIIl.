@@ -27,9 +27,6 @@ const notFound = helpers.notFound;
 const badRequest = helpers.badRequest;
 const methodNotAllowed = helpers.methodNotAllowed;
 
-const default_tracker_prompt_template =
-    "Task {{task.id}}: {{task.title}}\n\n{{task.description}}\n\nMetadata:\n{{task.metadata}}";
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn defaultLaunchModeForComponent(component: []const u8) []const u8 {
@@ -874,22 +871,6 @@ fn ensurePath(path: []const u8) !void {
     try std_compat.fs.cwd().makePath(path);
 }
 
-fn ensureObjectField(
-    allocator: std.mem.Allocator,
-    parent: *std.json.ObjectMap,
-    key: []const u8,
-) !*std.json.ObjectMap {
-    if (parent.getPtr(key)) |value_ptr| {
-        if (value_ptr.* != .object) {
-            value_ptr.* = .{ .object = .empty };
-        }
-        return &value_ptr.object;
-    }
-
-    try parent.put(allocator, key, .{ .object = .empty });
-    return &parent.getPtr(key).?.object;
-}
-
 fn writeJsonConfigValue(allocator: std.mem.Allocator, config_path: []const u8, value: std.json.Value) !void {
     const rendered = try std.json.Stringify.valueAlloc(allocator, value, .{
         .whitespace = .indent_2,
@@ -901,38 +882,6 @@ fn writeJsonConfigValue(allocator: std.mem.Allocator, config_path: []const u8, v
     defer out.close();
     try out.writeAll(rendered);
     try out.writeAll("\n");
-}
-
-fn resolvePathFromConfig(allocator: std.mem.Allocator, config_path: []const u8, value: []const u8) ![]const u8 {
-    if (value.len == 0 or std.fs.path.isAbsolute(value)) return allocator.dupe(u8, value);
-    const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
-    return std.fs.path.resolve(allocator, &.{ config_dir, value });
-}
-
-fn isNullHubManagedWorkflow(
-    allocator: std.mem.Allocator,
-    workflow_path: []const u8,
-) bool {
-    const file = std_compat.fs.openFileAbsolute(workflow_path, .{}) catch return false;
-    defer file.close();
-
-    const bytes = file.readToEndAlloc(allocator, 1024 * 1024) catch return false;
-    defer allocator.free(bytes);
-
-    const parsed = std.json.parseFromSlice(struct {
-        id: []const u8 = "",
-        execution: []const u8 = "",
-        prompt_template: ?[]const u8 = null,
-    }, allocator, bytes, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    }) catch return false;
-    defer parsed.deinit();
-
-    return std.mem.startsWith(u8, parsed.value.id, "wf-") and
-        std.mem.eql(u8, parsed.value.execution, "subprocess") and
-        parsed.value.prompt_template != null and
-        std.mem.eql(u8, parsed.value.prompt_template.?, default_tracker_prompt_template);
 }
 
 const ProviderHealthConfig = struct {
@@ -4508,9 +4457,6 @@ fn handleIntegrationPost(
     };
     defer tracker_cfg.deinit(allocator);
 
-    var existing = integration_mod.loadNullBoilerConfig(allocator, paths, name) catch null orelse return notFound();
-    defer integration_mod.deinitNullBoilerConfig(allocator, &existing);
-
     const tracker_runtime = getStatusLocked(mutex, manager, "nulltickets", tracker_cfg.tickets.name);
     if (tracker_runtime != null and tracker_runtime.?.status == .running) {
         const pipelines_url = buildInstanceUrl(allocator, tracker_cfg.tickets.port, "/pipelines") orelse return helpers.serverError();
@@ -4535,75 +4481,16 @@ fn handleIntegrationPost(
         }
     }
 
-    const config_path = paths.instanceConfig(allocator, "nullboiler", name) catch return helpers.serverError();
-    defer allocator.free(config_path);
-    const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch return helpers.serverError();
-    defer file.close();
-    const config_bytes = file.readToEndAlloc(allocator, 1024 * 1024) catch return helpers.serverError();
-    defer allocator.free(config_bytes);
-
-    var parsed_config = std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    }) catch return helpers.serverError();
-    defer parsed_config.deinit();
-    if (parsed_config.value != .object) return helpers.serverError();
-
-    const tracker_map = ensureObjectField(allocator, &parsed_config.value.object, "tracker") catch return helpers.serverError();
-    const tracker_url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{tracker_cfg.tickets.port}) catch return helpers.serverError();
-    defer allocator.free(tracker_url);
-    tracker_map.put(allocator, "url", .{ .string = tracker_url }) catch return helpers.serverError();
-    if (tracker_cfg.tickets.api_token) |token| {
-        tracker_map.put(allocator, "api_token", .{ .string = token }) catch return helpers.serverError();
-    } else {
-        _ = tracker_map.swapRemove("api_token");
-    }
-    if (jsonString(tracker_map.*, "agent_id")) |agent_id| {
-        if (agent_id.len == 0) {
-            tracker_map.put(allocator, "agent_id", .{ .string = if (existing.tracker) |tracker| tracker.agent_id else name }) catch return helpers.serverError();
-        }
-    } else {
-        tracker_map.put(allocator, "agent_id", .{ .string = if (existing.tracker) |tracker| tracker.agent_id else name }) catch return helpers.serverError();
-    }
-    if (jsonString(tracker_map.*, "workflows_dir")) |workflows_dir| {
-        if (workflows_dir.len == 0) {
-            tracker_map.put(allocator, "workflows_dir", .{ .string = "workflows" }) catch return helpers.serverError();
-        }
-    } else {
-        tracker_map.put(allocator, "workflows_dir", .{ .string = "workflows" }) catch return helpers.serverError();
-    }
-
-    const concurrency_map = ensureObjectField(allocator, tracker_map, "concurrency") catch return helpers.serverError();
-    if (tracker_cfg.max_concurrent_tasks) |max_concurrent_tasks| {
-        concurrency_map.put(allocator, "max_concurrent_tasks", .{ .integer = max_concurrent_tasks }) catch return helpers.serverError();
-    } else if (concurrency_map.get("max_concurrent_tasks") == null) {
-        concurrency_map.put(allocator, "max_concurrent_tasks", .{ .integer = if (existing.tracker) |tracker| tracker.max_concurrent_tasks else 1 }) catch return helpers.serverError();
-    }
-
-    const workflows_dir_value = jsonStringOrEmpty(tracker_map.*, "workflows_dir");
-    const rendered = std.json.Stringify.valueAlloc(allocator, parsed_config.value, .{
-        .whitespace = .indent_2,
-        .emit_null_optional_fields = false,
-    }) catch return helpers.serverError();
-    defer allocator.free(rendered);
-
-    const out = std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true }) catch return helpers.serverError();
-    defer out.close();
-    out.writeAll(rendered) catch return helpers.serverError();
-    out.writeAll("\n") catch return helpers.serverError();
-
-    const workflows_dir = resolvePathFromConfig(allocator, config_path, workflows_dir_value) catch return helpers.serverError();
-    defer allocator.free(workflows_dir);
-
-    ensureTrackerWorkflowFile(
-        allocator,
-        config_path,
-        workflows_dir,
-        if (existing.tracker) |tracker| if (tracker.workflow) |workflow| workflow.file_name else null else null,
-        tracker_cfg.pipeline_id,
-        tracker_cfg.claim_role,
-        tracker_cfg.success_trigger,
-    ) catch return helpers.serverError();
+    integration_mod.linkNullBoilerToNullTickets(allocator, paths, name, .{
+        .tickets = tracker_cfg.tickets,
+        .pipeline_id = tracker_cfg.pipeline_id,
+        .claim_role = tracker_cfg.claim_role,
+        .success_trigger = tracker_cfg.success_trigger,
+        .max_concurrent_tasks = tracker_cfg.max_concurrent_tasks,
+    }) catch |err| switch (err) {
+        error.NotFound => return notFound(),
+        else => return helpers.serverError(),
+    };
 
     if (getStatusLocked(mutex, manager, "nullboiler", name)) |status| {
         if (status.status == .running) {
@@ -4614,63 +4501,6 @@ fn handleIntegrationPost(
     }
 
     return jsonOk("{\"status\":\"linked\"}");
-}
-
-fn ensureTrackerWorkflowFile(
-    allocator: std.mem.Allocator,
-    config_path: []const u8,
-    workflows_dir: []const u8,
-    previous_workflow_file: ?[]const u8,
-    pipeline_id: []const u8,
-    claim_role: []const u8,
-    success_trigger: []const u8,
-) !void {
-    try ensurePath(workflows_dir);
-
-    if (previous_workflow_file) |file_name| {
-        if (!std.mem.eql(u8, file_name, integration_mod.managed_workflow_file_name)) {
-            const previous_path = try std.fs.path.join(allocator, &.{ workflows_dir, file_name });
-            defer allocator.free(previous_path);
-            if (isNullHubManagedWorkflow(allocator, previous_path)) {
-                std_compat.fs.deleteFileAbsolute(previous_path) catch {};
-            }
-        }
-    }
-
-    const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
-    const legacy_path = try std.fs.path.join(allocator, &.{ config_dir, integration_mod.legacy_workflow_file_name });
-    defer allocator.free(legacy_path);
-    std_compat.fs.deleteFileAbsolute(legacy_path) catch {};
-
-    const legacy_workflows_path = try std.fs.path.join(allocator, &.{ workflows_dir, integration_mod.legacy_workflow_file_name });
-    defer allocator.free(legacy_workflows_path);
-    std_compat.fs.deleteFileAbsolute(legacy_workflows_path) catch {};
-
-    const workflow_path = try std.fs.path.join(allocator, &.{ workflows_dir, integration_mod.managed_workflow_file_name });
-    defer allocator.free(workflow_path);
-
-    const workflow_id = try std.fmt.allocPrint(allocator, "wf-{s}-{s}", .{ pipeline_id, claim_role });
-    defer allocator.free(workflow_id);
-
-    const rendered = try std.json.Stringify.valueAlloc(allocator, .{
-        .id = workflow_id,
-        .pipeline_id = pipeline_id,
-        .claim_roles = &.{claim_role},
-        .execution = "subprocess",
-        .prompt_template = default_tracker_prompt_template,
-        .on_success = .{
-            .transition_to = success_trigger,
-        },
-    }, .{
-        .whitespace = .indent_2,
-        .emit_null_optional_fields = false,
-    });
-    defer allocator.free(rendered);
-
-    const file_out = try std_compat.fs.createFileAbsolute(workflow_path, .{ .truncate = true });
-    defer file_out.close();
-    try file_out.writeAll(rendered);
-    try file_out.writeAll("\n");
 }
 
 // ─── Top-level dispatcher ────────────────────────────────────────────────────
@@ -6864,7 +6694,7 @@ test "dispatch integration relink preserves advanced tracker config and custom w
             .pipeline_id = "pipe-old",
             .claim_roles = &.{"coder"},
             .execution = "subprocess",
-            .prompt_template = default_tracker_prompt_template,
+            .prompt_template = integration_mod.default_tracker_prompt_template,
             .on_success = .{
                 .transition_to = "complete",
             },
