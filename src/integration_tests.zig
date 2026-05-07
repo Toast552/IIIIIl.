@@ -317,3 +317,50 @@ test "integration harness covers orchestration proxy not configured" {
     try std.testing.expectEqual(std.http.Status.service_unavailable, resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "NullBoiler not configured") != null);
 }
+
+test "integration harness covers wizard models and channel failure contracts" {
+    var server = try IntegrationServer.start(std.testing.allocator);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw/models",
+            .method = .POST,
+            .body = "{",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw/models",
+            .method = .POST,
+            .body = "{\"provider\":\"\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "provider is required") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component/models?provider=openai",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found or models unavailable") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component/validate-channels",
+            .method = .POST,
+            .body = "{\"channels\":{}}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
+    }
+}
