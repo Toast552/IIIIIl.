@@ -2,7 +2,8 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
-  import { orchestrationUiRoutes } from "$lib/orchestration/routes";
+  import { orchestrationUiRoutes, routePath } from "$lib/orchestration/routes";
+  import { BOILER_INSTANCE_CHANGE_EVENT } from "$lib/orchestration/backendSelection";
 
   let instances = $state<Record<string, any>>({});
   let installedComponents = $state<Record<string, any>>({});
@@ -10,6 +11,19 @@
   let showBoilerOrchestration = $derived(Boolean(installedComponents["nullboiler"]?.installed));
   let showTicketsStore = $derived(Boolean(installedComponents["nulltickets"]?.installed));
   let showStore = $derived(showBoilerOrchestration || showTicketsStore);
+  let boilerSelectionVersion = $state(0);
+  let orchestrationDashboardHref = $derived.by(() => {
+    boilerSelectionVersion;
+    return orchestrationUiRoutes.dashboard();
+  });
+  let orchestrationWorkflowsHref = $derived.by(() => {
+    boilerSelectionVersion;
+    return orchestrationUiRoutes.workflows();
+  });
+  let orchestrationRunsHref = $derived.by(() => {
+    boilerSelectionVersion;
+    return orchestrationUiRoutes.runs();
+  });
 
   async function loadSidebarState() {
     const [statusResult, componentsResult] = await Promise.allSettled([
@@ -31,7 +45,14 @@
   onMount(() => {
     void loadSidebarState();
     const interval = setInterval(loadSidebarState, 5000);
-    return () => clearInterval(interval);
+    const refreshBoilerLinks = () => {
+      boilerSelectionVersion += 1;
+    };
+    globalThis.addEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
+    return () => {
+      clearInterval(interval);
+      globalThis.removeEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
+    };
   });
 </script>
 
@@ -71,9 +92,9 @@
     <div class="nav-section">
       <h3>Orchestration</h3>
       {#if showBoilerOrchestration}
-        <a href={orchestrationUiRoutes.dashboard()} class:active={currentPath === orchestrationUiRoutes.dashboard()}>Dashboard</a>
-        <a href={orchestrationUiRoutes.workflows()} class:active={currentPath.startsWith(orchestrationUiRoutes.workflows())}>Workflows</a>
-        <a href={orchestrationUiRoutes.runs()} class:active={currentPath.startsWith(orchestrationUiRoutes.runs())}>Runs</a>
+        <a href={orchestrationDashboardHref} class:active={currentPath === routePath(orchestrationDashboardHref)}>Dashboard</a>
+        <a href={orchestrationWorkflowsHref} class:active={currentPath.startsWith(routePath(orchestrationWorkflowsHref))}>Workflows</a>
+        <a href={orchestrationRunsHref} class:active={currentPath.startsWith(routePath(orchestrationRunsHref))}>Runs</a>
       {/if}
       {#if showStore}
         <a href={orchestrationUiRoutes.store()} class:active={currentPath.startsWith(orchestrationUiRoutes.store())}>Store</a>

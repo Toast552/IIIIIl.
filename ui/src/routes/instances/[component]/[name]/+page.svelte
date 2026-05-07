@@ -10,7 +10,7 @@
   import InstanceMemoryPanel from "$lib/components/InstanceMemoryPanel.svelte";
   import InstanceSkillsPanel from "$lib/components/InstanceSkillsPanel.svelte";
   import { api } from "$lib/api/client";
-  import { orchestrationUiRoutes } from "$lib/orchestration/routes";
+  import { orchestrationUiRoutes, withBoilerInstance } from "$lib/orchestration/routes";
   import {
     setSelectedBoilerInstance,
     setSelectedTicketsInstance,
@@ -466,7 +466,7 @@
   async function openBoilerRoute(route: string) {
     if (component !== "nullboiler") return;
     setSelectedBoilerInstance(name);
-    await goto(route);
+    await goto(withBoilerInstance(route, name));
   }
 
   async function openTicketsStore() {

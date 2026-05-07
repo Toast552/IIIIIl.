@@ -446,7 +446,7 @@ fn persistAndStartInstance(
     };
 }
 
-fn findNextAvailablePort(
+pub fn findNextAvailablePort(
     allocator: std.mem.Allocator,
     start: u16,
     paths: paths_mod.Paths,
