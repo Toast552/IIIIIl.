@@ -1182,6 +1182,50 @@ test "tick: startup timeout transitions to restarting" {
     try std.testing.expectEqual(@as(?std_compat.process.Child.Id, null), inst.pid);
 }
 
+test "tick: starting portless instance transitions to running" {
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const spawned = try process.spawn(allocator, .{
+        .binary = "/bin/sleep",
+        .argv = &.{"60"},
+    });
+
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "comp", "agent-mode" });
+    try mgr.instances.put(key, .{
+        .component = "comp",
+        .name = "agent-mode",
+        .status = .starting,
+        .pid = spawned.pid,
+        .child = spawned.child,
+        .port = 0,
+        .restart_count = 2,
+        .starting_since = std_compat.time.milliTimestamp() - 1_000,
+    });
+
+    mgr.tick();
+
+    const inst_ptr = mgr.instances.getPtr("comp/agent-mode").?;
+    try std.testing.expectEqual(Status.running, inst_ptr.status);
+    try std.testing.expectEqual(spawned.pid, inst_ptr.pid.?);
+    try std.testing.expectEqual(@as(u32, 0), inst_ptr.restart_count);
+    try std.testing.expect(inst_ptr.last_health_ok != null);
+    try std.testing.expect(inst_ptr.last_health_check != null);
+
+    if (inst_ptr.child) |*child| {
+        process.terminate(child.id) catch {};
+        _ = child.wait() catch {};
+        inst_ptr.child = null;
+    }
+}
+
 test "tick: health failure threshold transitions to restarting" {
     const builtin = @import("builtin");
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
@@ -1221,6 +1265,52 @@ test "tick: health failure threshold transitions to restarting" {
     try std.testing.expectEqual(Status.restarting, inst.status);
     try std.testing.expectEqual(@as(?std_compat.process.Child.Id, null), inst.pid);
     try std.testing.expectEqual(@as(u32, 0), inst.health_consecutive_failures);
+}
+
+test "tick: running portless instance skips health check mutations" {
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const spawned = try process.spawn(allocator, .{
+        .binary = "/bin/sleep",
+        .argv = &.{"60"},
+    });
+
+    const last_health_check = std_compat.time.milliTimestamp() - 60_000;
+    const last_health_ok = std_compat.time.milliTimestamp() - 30_000;
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "comp", "portless-running" });
+    try mgr.instances.put(key, .{
+        .component = "comp",
+        .name = "portless-running",
+        .status = .running,
+        .pid = spawned.pid,
+        .child = spawned.child,
+        .port = 0,
+        .last_health_check = last_health_check,
+        .last_health_ok = last_health_ok,
+        .health_consecutive_failures = 2,
+    });
+
+    mgr.tick();
+
+    const inst_ptr = mgr.instances.getPtr("comp/portless-running").?;
+    try std.testing.expectEqual(Status.running, inst_ptr.status);
+    try std.testing.expectEqual(last_health_check, inst_ptr.last_health_check.?);
+    try std.testing.expectEqual(last_health_ok, inst_ptr.last_health_ok.?);
+    try std.testing.expectEqual(@as(u32, 2), inst_ptr.health_consecutive_failures);
+
+    if (inst_ptr.child) |*child| {
+        process.terminate(child.id) catch {};
+        _ = child.wait() catch {};
+        inst_ptr.child = null;
+    }
 }
 
 test "tick: restarting with binary_path spawns new process" {
