@@ -317,3 +317,29 @@ test "integration harness covers orchestration proxy not configured" {
     try std.testing.expectEqual(std.http.Status.service_unavailable, resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "NullBoiler not configured") != null);
 }
+
+test "integration harness covers service route contracts" {
+    var server = try IntegrationServer.start(std.testing.allocator);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/service/install" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/service/uninstall" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/service/status", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+}
