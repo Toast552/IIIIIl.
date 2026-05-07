@@ -308,6 +308,42 @@ test "integration harness covers settings and config round-trips" {
     }
 }
 
+test "integration harness covers lifecycle error paths" {
+    {
+        var server = try IntegrationServer.start(std.testing.allocator);
+        defer server.deinit();
+
+        const start_resp = try server.fetch(.{ .path = "/api/instances/nullboiler/missing/start", .method = .POST });
+        defer start_resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, start_resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "not found") != null);
+
+        const stop_resp = try server.fetch(.{ .path = "/api/instances/nullboiler/missing/stop", .method = .POST });
+        defer stop_resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, stop_resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, stop_resp.body, "not found") != null);
+    }
+
+    {
+        var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+            fn call(srv: *IntegrationServer) !void {
+                try seedManagedInstance(srv, "nullboiler", "demo");
+            }
+        }.call);
+        defer server.deinit();
+
+        const start_resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/start", .method = .POST });
+        defer start_resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.internal_server_error, start_resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "internal error") != null);
+
+        const restart_resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/restart", .method = .POST });
+        defer restart_resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.internal_server_error, restart_resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, restart_resp.body, "internal error") != null);
+    }
+}
+
 test "integration harness covers orchestration proxy not configured" {
     var server = try IntegrationServer.start(std.testing.allocator);
     defer server.deinit();
