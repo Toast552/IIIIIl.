@@ -142,25 +142,40 @@ fn compareVersionTags(a: []const u8, b: []const u8) std.math.Order {
 /// Returns the manifest JSON directly (the component owns its wizard definition).
 /// Returns null if the component is unknown or binary not found.
 /// Caller owns the returned memory.
-pub fn handleGetWizard(allocator: std.mem.Allocator, component_name: []const u8, paths: paths_mod.Paths, state: *state_mod.State) ?[]const u8 {
+pub fn handleGetWizard(
+    allocator: std.mem.Allocator,
+    component_name: []const u8,
+    target: []const u8,
+    paths: paths_mod.Paths,
+    state: *state_mod.State,
+) ?[]const u8 {
     // Verify the component is known
     if (registry.findKnownComponent(component_name) == null) return null;
 
+    const requested_version = query.valueAlloc(allocator, target, "version") catch null;
+    defer if (requested_version) |value| allocator.free(value);
+    const explicit_version = if (requested_version) |value|
+        value.len > 0 and !std.mem.eql(u8, value, "latest")
+    else
+        false;
+
     // Try existing binary first
-    if (findOrFetchComponentBinary(allocator, component_name, paths)) |bin_path| {
+    if (findOrFetchComponentBinaryForVersion(allocator, component_name, paths, requested_version)) |bin_path| {
         defer allocator.free(bin_path);
         if (component_cli.exportManifest(allocator, bin_path)) |json| {
             return augmentWizardManifest(allocator, component_name, json, state, paths) orelse json;
         } else |_| {}
-        // Existing binary doesn't support --export-manifest, try fetching latest
     }
 
-    // Download latest release and retry
-    if (fetchLatestComponentBinary(allocator, component_name, paths)) |bin_path| {
-        defer allocator.free(bin_path);
-        if (component_cli.exportManifest(allocator, bin_path)) |json| {
-            return augmentWizardManifest(allocator, component_name, json, state, paths) orelse json;
-        } else |_| {}
+    // Existing local/latest binary may be too old to export a manifest. For
+    // unpinned wizard requests, force a latest release fetch and retry.
+    if (!explicit_version) {
+        if (fetchLatestComponentBinary(allocator, component_name, paths)) |bin_path| {
+            defer allocator.free(bin_path);
+            if (component_cli.exportManifest(allocator, bin_path)) |json| {
+                return augmentWizardManifest(allocator, component_name, json, state, paths) orelse json;
+            } else |_| {}
+        }
     }
 
     return allocator.dupe(u8, "{\"error\":\"no compatible version found, check GitHub releases\"}") catch null;
@@ -284,6 +299,150 @@ fn isPortFree(port: u16) bool {
     return true;
 }
 
+fn wizardHasStep(steps: []const manifest_mod.WizardStep, id: []const u8) bool {
+    for (steps) |step| {
+        if (std.mem.eql(u8, step.id, id)) return true;
+    }
+    return false;
+}
+
+fn wizardStepIndex(steps: []const manifest_mod.WizardStep, id: []const u8) ?usize {
+    for (steps, 0..) |step, idx| {
+        if (std.mem.eql(u8, step.id, id)) return idx;
+    }
+    return null;
+}
+
+fn missingNullBoilerLinkStepCount(steps: []const manifest_mod.WizardStep) usize {
+    var count: usize = 0;
+    if (!wizardHasStep(steps, "tracker_instance")) count += 1;
+    if (!wizardHasStep(steps, "tracker_pipeline_id")) count += 1;
+    if (!wizardHasStep(steps, "tracker_claim_role")) count += 1;
+    if (!wizardHasStep(steps, "tracker_success_trigger")) count += 1;
+    if (!wizardHasStep(steps, "tracker_max_concurrent_tasks")) count += 1;
+    return count;
+}
+
+fn isNullBoilerTrackerStep(step_id: []const u8) bool {
+    return std.mem.eql(u8, step_id, "tracker_enabled") or
+        std.mem.startsWith(u8, step_id, "tracker_");
+}
+
+fn nullBoilerLinkInsertIndex(steps: []const manifest_mod.WizardStep) usize {
+    for (steps, 0..) |step, idx| {
+        if (isNullBoilerTrackerStep(step.id)) return idx;
+    }
+    return steps.len;
+}
+
+fn appendMissingNullBoilerLinkSteps(
+    out_steps: []manifest_mod.WizardStep,
+    next_step: *usize,
+    base_steps: []const manifest_mod.WizardStep,
+    trackers: []const integration_mod.NullTicketsConfig,
+    options: []const manifest_mod.StepOption,
+) void {
+    if (!wizardHasStep(base_steps, "tracker_instance")) {
+        out_steps[next_step.*] = .{
+            .id = "tracker_instance",
+            .title = "Link NullTickets",
+            .description = "Auto-connect this NullBoiler instance to a local NullTickets tracker",
+            .type = .select,
+            .required = false,
+            .options = options,
+            .default_value = if (trackers.len == 1) trackers[0].name else "",
+        };
+        next_step.* += 1;
+    }
+    if (!wizardHasStep(base_steps, "tracker_pipeline_id")) {
+        out_steps[next_step.*] = .{
+            .id = "tracker_pipeline_id",
+            .title = "Tracker Pipeline",
+            .description = "Pipeline id this NullBoiler should claim tasks from.",
+            .type = .text,
+            .required = true,
+            .condition = .{ .step = "tracker_instance", .not_equals = "" },
+        };
+        next_step.* += 1;
+    }
+    if (!wizardHasStep(base_steps, "tracker_claim_role")) {
+        out_steps[next_step.*] = .{
+            .id = "tracker_claim_role",
+            .title = "Claim Role",
+            .description = "Role this worker claims from the selected pipeline.",
+            .type = .text,
+            .required = false,
+            .default_value = "coder",
+            .condition = .{ .step = "tracker_instance", .not_equals = "" },
+        };
+        next_step.* += 1;
+    }
+    if (!wizardHasStep(base_steps, "tracker_success_trigger")) {
+        out_steps[next_step.*] = .{
+            .id = "tracker_success_trigger",
+            .title = "Success Trigger",
+            .description = "Transition to apply when a task completes successfully.",
+            .type = .text,
+            .required = false,
+            .default_value = "complete",
+            .condition = .{ .step = "tracker_instance", .not_equals = "" },
+        };
+        next_step.* += 1;
+    }
+    if (!wizardHasStep(base_steps, "tracker_max_concurrent_tasks")) {
+        out_steps[next_step.*] = .{
+            .id = "tracker_max_concurrent_tasks",
+            .title = "Tracker Concurrency",
+            .description = "Maximum NullTickets tasks this worker may run at once.",
+            .type = .number,
+            .required = false,
+            .default_value = "1",
+            .condition = .{ .step = "tracker_instance", .not_equals = "" },
+        };
+        next_step.* += 1;
+    }
+}
+
+fn isManagedServiceComponent(component_name: []const u8) bool {
+    return std.mem.eql(u8, component_name, "nullboiler") or
+        std.mem.eql(u8, component_name, "nulltickets") or
+        std.mem.eql(u8, component_name, "nullwatch");
+}
+
+fn managedServiceDefaultPort(component_name: []const u8, manifest: manifest_mod.Manifest) u16 {
+    if (manifest.ports.len > 0) return manifest.ports[0].default;
+    return if (registry.findKnownComponent(component_name)) |known| known.default_port else 0;
+}
+
+fn servicePortDefaultOverride(
+    allocator: std.mem.Allocator,
+    component_name: []const u8,
+    manifest: manifest_mod.Manifest,
+    state: *state_mod.State,
+    paths: paths_mod.Paths,
+) ?[]const u8 {
+    if (!isManagedServiceComponent(component_name)) return null;
+    if (!wizardHasStep(manifest.wizard.steps, "port")) return null;
+
+    const default_port = managedServiceDefaultPort(component_name, manifest);
+    if (default_port == 0) return null;
+
+    const next_port = orchestrator.findNextAvailablePort(allocator, default_port, paths, state);
+    const rendered = std.fmt.allocPrint(allocator, "{d}", .{next_port}) catch return null;
+    errdefer allocator.free(rendered);
+
+    for (manifest.wizard.steps) |step| {
+        if (!std.mem.eql(u8, step.id, "port")) continue;
+        if (std.mem.eql(u8, step.default_value, rendered)) {
+            allocator.free(rendered);
+            return null;
+        }
+        return rendered;
+    }
+    allocator.free(rendered);
+    return null;
+}
+
 fn augmentWizardManifest(
     allocator: std.mem.Allocator,
     component_name: []const u8,
@@ -294,16 +453,26 @@ fn augmentWizardManifest(
     if (std.mem.eql(u8, component_name, "nullclaw")) {
         return null;
     }
-    if (!std.mem.eql(u8, component_name, "nullboiler")) return null;
-
-    const trackers = integration_mod.listNullTickets(allocator, state, paths) catch return null;
-    defer integration_mod.deinitNullTicketsConfigs(allocator, trackers);
-    if (trackers.len == 0) return null;
+    if (!isManagedServiceComponent(component_name)) return null;
 
     const parsed = manifest_mod.parseManifest(allocator, manifest_json) catch return null;
     defer parsed.deinit();
 
     const base = parsed.value;
+
+    var trackers: []integration_mod.NullTicketsConfig = &.{};
+    var owns_trackers = false;
+    defer if (owns_trackers) integration_mod.deinitNullTicketsConfigs(allocator, trackers);
+    if (std.mem.eql(u8, component_name, "nullboiler")) {
+        trackers = integration_mod.listNullTickets(allocator, state, paths) catch return null;
+        owns_trackers = true;
+    }
+
+    const missing_link_steps = if (trackers.len > 0) missingNullBoilerLinkStepCount(base.wizard.steps) else 0;
+    const port_default = servicePortDefaultOverride(allocator, component_name, base, state, paths);
+    defer if (port_default) |value| allocator.free(value);
+    if (missing_link_steps == 0 and port_default == null) return null;
+
     const options = allocator.alloc(manifest_mod.StepOption, trackers.len + 1) catch return null;
     defer allocator.free(options);
     options[0] = .{
@@ -324,18 +493,31 @@ fn augmentWizardManifest(
         for (options[1..]) |option| allocator.free(option.description);
     }
 
-    const steps = allocator.alloc(manifest_mod.WizardStep, base.wizard.steps.len + 1) catch return null;
+    const steps = allocator.alloc(manifest_mod.WizardStep, base.wizard.steps.len + missing_link_steps) catch return null;
     defer allocator.free(steps);
-    @memcpy(steps[0..base.wizard.steps.len], base.wizard.steps);
-    steps[base.wizard.steps.len] = .{
-        .id = "tracker_instance",
-        .title = "Link NullTickets",
-        .description = "Auto-connect this NullBoiler instance to a local NullTickets tracker",
-        .type = .select,
-        .required = false,
-        .options = options,
-        .default_value = if (trackers.len == 1) trackers[0].name else "",
-    };
+    const insert_index = if (missing_link_steps > 0) nullBoilerLinkInsertIndex(base.wizard.steps) else base.wizard.steps.len;
+    var next_step: usize = 0;
+    var inserted_link_steps = false;
+    for (base.wizard.steps, 0..) |step, idx| {
+        if (!inserted_link_steps and idx == insert_index) {
+            appendMissingNullBoilerLinkSteps(steps, &next_step, base.wizard.steps, trackers, options);
+            inserted_link_steps = true;
+        }
+        steps[next_step] = step;
+        next_step += 1;
+    }
+    if (!inserted_link_steps and next_step < steps.len) {
+        appendMissingNullBoilerLinkSteps(steps, &next_step, base.wizard.steps, trackers, options);
+    }
+    if (port_default) |value| {
+        for (steps) |*step| {
+            if (std.mem.eql(u8, step.id, "port")) {
+                step.default_value = value;
+                break;
+            }
+        }
+    }
+    std.debug.assert(next_step == steps.len);
 
     var manifest = base;
     manifest.wizard.steps = steps;
@@ -350,40 +532,71 @@ fn prepareWizardBody(
 ) ?[]const u8 {
     if (!std.mem.eql(u8, component_name, "nullboiler")) return null;
 
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{
         .allocate = .alloc_always,
         .ignore_unknown_fields = true,
     }) catch return null;
     defer parsed.deinit();
     if (parsed.value != .object) return null;
+    const json_allocator = parsed.arena.allocator();
 
     const tracker_instance = if (parsed.value.object.get("tracker_instance")) |value|
         if (value == .string and value.string.len > 0) value.string else null
     else
         null;
-    if (tracker_instance == null) return null;
+    if (tracker_instance == null) {
+        if (parsed.value.object.get("tracker_instance") == null) return null;
+        parsed.value.object.put(json_allocator, "tracker_enabled", .{ .string = "false" }) catch return null;
+        removeNullBoilerTrackerAnswerFields(&parsed.value.object);
+        return std.json.Stringify.valueAlloc(allocator, parsed.value, .{}) catch return null;
+    }
 
     var tracker_cfg = (integration_mod.loadNullTicketsConfig(allocator, paths, tracker_instance.?) catch return null) orelse return null;
     defer integration_mod.deinitNullTicketsConfig(allocator, &tracker_cfg);
 
-    var root = parsed.value.object;
-    const tracker_url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{tracker_cfg.port}) catch return null;
-    root.put(allocator, "tracker_enabled", .{ .string = "true" }) catch return null;
-    root.put(allocator, "tracker_url", .{ .string = tracker_url }) catch return null;
+    var root = &parsed.value.object;
+    const tracker_url = std.fmt.allocPrint(json_allocator, "http://127.0.0.1:{d}", .{tracker_cfg.port}) catch return null;
+    root.put(json_allocator, "tracker_enabled", .{ .string = "true" }) catch return null;
+    root.put(json_allocator, "tracker_url", .{ .string = tracker_url }) catch return null;
     if (tracker_cfg.api_token) |token| {
-        root.put(allocator, "tracker_api_token", .{ .string = token }) catch return null;
+        const owned_token = json_allocator.dupe(u8, token) catch return null;
+        root.put(json_allocator, "tracker_api_token", .{ .string = owned_token }) catch return null;
+    } else {
+        _ = root.swapRemove("tracker_api_token");
     }
-    if (!root.contains("tracker_claim_role")) {
-        root.put(allocator, "tracker_claim_role", .{ .string = "coder" }) catch return null;
-    }
+    putDefaultStringIfMissingOrEmpty(json_allocator, root, "tracker_claim_role", "coder") catch return null;
+    putDefaultStringIfMissingOrEmpty(json_allocator, root, "tracker_success_trigger", "complete") catch return null;
+    putDefaultStringIfMissingOrEmpty(json_allocator, root, "tracker_max_concurrent_tasks", "1") catch return null;
 
     return std.json.Stringify.valueAlloc(allocator, parsed.value, .{}) catch return null;
+}
+
+fn removeNullBoilerTrackerAnswerFields(root: *std.json.ObjectMap) void {
+    _ = root.swapRemove("tracker_url");
+    _ = root.swapRemove("tracker_api_token");
+    _ = root.swapRemove("tracker_pipeline_id");
+    _ = root.swapRemove("tracker_claim_role");
+    _ = root.swapRemove("tracker_success_trigger");
+    _ = root.swapRemove("tracker_max_concurrent_tasks");
+}
+
+fn putDefaultStringIfMissingOrEmpty(
+    allocator: std.mem.Allocator,
+    root: *std.json.ObjectMap,
+    key: []const u8,
+    value: []const u8,
+) !void {
+    if (root.get(key)) |existing| {
+        if (existing != .string or existing.string.len > 0) return;
+    }
+    try root.put(allocator, key, .{ .string = value });
 }
 
 fn validateWizardBodyForInstall(
     allocator: std.mem.Allocator,
     component_name: []const u8,
     body: []const u8,
+    paths: paths_mod.Paths,
 ) ?[]const u8 {
     if (!std.mem.eql(u8, component_name, "nullboiler")) return null;
 
@@ -394,11 +607,26 @@ fn validateWizardBodyForInstall(
     defer parsed.deinit();
     if (parsed.value != .object) return allocator.dupe(u8, "{\"error\":\"invalid JSON body\"}") catch null;
 
+    const tracker_instance = if (parsed.value.object.get("tracker_instance")) |value|
+        if (value == .string and value.string.len > 0) value.string else null
+    else
+        null;
     const tracker_enabled = if (parsed.value.object.get("tracker_enabled")) |value|
-        value == .string and std.mem.eql(u8, value.string, "true")
+        (value == .string and std.mem.eql(u8, value.string, "true")) or
+            (value == .bool and value.bool)
     else
         false;
-    if (!tracker_enabled) return null;
+    const tracker_requested = tracker_enabled or tracker_instance != null;
+    if (!tracker_requested) return null;
+
+    if (tracker_instance == null) {
+        return allocator.dupe(u8, "{\"error\":\"tracker_instance is required when tracker mode is enabled\"}") catch null;
+    }
+    if (tracker_instance) |name| {
+        var tracker_cfg = (integration_mod.loadNullTicketsConfig(allocator, paths, name) catch null) orelse
+            return allocator.dupe(u8, "{\"error\":\"tracker_instance was not found\"}") catch null;
+        integration_mod.deinitNullTicketsConfig(allocator, &tracker_cfg);
+    }
 
     const pipeline_id = if (parsed.value.object.get("tracker_pipeline_id")) |value|
         value == .string and value.string.len > 0
@@ -470,16 +698,71 @@ fn findOrFetchComponentBinary(allocator: std.mem.Allocator, component: []const u
     return fetchLatestComponentBinary(allocator, component, paths);
 }
 
+fn findExactInstalledComponentBinary(
+    allocator: std.mem.Allocator,
+    component: []const u8,
+    paths: paths_mod.Paths,
+    version: []const u8,
+) ?[]const u8 {
+    const bin_path = paths.binary(allocator, component, version) catch return null;
+    if (std_compat.fs.openFileAbsolute(bin_path, .{})) |file| {
+        file.close();
+        return bin_path;
+    } else |_| {
+        allocator.free(bin_path);
+        return null;
+    }
+}
+
+fn findOrFetchComponentBinaryForVersion(
+    allocator: std.mem.Allocator,
+    component: []const u8,
+    paths: paths_mod.Paths,
+    requested_version: ?[]const u8,
+) ?[]const u8 {
+    const version = requested_version orelse return findOrFetchComponentBinary(allocator, component, paths);
+    if (version.len == 0 or std.mem.eql(u8, version, "latest")) {
+        return findOrFetchComponentBinary(allocator, component, paths);
+    }
+    if (findExactInstalledComponentBinary(allocator, component, paths, version)) |bin| {
+        return bin;
+    }
+    if (builtin.is_test) return null;
+    return fetchComponentBinaryByTag(allocator, component, paths, version);
+}
+
 fn fetchLatestComponentBinary(allocator: std.mem.Allocator, component: []const u8, paths: paths_mod.Paths) ?[]const u8 {
     const known = registry.findKnownComponent(component) orelse return null;
     var release = registry.fetchLatestRelease(allocator, known.repo) catch return null;
     defer release.deinit();
 
+    return fetchComponentBinaryFromRelease(allocator, component, paths, release.value);
+}
+
+fn fetchComponentBinaryByTag(
+    allocator: std.mem.Allocator,
+    component: []const u8,
+    paths: paths_mod.Paths,
+    version: []const u8,
+) ?[]const u8 {
+    const known = registry.findKnownComponent(component) orelse return null;
+    var release = registry.fetchReleaseByTag(allocator, known.repo, version) catch return null;
+    defer release.deinit();
+
+    return fetchComponentBinaryFromRelease(allocator, component, paths, release.value);
+}
+
+fn fetchComponentBinaryFromRelease(
+    allocator: std.mem.Allocator,
+    component: []const u8,
+    paths: paths_mod.Paths,
+    release: registry.ReleaseInfo,
+) ?[]const u8 {
     const platform_key = comptime platform.detect().toString();
-    const asset = registry.findAssetForComponentPlatform(allocator, release.value, component, platform_key) orelse return null;
+    const asset = registry.findAssetForComponentPlatform(allocator, release, component, platform_key) orelse return null;
 
     paths.ensureDirs() catch return null;
-    const bin_path = paths.binary(allocator, component, release.value.tag_name) catch return null;
+    const bin_path = paths.binary(allocator, component, release.tag_name) catch return null;
 
     downloader.downloadIfMissing(allocator, asset.browser_download_url, bin_path) catch {
         allocator.free(bin_path);
@@ -518,7 +801,7 @@ pub fn handlePostWizard(
     const effective_body = prepareWizardBody(allocator, component_name, body, paths) orelse body;
     defer if (effective_body.ptr != body.ptr) allocator.free(effective_body);
 
-    if (validateWizardBodyForInstall(allocator, component_name, effective_body)) |json| {
+    if (validateWizardBodyForInstall(allocator, component_name, effective_body, paths)) |json| {
         return json;
     }
 
@@ -1098,6 +1381,27 @@ test "findInstalledComponentBinary finds binary in bin directory" {
     try std.testing.expectEqualStrings(bin_path, found.?);
 }
 
+test "findOrFetchComponentBinaryForVersion uses exact installed version" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const bin_path = try fixture.paths.binary(allocator, "nullboiler", "v2.0.0");
+    defer allocator.free(bin_path);
+
+    {
+        const file = try std_compat.fs.createFileAbsolute(bin_path, .{});
+        defer file.close();
+        try file.writeAll("#!/bin/sh\n");
+    }
+
+    const found = findOrFetchComponentBinaryForVersion(allocator, "nullboiler", fixture.paths, "v2.0.0");
+    try std.testing.expect(found != null);
+    defer allocator.free(found.?);
+    try std.testing.expectEqualStrings(bin_path, found.?);
+}
+
 test "handleGetWizard returns null for unknown component" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
@@ -1106,7 +1410,7 @@ test "handleGetWizard returns null for unknown component" {
     defer allocator.free(state_path);
     var state = state_mod.State.init(allocator, state_path);
     defer state.deinit();
-    const result = handleGetWizard(allocator, "nonexistent", fixture.paths, &state);
+    const result = handleGetWizard(allocator, "nonexistent", "/api/wizard/nonexistent", fixture.paths, &state);
     try std.testing.expect(result == null);
 }
 
@@ -1119,8 +1423,294 @@ test "handleGetWizard returns null when no binary found" {
     var state = state_mod.State.init(allocator, state_path);
     defer state.deinit();
     // nullclaw is a known component but there's no binary in test dirs
-    const result = handleGetWizard(allocator, "nullclaw", fixture.paths, &state);
+    const result = handleGetWizard(allocator, "nullclaw", "/api/wizard/nullclaw", fixture.paths, &state);
     try std.testing.expect(result == null);
+}
+
+test "augmentWizardManifest adds complete nullboiler tracker setup" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const state_path = try fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var state = state_mod.State.init(allocator, state_path);
+    defer state.deinit();
+    try state.addInstance("nulltickets", "tracker-a", .{ .version = "v1.0.0" });
+
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nulltickets", "tracker-a");
+    defer allocator.free(inst_dir);
+    try std.fs.makePathAbsolute(inst_dir);
+    const config_path = try fixture.paths.instanceConfig(allocator, "nulltickets", "tracker-a");
+    defer allocator.free(config_path);
+    {
+        const file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("{\"port\":7711}\n");
+    }
+
+    const manifest_json =
+        \\{
+        \\  "schema_version": 1,
+        \\  "name": "nullboiler",
+        \\  "display_name": "NullBoiler",
+        \\  "description": "Orchestrator",
+        \\  "icon": "workflow",
+        \\  "repo": "nullclaw/nullboiler",
+        \\  "platforms": {},
+        \\  "launch": { "command": "server" },
+        \\  "health": { "endpoint": "/health", "port_from_config": "port" },
+        \\  "ports": [{ "name": "api", "config_key": "port", "default": 8080, "protocol": "http" }],
+        \\  "wizard": { "steps": [] },
+        \\  "depends_on": [],
+        \\  "connects_to": []
+        \\}
+    ;
+
+    const rendered = augmentWizardManifest(allocator, "nullboiler", manifest_json, &state, fixture.paths) orelse
+        @panic("augmentWizardManifest");
+    defer allocator.free(rendered);
+
+    const parsed = try manifest_mod.parseManifest(allocator, rendered);
+    defer parsed.deinit();
+    try std.testing.expect(wizardHasStep(parsed.value.wizard.steps, "tracker_instance"));
+    try std.testing.expect(wizardHasStep(parsed.value.wizard.steps, "tracker_pipeline_id"));
+    try std.testing.expect(wizardHasStep(parsed.value.wizard.steps, "tracker_claim_role"));
+    try std.testing.expect(wizardHasStep(parsed.value.wizard.steps, "tracker_success_trigger"));
+    try std.testing.expect(wizardHasStep(parsed.value.wizard.steps, "tracker_max_concurrent_tasks"));
+    try std.testing.expectEqual(@as(usize, 5), parsed.value.wizard.steps.len);
+    try std.testing.expectEqualStrings("tracker-a", parsed.value.wizard.steps[0].default_value);
+}
+
+test "augmentWizardManifest inserts nullboiler tracker selector before tracker settings" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const state_path = try fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var state = state_mod.State.init(allocator, state_path);
+    defer state.deinit();
+    try state.addInstance("nulltickets", "tracker-a", .{ .version = "v1.0.0" });
+
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nulltickets", "tracker-a");
+    defer allocator.free(inst_dir);
+    try std.fs.makePathAbsolute(inst_dir);
+    const config_path = try fixture.paths.instanceConfig(allocator, "nulltickets", "tracker-a");
+    defer allocator.free(config_path);
+    {
+        const file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("{\"port\":7711}\n");
+    }
+
+    const manifest_json =
+        \\{
+        \\  "schema_version": 1,
+        \\  "name": "nullboiler",
+        \\  "display_name": "NullBoiler",
+        \\  "description": "Orchestrator",
+        \\  "icon": "workflow",
+        \\  "repo": "nullclaw/nullboiler",
+        \\  "platforms": {},
+        \\  "launch": { "command": "server" },
+        \\  "health": { "endpoint": "/health", "port_from_config": "port" },
+        \\  "ports": [{ "name": "api", "config_key": "port", "default": 8080, "protocol": "http" }],
+        \\  "wizard": { "steps": [
+        \\    { "id": "port", "title": "API Port", "type": "number" },
+        \\    { "id": "tracker_enabled", "title": "Enable Tracker", "type": "toggle", "required": false },
+        \\    { "id": "tracker_url", "title": "Tracker URL", "type": "text" },
+        \\    { "id": "tracker_api_token", "title": "Tracker Token", "type": "secret", "required": false },
+        \\    { "id": "tracker_pipeline_id", "title": "Pipeline", "type": "text" },
+        \\    { "id": "tracker_claim_role", "title": "Claim Role", "type": "text" },
+        \\    { "id": "tracker_success_trigger", "title": "Success Trigger", "type": "text" },
+        \\    { "id": "tracker_max_concurrent_tasks", "title": "Max Tasks", "type": "number" }
+        \\  ] },
+        \\  "depends_on": [],
+        \\  "connects_to": []
+        \\}
+    ;
+
+    const rendered = augmentWizardManifest(allocator, "nullboiler", manifest_json, &state, fixture.paths) orelse
+        @panic("augmentWizardManifest");
+    defer allocator.free(rendered);
+
+    const parsed = try manifest_mod.parseManifest(allocator, rendered);
+    defer parsed.deinit();
+
+    const selector_idx = wizardStepIndex(parsed.value.wizard.steps, "tracker_instance") orelse
+        @panic("tracker_instance missing");
+    const enabled_idx = wizardStepIndex(parsed.value.wizard.steps, "tracker_enabled") orelse
+        @panic("tracker_enabled missing");
+    try std.testing.expect(selector_idx < enabled_idx);
+    try std.testing.expectEqual(@as(usize, 9), parsed.value.wizard.steps.len);
+}
+
+test "augmentWizardManifest picks next port for additional nulltickets instance" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const state_path = try fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var state = state_mod.State.init(allocator, state_path);
+    defer state.deinit();
+    try state.addInstance("nulltickets", "tracker-a", .{ .version = "v1.0.0" });
+
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nulltickets", "tracker-a");
+    defer allocator.free(inst_dir);
+    try std.fs.makePathAbsolute(inst_dir);
+    const config_path = try fixture.paths.instanceConfig(allocator, "nulltickets", "tracker-a");
+    defer allocator.free(config_path);
+    {
+        const file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("{\"port\":43000}\n");
+    }
+
+    const manifest_json =
+        \\{
+        \\  "schema_version": 1,
+        \\  "name": "nulltickets",
+        \\  "display_name": "NullTickets",
+        \\  "description": "Tracker",
+        \\  "icon": "tickets",
+        \\  "repo": "nullclaw/nulltickets",
+        \\  "platforms": {},
+        \\  "launch": { "command": "server" },
+        \\  "health": { "endpoint": "/health", "port_from_config": "port" },
+        \\  "ports": [{ "name": "api", "config_key": "port", "default": 43000, "protocol": "http" }],
+        \\  "wizard": { "steps": [
+        \\    { "id": "port", "title": "Port", "type": "number", "default_value": "43000" }
+        \\  ] },
+        \\  "depends_on": [],
+        \\  "connects_to": []
+        \\}
+    ;
+
+    const rendered = augmentWizardManifest(allocator, "nulltickets", manifest_json, &state, fixture.paths) orelse
+        @panic("augmentWizardManifest");
+    defer allocator.free(rendered);
+
+    const parsed = try manifest_mod.parseManifest(allocator, rendered);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.wizard.steps.len);
+    try std.testing.expectEqualStrings("port", parsed.value.wizard.steps[0].id);
+    const port = try std.fmt.parseInt(u16, parsed.value.wizard.steps[0].default_value, 10);
+    try std.testing.expect(port > 43000);
+}
+
+test "augmentWizardManifest picks next port for additional nullboiler instance" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const state_path = try fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var state = state_mod.State.init(allocator, state_path);
+    defer state.deinit();
+    try state.addInstance("nullboiler", "worker-a", .{ .version = "v1.0.0" });
+
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nullboiler", "worker-a");
+    defer allocator.free(inst_dir);
+    try std.fs.makePathAbsolute(inst_dir);
+    const config_path = try fixture.paths.instanceConfig(allocator, "nullboiler", "worker-a");
+    defer allocator.free(config_path);
+    {
+        const file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("{\"port\":44000}\n");
+    }
+
+    const manifest_json =
+        \\{
+        \\  "schema_version": 1,
+        \\  "name": "nullboiler",
+        \\  "display_name": "NullBoiler",
+        \\  "description": "Orchestrator",
+        \\  "icon": "workflow",
+        \\  "repo": "nullclaw/nullboiler",
+        \\  "platforms": {},
+        \\  "launch": { "command": "server" },
+        \\  "health": { "endpoint": "/health", "port_from_config": "port" },
+        \\  "ports": [{ "name": "api", "config_key": "port", "default": 44000, "protocol": "http" }],
+        \\  "wizard": { "steps": [
+        \\    { "id": "port", "title": "Port", "type": "number", "default_value": "44000" }
+        \\  ] },
+        \\  "depends_on": [],
+        \\  "connects_to": []
+        \\}
+    ;
+
+    const rendered = augmentWizardManifest(allocator, "nullboiler", manifest_json, &state, fixture.paths) orelse
+        @panic("augmentWizardManifest");
+    defer allocator.free(rendered);
+
+    const parsed = try manifest_mod.parseManifest(allocator, rendered);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.wizard.steps.len);
+    try std.testing.expectEqualStrings("port", parsed.value.wizard.steps[0].id);
+    const port = try std.fmt.parseInt(u16, parsed.value.wizard.steps[0].default_value, 10);
+    try std.testing.expect(port > 44000);
+}
+
+test "augmentWizardManifest picks next port for additional nullwatch instance" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const state_path = try fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var state = state_mod.State.init(allocator, state_path);
+    defer state.deinit();
+    try state.addInstance("nullwatch", "watch-a", .{ .version = "v1.0.0" });
+
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nullwatch", "watch-a");
+    defer allocator.free(inst_dir);
+    try std.fs.makePathAbsolute(inst_dir);
+    const config_path = try fixture.paths.instanceConfig(allocator, "nullwatch", "watch-a");
+    defer allocator.free(config_path);
+    {
+        const file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("{\"port\":45000}\n");
+    }
+
+    const manifest_json =
+        \\{
+        \\  "schema_version": 1,
+        \\  "name": "nullwatch",
+        \\  "display_name": "NullWatch",
+        \\  "description": "Observability",
+        \\  "icon": "watch",
+        \\  "repo": "nullclaw/nullwatch",
+        \\  "platforms": {},
+        \\  "launch": { "command": "serve" },
+        \\  "health": { "endpoint": "/health", "port_from_config": "port" },
+        \\  "ports": [{ "name": "api", "config_key": "port", "default": 45000, "protocol": "http" }],
+        \\  "wizard": { "steps": [
+        \\    { "id": "port", "title": "Port", "type": "number", "default_value": "45000" }
+        \\  ] },
+        \\  "depends_on": [],
+        \\  "connects_to": []
+        \\}
+    ;
+
+    const rendered = augmentWizardManifest(allocator, "nullwatch", manifest_json, &state, fixture.paths) orelse
+        @panic("augmentWizardManifest");
+    defer allocator.free(rendered);
+
+    const parsed = try manifest_mod.parseManifest(allocator, rendered);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.wizard.steps.len);
+    try std.testing.expectEqualStrings("port", parsed.value.wizard.steps[0].id);
+    const port = try std.fmt.parseInt(u16, parsed.value.wizard.steps[0].default_value, 10);
+    try std.testing.expect(port > 45000);
 }
 
 test "prepareWizardBody injects tracker settings for nullboiler" {
@@ -1160,6 +1750,161 @@ test "prepareWizardBody injects tracker settings for nullboiler" {
     try std.testing.expectEqualStrings("http://127.0.0.1:7711", obj.get("tracker_url").?.string);
     try std.testing.expectEqualStrings("secret-token", obj.get("tracker_api_token").?.string);
     try std.testing.expectEqualStrings("coder", obj.get("tracker_claim_role").?.string);
+    try std.testing.expectEqualStrings("complete", obj.get("tracker_success_trigger").?.string);
+    try std.testing.expectEqualStrings("1", obj.get("tracker_max_concurrent_tasks").?.string);
+}
+
+test "prepareWizardBody disables stale nullboiler tracker flag when no local tracker is selected" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    const rendered = prepareWizardBody(
+        allocator,
+        "nullboiler",
+        "{\"instance_name\":\"worker-a\",\"tracker_instance\":\"\",\"tracker_enabled\":\"true\",\"tracker_url\":\"http://127.0.0.1:7700\",\"tracker_api_token\":\"old\",\"tracker_pipeline_id\":\"pipe-dev\",\"tracker_claim_role\":\"coder\",\"tracker_success_trigger\":\"complete\",\"tracker_max_concurrent_tasks\":\"4\"}",
+        fixture.paths,
+    ) orelse @panic("prepareWizardBody");
+    defer allocator.free(rendered);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, rendered, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch @panic("parseFromSlice");
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("false", obj.get("tracker_enabled").?.string);
+    try std.testing.expect(obj.get("tracker_url") == null);
+    try std.testing.expect(obj.get("tracker_api_token") == null);
+    try std.testing.expect(obj.get("tracker_pipeline_id") == null);
+    try std.testing.expect(obj.get("tracker_claim_role") == null);
+    try std.testing.expect(obj.get("tracker_success_trigger") == null);
+    try std.testing.expect(obj.get("tracker_max_concurrent_tasks") == null);
+}
+
+test "prepareWizardBody defaults empty nullboiler tracker settings" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    fixture.paths.ensureDirs() catch @panic("ensureDirs");
+
+    const inst_dir = fixture.paths.instanceDir(allocator, "nulltickets", "tracker-a") catch @panic("instanceDir");
+    defer allocator.free(inst_dir);
+    std.fs.makePathAbsolute(inst_dir) catch @panic("makePathAbsolute");
+
+    const config_path = fixture.paths.instanceConfig(allocator, "nulltickets", "tracker-a") catch @panic("instanceConfig");
+    defer allocator.free(config_path);
+    {
+        const file = std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true }) catch @panic("createFileAbsolute");
+        defer file.close();
+        file.writeAll("{\"port\":7711}\n") catch @panic("writeAll");
+    }
+
+    const rendered = prepareWizardBody(
+        allocator,
+        "nullboiler",
+        "{\"instance_name\":\"worker-a\",\"tracker_instance\":\"tracker-a\",\"tracker_claim_role\":\"\",\"tracker_success_trigger\":\"\",\"tracker_max_concurrent_tasks\":\"\"}",
+        fixture.paths,
+    ) orelse @panic("prepareWizardBody");
+    defer allocator.free(rendered);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, rendered, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch @panic("parseFromSlice");
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("coder", obj.get("tracker_claim_role").?.string);
+    try std.testing.expectEqualStrings("complete", obj.get("tracker_success_trigger").?.string);
+    try std.testing.expectEqualStrings("1", obj.get("tracker_max_concurrent_tasks").?.string);
+}
+
+test "prepareWizardBody removes stale token when selected nulltickets has no token" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    fixture.paths.ensureDirs() catch @panic("ensureDirs");
+
+    const inst_dir = fixture.paths.instanceDir(allocator, "nulltickets", "tracker-a") catch @panic("instanceDir");
+    defer allocator.free(inst_dir);
+    std.fs.makePathAbsolute(inst_dir) catch @panic("makePathAbsolute");
+
+    const config_path = fixture.paths.instanceConfig(allocator, "nulltickets", "tracker-a") catch @panic("instanceConfig");
+    defer allocator.free(config_path);
+    {
+        const file = std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true }) catch @panic("createFileAbsolute");
+        defer file.close();
+        file.writeAll("{\"port\":7711}\n") catch @panic("writeAll");
+    }
+
+    const rendered = prepareWizardBody(
+        allocator,
+        "nullboiler",
+        "{\"instance_name\":\"worker-a\",\"tracker_instance\":\"tracker-a\",\"tracker_api_token\":\"stale\"}",
+        fixture.paths,
+    ) orelse @panic("prepareWizardBody");
+    defer allocator.free(rendered);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, rendered, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch @panic("parseFromSlice");
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("true", obj.get("tracker_enabled").?.string);
+    try std.testing.expectEqualStrings("http://127.0.0.1:7711", obj.get("tracker_url").?.string);
+    try std.testing.expect(obj.get("tracker_api_token") == null);
+}
+
+test "validateWizardBodyForInstall rejects missing nullboiler tracker instance" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    const rendered = validateWizardBodyForInstall(
+        allocator,
+        "nullboiler",
+        "{\"tracker_enabled\":\"true\",\"tracker_instance\":\"missing\",\"tracker_pipeline_id\":\"pipe-dev\"}",
+        fixture.paths,
+    ) orelse @panic("validateWizardBodyForInstall");
+    defer allocator.free(rendered);
+
+    try std.testing.expectEqualStrings("{\"error\":\"tracker_instance was not found\"}", rendered);
+}
+
+test "validateWizardBodyForInstall validates nullboiler tracker instance without explicit enabled flag" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    const rendered = validateWizardBodyForInstall(
+        allocator,
+        "nullboiler",
+        "{\"tracker_instance\":\"missing\",\"tracker_pipeline_id\":\"pipe-dev\"}",
+        fixture.paths,
+    ) orelse @panic("validateWizardBodyForInstall");
+    defer allocator.free(rendered);
+
+    try std.testing.expectEqualStrings("{\"error\":\"tracker_instance was not found\"}", rendered);
+}
+
+test "validateWizardBodyForInstall requires nullboiler tracker instance when tracker enabled" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    const rendered = validateWizardBodyForInstall(
+        allocator,
+        "nullboiler",
+        "{\"tracker_enabled\":\"true\",\"tracker_pipeline_id\":\"pipe-dev\"}",
+        fixture.paths,
+    ) orelse @panic("validateWizardBodyForInstall");
+    defer allocator.free(rendered);
+
+    try std.testing.expectEqualStrings("{\"error\":\"tracker_instance is required when tracker mode is enabled\"}", rendered);
 }
 
 test "handlePostWizard returns null for unknown component" {

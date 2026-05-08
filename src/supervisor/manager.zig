@@ -336,6 +336,68 @@ pub const Manager = struct {
         self.clearPid(inst);
     }
 
+    const HealthHost = struct {
+        value: []const u8 = "127.0.0.1",
+        owned: bool = false,
+
+        fn deinit(self: HealthHost, allocator: std.mem.Allocator) void {
+            if (self.owned) allocator.free(self.value);
+        }
+    };
+
+    fn normalizeHealthHost(allocator: std.mem.Allocator, host: []const u8) ![]const u8 {
+        if (host.len == 0 or
+            std.mem.eql(u8, host, "0.0.0.0") or
+            std.mem.eql(u8, host, "::") or
+            std.mem.eql(u8, host, "localhost"))
+        {
+            return allocator.dupe(u8, "127.0.0.1");
+        }
+        return allocator.dupe(u8, host);
+    }
+
+    fn readHealthHostFromConfigPath(self: *Manager, config_path: []const u8) ?[]const u8 {
+        const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch return null;
+        defer file.close();
+
+        const contents = file.readToEndAlloc(self.allocator, 1024 * 1024) catch return null;
+        defer self.allocator.free(contents);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, contents, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+
+        const host_value = parsed.value.object.get("host") orelse return null;
+        if (host_value != .string) return null;
+        return normalizeHealthHost(self.allocator, host_value.string) catch null;
+    }
+
+    fn instanceConfigPathForHealth(self: *Manager, inst: *const ManagedInstance) ?[]const u8 {
+        if (inst.config_path.len > 0) {
+            return self.allocator.dupe(u8, inst.config_path) catch null;
+        }
+        if (inst.working_dir.len > 0) {
+            return std.fs.path.join(self.allocator, &.{ inst.working_dir, "config.json" }) catch null;
+        }
+        return null;
+    }
+
+    fn resolveInstanceHealthHost(self: *Manager, inst: *const ManagedInstance) HealthHost {
+        const config_path = self.instanceConfigPathForHealth(inst) orelse return .{};
+        defer self.allocator.free(config_path);
+        const host = self.readHealthHostFromConfigPath(config_path) orelse return .{};
+        return .{ .value = host, .owned = true };
+    }
+
+    fn checkInstanceHealth(self: *Manager, inst: *const ManagedInstance) health.HealthCheckResult {
+        const host = self.resolveInstanceHealthHost(inst);
+        defer host.deinit(self.allocator);
+        return health.check(self.allocator, host.value, inst.port, inst.health_endpoint);
+    }
+
     /// Start an instance. binary_path is the path to the component binary.
     pub fn startInstance(
         self: *Manager,
@@ -464,10 +526,17 @@ pub const Manager = struct {
         errdefer owned.deinit(self.allocator);
 
         const now = std_compat.time.milliTimestamp();
-        const probe = if (runtime.port > 0)
-            health.check(self.allocator, "127.0.0.1", runtime.port, runtime.health_endpoint)
-        else
-            health.HealthCheckResult{ .ok = true };
+        const probe = if (runtime.port > 0) blk: {
+            const probe_inst = ManagedInstance{
+                .component = owned.component,
+                .name = owned.name,
+                .port = runtime.port,
+                .health_endpoint = owned.health_endpoint,
+                .working_dir = owned.working_dir,
+                .config_path = owned.config_path,
+            };
+            break :blk self.checkInstanceHealth(&probe_inst);
+        } else health.HealthCheckResult{ .ok = true };
 
         const status: Status = if (runtime.port == 0 or probe.ok) .running else .starting;
         const starting_since = if (status == .starting)
@@ -634,7 +703,7 @@ pub const Manager = struct {
         }
 
         // Check health endpoint
-        const result = health.check(self.allocator, "127.0.0.1", inst.port, inst.health_endpoint);
+        const result = self.checkInstanceHealth(inst);
         if (result.ok) {
             inst.status = .running;
             inst.last_health_ok = now;
@@ -699,7 +768,7 @@ pub const Manager = struct {
         }
 
         inst.last_health_check = now;
-        const result = health.check(self.allocator, "127.0.0.1", inst.port, inst.health_endpoint);
+        const result = self.checkInstanceHealth(inst);
         if (result.ok) {
             if (inst.health_consecutive_failures > 0) {
                 self.logSupervisor(inst.component, inst.name, "health check recovered after {d} consecutive failures", .{inst.health_consecutive_failures});
@@ -890,6 +959,56 @@ test "logSupervisor appends diagnostics to nullhub.log" {
     try std.testing.expect(std.mem.indexOf(u8, contents, "[nullhub/supervisor]") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "first diagnostic 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "second diagnostic") != null);
+}
+
+test "normalizeHealthHost maps wildcard and localhost to loopback" {
+    const allocator = std.testing.allocator;
+
+    const empty = try Manager.normalizeHealthHost(allocator, "");
+    defer allocator.free(empty);
+    try std.testing.expectEqualStrings("127.0.0.1", empty);
+
+    const wildcard = try Manager.normalizeHealthHost(allocator, "::");
+    defer allocator.free(wildcard);
+    try std.testing.expectEqualStrings("127.0.0.1", wildcard);
+
+    const localhost = try Manager.normalizeHealthHost(allocator, "localhost");
+    defer allocator.free(localhost);
+    try std.testing.expectEqualStrings("127.0.0.1", localhost);
+
+    const ipv6 = try Manager.normalizeHealthHost(allocator, "::1");
+    defer allocator.free(ipv6);
+    try std.testing.expectEqualStrings("::1", ipv6);
+}
+
+test "resolveInstanceHealthHost reads host from working dir config" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const inst_dir = try fixture.path(allocator, "watch");
+    defer allocator.free(inst_dir);
+    try std_compat.fs.makeDirAbsolute(inst_dir);
+
+    const config_path = try std.fs.path.join(allocator, &.{ inst_dir, "config.json" });
+    defer allocator.free(config_path);
+    const file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("{\"host\":\"::1\"}");
+
+    const inst = ManagedInstance{
+        .component = "nullwatch",
+        .name = "watch",
+        .working_dir = inst_dir,
+    };
+    const host = mgr.resolveInstanceHealthHost(&inst);
+    defer host.deinit(allocator);
+
+    try std.testing.expect(host.owned);
+    try std.testing.expectEqualStrings("::1", host.value);
 }
 
 test "status reporting for manually-added instance" {

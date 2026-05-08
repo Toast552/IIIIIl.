@@ -194,8 +194,19 @@ pub fn install(
         parsed_manifest = manifest_mod.parseManifest(allocator, json) catch null;
     } else |_| {}
 
-    // Use parsed manifest values or fall back to registry defaults
-    const launch_command = if (parsed_manifest) |pm| pm.value.launch.command else comp.default_launch_command;
+    // Use parsed manifest values or fall back to registry defaults.
+    var owned_launch_command: ?[]const u8 = null;
+    defer if (owned_launch_command) |value| allocator.free(value);
+    const raw_launch_command = if (parsed_manifest) |pm| blk: {
+        owned_launch_command = launch_args_mod.fromManifestLaunch(
+            allocator,
+            opts.component,
+            pm.value.launch.command,
+            pm.value.launch.args,
+        ) catch null;
+        break :blk owned_launch_command orelse comp.default_launch_command;
+    } else comp.default_launch_command;
+    const launch_command = registry.normalizeLaunchCommand(opts.component, raw_launch_command);
     const health_endpoint = if (parsed_manifest) |pm| pm.value.health.endpoint else comp.default_health_endpoint;
     const default_port = if (parsed_manifest) |pm| (if (pm.value.ports.len > 0) pm.value.ports[0].default else comp.default_port) else comp.default_port;
     defer if (parsed_manifest) |pm| pm.deinit();
@@ -365,28 +376,58 @@ fn resolveConfiguredPort(
     paths: paths_mod.Paths,
     state: *state_mod.State,
 ) u16 {
-    const parsed = std.json.parseFromSlice(
-        struct {
-            port: ?u16 = null,
-            gateway_port: ?u16 = null,
-            answers: ?struct {
-                port: ?u16 = null,
-                gateway_port: ?u16 = null,
-            } = null,
-        },
-        allocator,
-        answers_json,
-        .{ .allocate = .alloc_if_needed, .ignore_unknown_fields = true },
-    ) catch return findNextAvailablePort(allocator, default_port, paths, state);
-    defer parsed.deinit();
+    const requested = resolveRequestedPort(allocator, answers_json) orelse
+        return findNextAvailablePort(allocator, default_port, paths, state);
 
-    if (parsed.value.port) |v| return v;
-    if (parsed.value.gateway_port) |v| return v;
-    if (parsed.value.answers) |a| {
-        if (a.port) |v| return v;
-        if (a.gateway_port) |v| return v;
+    if (requested == default_port) {
+        return findNextAvailablePort(allocator, default_port, paths, state);
     }
-    return findNextAvailablePort(allocator, default_port, paths, state);
+
+    var used_ports = collectConfiguredPorts(allocator, paths, state) catch return if (isPortFree(requested))
+        requested
+    else
+        findFreePort(requested);
+    defer used_ports.deinit();
+    if (used_ports.contains(requested) or !isPortFree(requested)) {
+        return findNextAvailablePort(allocator, requested, paths, state);
+    }
+    return requested;
+}
+
+fn resolveRequestedPort(allocator: std.mem.Allocator, answers_json: []const u8) ?u16 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, answers_json, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+
+    if (parsed.value.object.get("port")) |value| {
+        if (parsePortValue(value)) |port| return port;
+    }
+    if (parsed.value.object.get("gateway_port")) |value| {
+        if (parsePortValue(value)) |port| return port;
+    }
+    if (parsed.value.object.get("answers")) |answers| {
+        if (answers == .object) {
+            if (answers.object.get("port")) |value| {
+                if (parsePortValue(value)) |port| return port;
+            }
+            if (answers.object.get("gateway_port")) |value| {
+                if (parsePortValue(value)) |port| return port;
+            }
+        }
+    }
+    return null;
+}
+
+fn parsePortValue(value: std.json.Value) ?u16 {
+    return switch (value) {
+        .integer => |raw| if (raw >= 0 and raw <= 65535) @intCast(raw) else null,
+        .number_string => |raw| std.fmt.parseInt(u16, raw, 10) catch null,
+        .string => |raw| std.fmt.parseInt(u16, raw, 10) catch null,
+        else => null,
+    };
 }
 
 fn persistAndStartInstance(
@@ -445,7 +486,7 @@ fn persistAndStartInstance(
     };
 }
 
-fn findNextAvailablePort(
+pub fn findNextAvailablePort(
     allocator: std.mem.Allocator,
     start: u16,
     paths: paths_mod.Paths,
@@ -501,7 +542,8 @@ fn readConfiguredInstancePort(
     const config_path = paths.instanceConfig(allocator, component, instance_name) catch return null;
     defer allocator.free(config_path);
 
-    const manifest_info = readManifestPortInfo(allocator, paths, component, version);
+    var manifest_info = readManifestPortInfo(allocator, paths, component, version);
+    defer manifest_info.deinit(allocator);
     if (manifest_info.port_from_config.len > 0) {
         if (readPortFromConfigPath(allocator, config_path, manifest_info.port_from_config)) |port| {
             return port;
@@ -515,7 +557,13 @@ fn readConfiguredInstancePort(
 
 const ManifestPortInfo = struct {
     port_from_config: []const u8 = "",
+    owns_port_from_config: bool = false,
     default_port: ?u16 = null,
+
+    fn deinit(self: *ManifestPortInfo, allocator: std.mem.Allocator) void {
+        if (self.owns_port_from_config) allocator.free(self.port_from_config);
+        self.* = .{};
+    }
 };
 
 fn readManifestPortInfo(
@@ -539,8 +587,14 @@ fn readManifestPortInfo(
     };
     defer parsed_manifest.deinit();
 
+    const raw_port_from_config = parsed_manifest.value.health.port_from_config;
+    const port_from_config = if (raw_port_from_config.len > 0)
+        allocator.dupe(u8, raw_port_from_config) catch ""
+    else
+        "";
     return .{
-        .port_from_config = parsed_manifest.value.health.port_from_config,
+        .port_from_config = port_from_config,
+        .owns_port_from_config = port_from_config.len > 0,
         .default_port = if (parsed_manifest.value.ports.len > 0) parsed_manifest.value.ports[0].default else null,
     };
 }
@@ -567,10 +621,14 @@ fn readPortFromConfigPath(allocator: std.mem.Allocator, config_path: []const u8,
         }
     }
 
-    return switch (current) {
-        .integer => |value| if (value >= 0 and value <= 65535) @intCast(value) else null,
-        else => null,
-    };
+    return parsePortValue(current);
+}
+
+fn shouldWritePortField(value: ?std.json.Value, port: u16, overwrite: bool) bool {
+    if (overwrite) return true;
+    const existing = value orelse return true;
+    const existing_port = parsePortValue(existing) orelse return true;
+    return existing_port != port;
 }
 
 fn injectPortFields(
@@ -587,15 +645,21 @@ fn injectPortFields(
     if (parsed.value != .object) return error.InvalidJson;
 
     var root = &parsed.value.object;
-    if (overwrite or root.get("port") == null) {
+    if (shouldWritePortField(root.get("port"), port, overwrite)) {
         try root.put(allocator, "port", .{ .integer = @as(i64, port) });
     }
-    if (overwrite or root.get("gateway_port") == null) {
+    if (shouldWritePortField(root.get("gateway_port"), port, overwrite)) {
         try root.put(allocator, "gateway_port", .{ .integer = @as(i64, port) });
     }
     if (root.getPtr("gateway")) |gateway_value| {
-        if (gateway_value.* == .object and (overwrite or gateway_value.object.get("port") == null)) {
-            try gateway_value.object.put(allocator, "port", .{ .integer = @as(i64, port) });
+        if (gateway_value.* == .object) {
+            if (shouldWritePortField(gateway_value.object.get("port"), port, overwrite)) {
+                try gateway_value.object.put(allocator, "port", .{ .integer = @as(i64, port) });
+            }
+        } else if (overwrite) {
+            var gateway_obj: std.json.ObjectMap = .empty;
+            try gateway_obj.put(allocator, "port", .{ .integer = @as(i64, port) });
+            gateway_value.* = .{ .object = gateway_obj };
         }
     } else {
         var gateway_obj: std.json.ObjectMap = .empty;
@@ -1203,6 +1267,19 @@ test "resolveConfiguredPort reads top-level port" {
     try std.testing.expectEqual(@as(u16, 9001), port);
 }
 
+test "resolveConfiguredPort reads string port" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    const state_path = try fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var state = state_mod.State.init(allocator, state_path);
+    defer state.deinit();
+
+    const port = resolveConfiguredPort(allocator, "{\"port\":\"9002\"}", 8080, fixture.paths, &state);
+    try std.testing.expectEqual(@as(u16, 9002), port);
+}
+
 test "resolveConfiguredPort reads nested answers port" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
@@ -1253,9 +1330,104 @@ test "resolveConfiguredPort skips configured instance ports" {
     try std.testing.expect(port > 43000);
 }
 
+test "resolveConfiguredPort skips configured string default port" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const state_path = try fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var state = state_mod.State.init(allocator, state_path);
+    defer state.deinit();
+    try state.addInstance("nullwatch", "watch-1", .{
+        .version = "v2026.3.8",
+        .auto_start = true,
+        .launch_mode = "serve",
+    });
+
+    const comp_dir = try std.fs.path.join(allocator, &.{ fixture.paths.root, "instances", "nullwatch" });
+    defer allocator.free(comp_dir);
+    std_compat.fs.makeDirAbsolute(comp_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nullwatch", "watch-1");
+    defer allocator.free(inst_dir);
+    std_compat.fs.makeDirAbsolute(inst_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const config_path = try fixture.paths.instanceConfig(allocator, "nullwatch", "watch-1");
+    defer allocator.free(config_path);
+    try writeFile(config_path, "{\"port\":\"43010\"}");
+
+    const port = resolveConfiguredPort(allocator, "{\"port\":\"43010\"}", 43010, fixture.paths, &state);
+    try std.testing.expect(port > 43010);
+}
+
+test "resolveConfiguredPort skips configured explicit non-default port" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const state_path = try fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var state = state_mod.State.init(allocator, state_path);
+    defer state.deinit();
+    try state.addInstance("nullwatch", "watch-1", .{
+        .version = "v2026.3.8",
+        .auto_start = true,
+        .launch_mode = "serve",
+    });
+
+    const comp_dir = try std.fs.path.join(allocator, &.{ fixture.paths.root, "instances", "nullwatch" });
+    defer allocator.free(comp_dir);
+    std_compat.fs.makeDirAbsolute(comp_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nullwatch", "watch-1");
+    defer allocator.free(inst_dir);
+    std_compat.fs.makeDirAbsolute(inst_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const config_path = try fixture.paths.instanceConfig(allocator, "nullwatch", "watch-1");
+    defer allocator.free(config_path);
+    try writeFile(config_path, "{\"port\":43020}");
+
+    const port = resolveConfiguredPort(allocator, "{\"port\":43020}", 7710, fixture.paths, &state);
+    try std.testing.expect(port > 43020);
+}
+
 test "injectPortFields fills missing port fields" {
     const allocator = std.testing.allocator;
     const rendered = try injectPortFields(allocator, "{\"instance_name\":\"instance-2\"}", 3002, false);
+    defer allocator.free(rendered);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(i64, 3002), parsed.value.object.get("port").?.integer);
+    try std.testing.expectEqual(@as(i64, 3002), parsed.value.object.get("gateway_port").?.integer);
+    try std.testing.expectEqual(@as(i64, 3002), parsed.value.object.get("gateway").?.object.get("port").?.integer);
+}
+
+test "injectPortFields overwrites stale string port fields" {
+    const allocator = std.testing.allocator;
+    const rendered = try injectPortFields(
+        allocator,
+        "{\"instance_name\":\"instance-2\",\"port\":\"3000\",\"gateway_port\":\"3000\",\"gateway\":{\"port\":\"3000\"}}",
+        3002,
+        false,
+    );
     defer allocator.free(rendered);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{
