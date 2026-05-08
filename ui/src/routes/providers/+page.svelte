@@ -529,7 +529,7 @@
     font-size: 0.875rem;
     font-family: var(--font-mono);
     outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
   }
 
@@ -667,7 +667,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-shadow: var(--text-glow);
   }
 
@@ -703,7 +703,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-shadow: var(--text-glow);
   }
 
@@ -808,7 +808,7 @@
     font-size: 0.75rem;
     font-family: var(--font-mono);
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease, transform 0.15s ease, text-shadow 0.15s ease;
   }
 
   .model-chip:hover {

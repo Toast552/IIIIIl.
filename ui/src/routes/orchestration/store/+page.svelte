@@ -364,7 +364,7 @@
     letter-spacing: 1px;
     cursor: pointer;
     white-space: nowrap;
-    transition: all 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease, transform 0.15s ease, text-shadow 0.15s ease;
   }
   .btn-primary:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 25%, transparent);
@@ -504,7 +504,7 @@
     text-transform: uppercase;
     letter-spacing: 0.5px;
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease, transform 0.15s ease, text-shadow 0.15s ease;
   }
   .btn-danger-sm:hover {
     background: color-mix(in srgb, var(--error) 20%, transparent);

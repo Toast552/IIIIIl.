@@ -236,7 +236,7 @@
     padding: 0.75rem 1rem;
     color: var(--fg);
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .option-btn:hover {
@@ -314,7 +314,7 @@
     font-size: 0.875rem;
     font-family: var(--font-mono);
     outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
   }
 
@@ -351,7 +351,7 @@
     padding: 0.6rem 0.75rem;
     color: var(--fg);
     cursor: pointer;
-    transition: all 0.1s ease;
+    transition: background-color 0.1s ease, border-color 0.1s ease, box-shadow 0.1s ease, color 0.1s ease, transform 0.1s ease, text-shadow 0.1s ease;
   }
 
   .dropdown-item:last-child {
@@ -410,7 +410,7 @@
     font-size: 0.875rem;
     font-family: var(--font-mono);
     outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
   }
 
@@ -446,7 +446,7 @@
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 2px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
   }
 
@@ -459,7 +459,7 @@
     top: 3px;
     background: var(--fg-dim);
     border-radius: 2px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .toggle input:checked + .toggle-slider {

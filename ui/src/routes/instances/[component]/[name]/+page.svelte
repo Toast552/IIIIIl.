@@ -1954,7 +1954,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-shadow: var(--text-glow);
     text-decoration: none;
   }
@@ -1997,7 +1997,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .tabs button:hover {
     color: var(--accent);
@@ -2026,7 +2026,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     backdrop-filter: blur(4px);
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .info-card:hover {
     border-color: color-mix(in srgb, var(--accent) 50%, transparent);
@@ -2264,7 +2264,7 @@
     background: var(--bg-surface);
     border: none;
     border-radius: 2px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
   }
   .toggle-thumb {
@@ -2275,7 +2275,7 @@
     height: 14px;
     background: var(--fg-dim);
     border-radius: 2px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .toggle-btn.on .toggle-track {
     background: color-mix(in srgb, var(--accent) 20%, transparent);

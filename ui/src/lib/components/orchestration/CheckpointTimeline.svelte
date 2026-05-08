@@ -80,7 +80,7 @@
     background: var(--border);
     border: 2px solid var(--fg-dim);
     flex-shrink: 0;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .dot.selected {
     background: var(--accent);

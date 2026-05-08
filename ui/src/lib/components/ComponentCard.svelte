@@ -77,7 +77,7 @@
     border-radius: 4px;
     padding: 1.5rem;
     color: var(--fg);
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     backdrop-filter: blur(4px);
   }
 
@@ -165,7 +165,7 @@
     padding: 0.375rem 0.75rem;
     border-radius: 2px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-transform: uppercase;
     letter-spacing: 1px;
     font-weight: bold;
