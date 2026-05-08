@@ -219,6 +219,62 @@ fn seedManagedInstance(server: *IntegrationServer, component: []const u8, name: 
     try file.writeAll(state_json);
 }
 
+fn writeSeedFile(server: *IntegrationServer, parts: []const []const u8, contents: []const u8) !void {
+    const path = try std.fs.path.join(server.allocator, parts);
+    defer server.allocator.free(path);
+
+    if (parts.len < 2) return error.InvalidPath;
+    var root_dir = try std_compat.fs.openDirAbsolute(parts[0], .{});
+    defer root_dir.close();
+
+    if (parts.len > 2) {
+        const parent_rel = try std.fs.path.join(server.allocator, parts[1 .. parts.len - 1]);
+        defer server.allocator.free(parent_rel);
+        try root_dir.makePath(parent_rel);
+    }
+
+    const file = try std_compat.fs.createFileAbsolute(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(contents);
+}
+
+fn seedLaunchableGatewayInstance(server: *IntegrationServer, component: []const u8, name: []const u8, port: u16) !void {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    try seedManagedInstance(server, component, name);
+
+    const root = try server.nullhubRoot();
+    defer server.allocator.free(root);
+
+    const config_json = try std.fmt.allocPrint(server.allocator, "{{\"gateway\":{{\"port\":{d}}}}}", .{port});
+    defer server.allocator.free(config_json);
+    try writeSeedFile(server, &.{ root, "instances", component, name, "config.json" }, config_json);
+
+    const binary_name = try std.fmt.allocPrint(server.allocator, "{s}-{s}", .{ component, "1.0.0" });
+    defer server.allocator.free(binary_name);
+    const script =
+        \\#!/bin/sh
+        \\set -eu
+        \\if [ "${1:-}" = "--export-manifest" ]; then
+        \\  printf '%s\n' '{"schema_version":1,"name":"nullboiler","display_name":"NullBoiler","description":"test fixture","icon":"boiler","repo":"nullclaw/nullboiler","platforms":{},"launch":{"command":"gateway","args":[]},"health":{"endpoint":"/health","port_from_config":"gateway.port","interval_ms":15000},"ports":[{"name":"gateway","config_key":"gateway.port","default":3000,"protocol":"http"}],"wizard":{"steps":[]},"depends_on":[],"connects_to":[]}'
+        \\  exit 0
+        \\fi
+        \\if [ "${1:-}" = "gateway" ]; then
+        \\  exec python3 -c 'import signal,sys,time; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); signal.signal(signal.SIGINT, lambda *_: sys.exit(0)); time.sleep(60)'
+        \\fi
+        \\exit 64
+    ;
+    try writeSeedFile(server, &.{ root, "bin", binary_name }, script);
+
+    const binary_path = try std.fs.path.join(server.allocator, &.{ root, "bin", binary_name });
+    defer server.allocator.free(binary_path);
+    if (comptime std_compat.fs.has_executable_bit) {
+        const file = try std_compat.fs.openFileAbsolute(binary_path, .{});
+        defer file.close();
+        try file.chmod(0o755);
+    }
+}
+
 test "integration harness serves health and core api routes" {
     var server = try IntegrationServer.start(std.testing.allocator);
     defer server.deinit();
@@ -305,6 +361,72 @@ test "integration harness covers settings and config round-trips" {
         try std.testing.expectEqual(std.http.Status.ok, resp.status);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"path\":\"gateway.port\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"value\":43123") != null);
+    }
+}
+
+test "integration harness covers instance lifecycle endpoints" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+        fn call(srv: *IntegrationServer) !void {
+            try seedLaunchableGatewayInstance(srv, "nullboiler", "demo", 43123);
+        }
+    }.call);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"stopped\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pid\":") == null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/start", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"started\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"starting\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pid\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"port\":43123") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/restart", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"started\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"starting\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pid\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"port\":43123") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/stop", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"stopped\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"stopped\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pid\":") == null);
     }
 }
 
