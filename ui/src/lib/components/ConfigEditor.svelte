@@ -185,7 +185,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, text-shadow 0.2s ease;
   }
   .mode-btn:first-child {
     border-radius: 2px 0 0 2px;
@@ -218,7 +218,7 @@
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 1px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .save-btn:hover:not(:disabled) {
@@ -275,11 +275,12 @@
     font-size: 0.875rem;
     resize: none;
     line-height: 1.6;
-    outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.5);
   }
-  .raw-editor:focus {
+  .raw-editor:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
     border-color: var(--accent);
     box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.5), 0 0 8px var(--border-glow);
   }

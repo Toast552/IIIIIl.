@@ -169,13 +169,14 @@
     font-family: var(--font-mono);
     font-size: 0.75rem;
     text-transform: uppercase;
-    outline: none;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
   }
 
-  .theme-select:focus,
+  .theme-select:focus-visible,
   .theme-select:hover {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
     border-color: var(--accent);
     box-shadow: 0 0 8px var(--border-glow);
   }

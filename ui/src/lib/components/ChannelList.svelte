@@ -228,7 +228,7 @@
         {#if schema?.hasAccounts && isNamedAccount(entry.account)}
           <span class="account-name">{entry.account}</span>
         {/if}
-        <button class="icon-btn remove-btn" onclick={() => removeChannel(i)} title="Remove">&#215;</button>
+        <button class="icon-btn remove-btn" onclick={() => removeChannel(i)} aria-label="Remove channel" title="Remove"><span aria-hidden="true">&#215;</span></button>
       </div>
 
       <div class="channel-fields">
@@ -355,7 +355,7 @@
     padding: 1rem;
     margin-bottom: 0.75rem;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .channel-row:hover {
@@ -449,7 +449,7 @@
     font-size: 0.875rem;
     font-family: var(--font-mono);
     outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
   }
 
@@ -486,7 +486,7 @@
     color: var(--fg-dim);
     font-size: 1rem;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .remove-btn:hover {
     background: color-mix(in srgb, var(--error, #e55) 15%, transparent);
@@ -514,7 +514,7 @@
     font-size: 0.8rem;
     font-family: var(--font-mono);
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-transform: uppercase;
     letter-spacing: 1px;
   }
@@ -552,7 +552,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .add-btn:hover {
     border-color: var(--accent);
@@ -591,7 +591,7 @@
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 2px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
   }
   .toggle-slider::before {
@@ -603,7 +603,7 @@
     top: 3px;
     background: var(--fg-dim);
     border-radius: 2px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .toggle input:checked + .toggle-slider {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -654,7 +654,7 @@
     border-bottom: 1px solid var(--border);
     color: var(--fg);
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease, transform 0.15s ease, text-shadow 0.15s ease;
     text-align: left;
     font-family: var(--font-mono);
   }

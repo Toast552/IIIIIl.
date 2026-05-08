@@ -389,18 +389,21 @@
             class="icon-btn"
             onclick={() => moveUp(i)}
             disabled={i === 0}
-            title="Move up">&#8593;</button
+            aria-label="Move provider up"
+            title="Move up"><span aria-hidden="true">&#8593;</span></button
           >
           <button
             class="icon-btn"
             onclick={() => moveDown(i)}
             disabled={i === entries.length - 1}
-            title="Move down">&#8595;</button
+            aria-label="Move provider down"
+            title="Move down"><span aria-hidden="true">&#8595;</span></button
           >
           <button
             class="icon-btn remove-btn"
             onclick={() => removeEntry(i)}
-            title="Remove">&#215;</button
+            aria-label="Remove provider"
+            title="Remove"><span aria-hidden="true">&#215;</span></button
           >
         </div>
       </div>
@@ -553,7 +556,7 @@
     padding: 1rem;
     margin-bottom: 0.75rem;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .provider-row:hover {
@@ -588,7 +591,7 @@
     font-size: 0.875rem;
     font-family: var(--font-mono);
     outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .provider-row-header select:focus {
@@ -614,7 +617,7 @@
     color: var(--fg-dim);
     font-size: 1rem;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .icon-btn:hover:not(:disabled) {
@@ -662,7 +665,7 @@
     font-size: 0.875rem;
     font-family: var(--font-mono);
     outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
   }
 
@@ -749,7 +752,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .status-dot {
@@ -825,7 +828,7 @@
     cursor: pointer;
     text-align: left;
     font-family: var(--font-mono);
-    transition: all 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease, transform 0.15s ease, text-shadow 0.15s ease;
   }
 
   .saved-item:last-child {
