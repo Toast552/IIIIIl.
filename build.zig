@@ -143,9 +143,11 @@ fn runCommandOrPanic(b: *std.Build, argv: []const []const u8) void {
 
     var child = std.process.spawn(io, .{
         .argv = argv,
+        .environ_map = &b.graph.environ_map,
         .stdin = .ignore,
         .stdout = .inherit,
         .stderr = .inherit,
+        .create_no_window = true,
     }) catch |err| std.debug.panic("failed to spawn {s}: {s}", .{ argv[0], @errorName(err) });
 
     const term = child.wait(io) catch |err| std.debug.panic("failed to wait {s}: {s}", .{ argv[0], @errorName(err) });
