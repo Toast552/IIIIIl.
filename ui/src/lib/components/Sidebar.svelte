@@ -125,6 +125,7 @@
 
   <div class="nav-section">
     <a href="/observability" class:active={currentPath.startsWith("/observability")}>Observability</a>
+    <a href="/mission-control" class:active={currentPath.startsWith("/mission-control")}>Mission Control</a>
   </div>
 
   <div class="nav-bottom">

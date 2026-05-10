@@ -23,6 +23,7 @@ NullTickets, NullWatch).
 - **Managed instance admin API** -- instance-scoped status, config, models, cron, channels, and skills routes for managed NullClaw installs
 - **Orchestration UI** -- workflow editor, poll-based run monitoring, checkpoint forking, encoded workflow/run/store links, and key-value store browser (proxied to NullTickets through NullHub)
 - **Observability cockpit** -- local NullWatch run summaries, span timelines, eval results, token usage, cost, and error context through a NullHub proxy
+- **Mission Control demo** -- local-first agent mission replay with orchestration, role-based agents, failure, checkpoint recovery, and live telemetry in one screen
 
 ## Quick Start
 
@@ -151,6 +152,83 @@ Local NullWatch setup:
      -d '{"run_id":"demo-run-1","eval_key":"tool_success","scorer":"deterministic","score":0.0,"verdict":"fail","dataset":"demo","notes":"The tool call timed out."}'
    ```
 
+**Mission Control API** -- requests to `/api/mission-control/*` drive a
+deterministic local demo scenario for the `/mission-control` page. The demo
+does not require hosted infrastructure or model secrets; it shows how
+NullTickets-style tasks, NullBoiler-style workflow checkpoints, and
+NullWatch-style traces can fit into one operator view. Responses include a
+schema version, scenario id, deterministic replay mode, controls, graph,
+timeline, telemetry, NullWatch-style run/span/eval trace references, and
+structured conflict errors for invalid actions. The scenario lives in a
+versioned embedded replay fixture at
+`src/api/mission_control/code_red.v1.json`; `zig build test` validates fixture
+schema, references, ordering, required phases, graph links, and telemetry phase
+coverage. Mission timeline trace links deep-link to `/observability?run_id=...`
+so a real NullWatch instance can attach detailed spans and evals without making
+the local demo depend on external infrastructure. `GET /api/mission-control/replay`
+exports the current snapshot, source fixture, and ecosystem mapping metadata as
+a portable JSON artifact for debugging and review.
+
+### Mission Control Demo
+
+Start NullHub locally and open `/mission-control`:
+
+```bash
+zig build run -- serve --host 127.0.0.1 --port 19802 --no-open
+```
+
+The page provides `Reset`, `Launch Mission`, and `Fork From Checkpoint`
+controls. Launching the mission advances a deterministic agent workflow through
+research, patching, checkpointing, test failure, human intervention, recovered
+test pass, and review completion. Timeline events include trace chips that map
+the cinematic replay back to local NullWatch-style run ids, span ids, operations,
+and eval keys. The page also includes timed story beats and a failed-vs-recovered
+comparison panel so the three-minute demo can be followed directly from the
+screen.
+
+Run the judge-mode demo driver against a started server:
+
+```bash
+MISSION_CONTROL_OPEN_BROWSER=1 ./scripts/mission_control_demo.sh
+```
+
+Record a local macOS video artifact for PR or hackathon review:
+
+```bash
+./scripts/record_mission_control_demo.sh
+```
+
+The generated video defaults to `docs/demo/nullhub-mission-control-demo.mov` and
+is ignored by git so it can be uploaded directly to the PR discussion or
+hackathon submission. See `docs/demo/mission-control-local-demo.md` for the
+full presenter runbook and `docs/demo/mission-control-pr-package.md` for the
+copy-ready PR title, description, validation matrix, and reviewer path.
+
+Export the current replay artifact:
+
+```bash
+curl -fsS http://127.0.0.1:19802/api/mission-control/replay \
+  -o mission-control-replay.json
+```
+
+The same export is available from the `Export Replay` button in Mission Control.
+See `docs/demo/mission-control-replay-artifact.md` for the artifact shape and
+ecosystem mapping.
+
+Run the live API smoke test against a started server:
+
+```bash
+NULLHUB_URL=http://127.0.0.1:19802 ./tests/test_mission_control_smoke.sh
+```
+
+Live mission state:
+
+![NullHub Mission Control live workflow](docs/screenshots/nullhub-mission-control-live.png)
+
+Recovered mission:
+
+![NullHub Mission Control recovered workflow](docs/screenshots/nullhub-mission-control-recovered.png)
+
 ### Observability Screenshots
 
 Flight Recorder overview:
@@ -182,6 +260,8 @@ End-to-end:
 
 ```bash
 ./tests/test_e2e.sh
+NULLHUB_URL=http://127.0.0.1:19802 ./tests/test_mission_control_smoke.sh
+MISSION_CONTROL_OPEN_BROWSER=1 ./scripts/mission_control_demo.sh
 ```
 
 `zig build test-integration` runs structured backend HTTP integration tests
@@ -206,6 +286,9 @@ src/
   api/                  # REST endpoints (components, instances, wizard, ...)
     orchestration.zig   # Reverse proxy to NullBoiler orchestration API
     observability.zig   # Reverse proxy to NullWatch tracing/eval API
+    mission_control.zig # Local deterministic agent mission demo API
+    mission_control_replay.zig # Typed replay fixture parser and validator
+    mission_control/    # Embedded Mission Control replay fixtures
   core/                 # Manifest parser, state, platform, paths
   installer/            # Download, build, UI module fetching
   supervisor/           # Process spawn, health checks, manager
@@ -213,10 +296,18 @@ ui/src/
   routes/               # SvelteKit pages
     orchestration/      # Orchestration pages (dashboard, workflows, runs, store)
     observability/      # NullWatch flight recorder page
+    mission-control/    # Local agent mission control room demo
   lib/components/       # Reusable Svelte components
     orchestration/      # GraphViewer, StateInspector, RunEventLog, InterruptPanel,
                         # CheckpointTimeline, WorkflowJsonEditor, NodeCard, SendProgressBar
   lib/api/              # Typed API client
 tests/
   test_e2e.sh           # End-to-end test script
+scripts/
+  mission_control_demo.sh        # Judge-mode local demo driver
+  record_mission_control_demo.sh # macOS local video recorder for the demo
+docs/demo/
+  mission-control-local-demo.md  # Presenter runbook and recording instructions
+  mission-control-replay-artifact.md # Replay JSON artifact schema and mapping
+  mission-control-pr-package.md  # Copy-ready PR body and reviewer checklist
 ```

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { page } from '$app/stores';
   import { onDestroy, onMount } from 'svelte';
   import { api } from '$lib/api/client';
 
@@ -31,6 +32,7 @@
   const sortedEvals = $derived(
     (selectedRun?.evals || []).slice().sort((a: any, b: any) => (a.recorded_at_ms || 0) - (b.recorded_at_ms || 0)),
   );
+  const requestedRunId = $derived($page.url.searchParams.get('run_id') || '');
 
   function extractWatchOptions(value: any): WatchOption[] {
     const instances = value?.instances?.nullwatch || {};
@@ -99,12 +101,14 @@
       runs = runsResult?.items || [];
       error = null;
 
-      if (selectedRunId && !runs.some((run) => run.run_id === selectedRunId)) {
+      if (selectedRunId && selectedRunId !== requestedRunId && !runs.some((run) => run.run_id === selectedRunId)) {
         selectedRunId = '';
         selectedRun = null;
       }
 
-      if (!selectedRunId && runs.length > 0) {
+      if (!selectedRunId && requestedRunId) {
+        await selectRun(requestedRunId);
+      } else if (!selectedRunId && runs.length > 0) {
         await selectRun(runs[0].run_id);
       } else if (selectedRunId) {
         await loadRun(selectedRunId, false);

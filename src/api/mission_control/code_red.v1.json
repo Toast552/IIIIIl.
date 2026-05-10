@@ -1,0 +1,505 @@
+{
+  "schema_version": 1,
+  "mode": "deterministic_local_replay",
+  "scenario_id": "mission-code-red",
+  "scenario_version": "2026-05-06",
+  "title": "Ship a bug fix through autonomous agents",
+  "run_ids": {
+    "failed": "run-demo-failed-test",
+    "recovered": "run-demo-recovered-fork"
+  },
+  "checkpoint_id": "cp-demo-before-test",
+  "human_instruction": "apply missing validation guard",
+  "phases": [
+    {
+      "id": "idle",
+      "track": "idle",
+      "rank": 0,
+      "starts_at_ms": 0,
+      "status": "idle",
+      "progress": 0,
+      "headline": "Mission ready. Launch the local agent stack."
+    },
+    {
+      "id": "launching",
+      "track": "primary",
+      "rank": 1,
+      "starts_at_ms": 0,
+      "status": "running",
+      "progress": 8,
+      "headline": "Backlog item claimed and orchestration run started."
+    },
+    {
+      "id": "research",
+      "track": "primary",
+      "rank": 2,
+      "starts_at_ms": 1500,
+      "status": "running",
+      "progress": 20,
+      "headline": "Research agent is isolating the defect."
+    },
+    {
+      "id": "coding",
+      "track": "primary",
+      "rank": 3,
+      "starts_at_ms": 3500,
+      "status": "running",
+      "progress": 36,
+      "headline": "Coder agent is applying a targeted patch."
+    },
+    {
+      "id": "checkpoint",
+      "track": "primary",
+      "rank": 4,
+      "starts_at_ms": 5500,
+      "status": "running",
+      "progress": 48,
+      "headline": "Checkpoint captured before validation."
+    },
+    {
+      "id": "testing",
+      "track": "primary",
+      "rank": 5,
+      "starts_at_ms": 7000,
+      "status": "running",
+      "progress": 60,
+      "headline": "Test runner is validating the patch."
+    },
+    {
+      "id": "failed",
+      "track": "primary",
+      "rank": 6,
+      "starts_at_ms": 9000,
+      "status": "intervention_required",
+      "progress": 64,
+      "headline": "Validation failed. Human intervention is required."
+    },
+    {
+      "id": "forking",
+      "track": "recovery",
+      "rank": 7,
+      "starts_at_ms": 0,
+      "status": "running",
+      "progress": 70,
+      "headline": "Forking from checkpoint with human guidance."
+    },
+    {
+      "id": "patching",
+      "track": "recovery",
+      "rank": 8,
+      "starts_at_ms": 1500,
+      "status": "running",
+      "progress": 80,
+      "headline": "Recovered run is applying the injected fix."
+    },
+    {
+      "id": "retesting",
+      "track": "recovery",
+      "rank": 9,
+      "starts_at_ms": 3500,
+      "status": "running",
+      "progress": 88,
+      "headline": "Recovered run is replaying tests."
+    },
+    {
+      "id": "review",
+      "track": "recovery",
+      "rank": 10,
+      "starts_at_ms": 5500,
+      "status": "running",
+      "progress": 94,
+      "headline": "Reviewer agent is approving the recovered fix."
+    },
+    {
+      "id": "completed",
+      "track": "recovery",
+      "rank": 11,
+      "starts_at_ms": 7000,
+      "status": "completed",
+      "progress": 100,
+      "headline": "Mission recovered and completed."
+    }
+  ],
+  "agents": [
+    {
+      "id": "agent-researcher",
+      "role": "researcher",
+      "active_phases": ["research"],
+      "done_after_phase": "research",
+      "blocked_phase": null,
+      "failed_phase": null,
+      "steps": [
+        {
+          "phase": "research",
+          "step": "reading ticket and isolating scope"
+        }
+      ]
+    },
+    {
+      "id": "agent-coder",
+      "role": "coder",
+      "active_phases": ["coding", "patching"],
+      "done_after_phase": "coding",
+      "blocked_phase": "failed",
+      "failed_phase": null,
+      "steps": [
+        {
+          "phase": "coding",
+          "step": "editing implementation"
+        },
+        {
+          "phase": "patching",
+          "step": "applying injected guard"
+        }
+      ]
+    },
+    {
+      "id": "agent-test-runner",
+      "role": "test",
+      "active_phases": ["testing", "retesting"],
+      "done_after_phase": "testing",
+      "blocked_phase": null,
+      "failed_phase": "failed",
+      "steps": [
+        {
+          "phase": "testing",
+          "step": "running failing validation"
+        },
+        {
+          "phase": "retesting",
+          "step": "replaying validation"
+        }
+      ]
+    },
+    {
+      "id": "agent-reviewer",
+      "role": "reviewer",
+      "active_phases": ["review"],
+      "done_after_phase": "review",
+      "blocked_phase": null,
+      "failed_phase": null,
+      "steps": [
+        {
+          "phase": "review",
+          "step": "checking recovered patch"
+        }
+      ]
+    }
+  ],
+  "graph": {
+    "nodes": [
+      {
+        "id": "ticket",
+        "label": "Ticket",
+        "kind": "tracker",
+        "phase": "launching",
+        "error_phase": null
+      },
+      {
+        "id": "research",
+        "label": "Research",
+        "kind": "agent",
+        "phase": "research",
+        "error_phase": null
+      },
+      {
+        "id": "code",
+        "label": "Patch",
+        "kind": "agent",
+        "phase": "coding",
+        "error_phase": null
+      },
+      {
+        "id": "checkpoint",
+        "label": "Checkpoint",
+        "kind": "checkpoint",
+        "phase": "checkpoint",
+        "error_phase": null
+      },
+      {
+        "id": "test",
+        "label": "Test",
+        "kind": "tool",
+        "phase": "testing",
+        "error_phase": "failed"
+      },
+      {
+        "id": "recover",
+        "label": "Fork",
+        "kind": "human",
+        "phase": "forking",
+        "error_phase": null
+      },
+      {
+        "id": "review",
+        "label": "Review",
+        "kind": "agent",
+        "phase": "review",
+        "error_phase": null
+      }
+    ],
+    "edges": [
+      {
+        "from": "ticket",
+        "to": "research",
+        "phase": "research",
+        "error_phase": null
+      },
+      {
+        "from": "research",
+        "to": "code",
+        "phase": "coding",
+        "error_phase": null
+      },
+      {
+        "from": "code",
+        "to": "checkpoint",
+        "phase": "checkpoint",
+        "error_phase": null
+      },
+      {
+        "from": "checkpoint",
+        "to": "test",
+        "phase": "testing",
+        "error_phase": "failed"
+      },
+      {
+        "from": "checkpoint",
+        "to": "recover",
+        "phase": "forking",
+        "error_phase": null
+      },
+      {
+        "from": "recover",
+        "to": "review",
+        "phase": "review",
+        "error_phase": null
+      }
+    ]
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "phase": "launching",
+      "source": "nulltickets",
+      "level": "info",
+      "title": "Task queued",
+      "detail": "Mission task entered the durable backlog.",
+      "trace": {
+        "kind": "span",
+        "run_id": "run-demo-failed-test",
+        "trace_id": "trace-demo-code-red-primary",
+        "span_id": "span-ticket-queued",
+        "operation": "ticket.claim"
+      }
+    },
+    {
+      "at_ms": 1500,
+      "phase": "research",
+      "source": "nullboiler",
+      "level": "info",
+      "title": "Workflow run started",
+      "detail": "Graph runtime selected researcher -> coder -> test -> review.",
+      "trace": {
+        "kind": "span",
+        "run_id": "run-demo-failed-test",
+        "trace_id": "trace-demo-code-red-primary",
+        "span_id": "span-workflow-started",
+        "operation": "workflow.dispatch"
+      }
+    },
+    {
+      "at_ms": 3500,
+      "phase": "coding",
+      "source": "nullclaw",
+      "level": "info",
+      "title": "Patch drafted",
+      "detail": "Coder agent produced a minimal implementation patch.",
+      "trace": {
+        "kind": "span",
+        "run_id": "run-demo-failed-test",
+        "trace_id": "trace-demo-code-red-primary",
+        "span_id": "span-agent-coder",
+        "operation": "agent.coder.patch"
+      }
+    },
+    {
+      "at_ms": 5500,
+      "phase": "checkpoint",
+      "source": "nullboiler",
+      "level": "info",
+      "title": "Checkpoint created",
+      "detail": "State saved as cp-demo-before-test.",
+      "trace": {
+        "kind": "span",
+        "run_id": "run-demo-failed-test",
+        "trace_id": "trace-demo-code-red-primary",
+        "span_id": "span-checkpoint-created",
+        "operation": "workflow.checkpoint"
+      }
+    },
+    {
+      "at_ms": 7000,
+      "phase": "failed",
+      "source": "nullwatch",
+      "level": "error",
+      "title": "Validation failed",
+      "detail": "tool.call shell returned exit code 1.",
+      "trace": {
+        "kind": "eval",
+        "run_id": "run-demo-failed-test",
+        "trace_id": "trace-demo-code-red-primary",
+        "span_id": "span-test-failure",
+        "eval_key": "tool_success",
+        "operation": "tool.shell.zig_build_test"
+      }
+    },
+    {
+      "at_ms": 9000,
+      "phase": "failed",
+      "source": "human",
+      "level": "warning",
+      "title": "Intervention requested",
+      "detail": "Fork from checkpoint and inject validation guard.",
+      "trace": {
+        "kind": "span",
+        "run_id": "run-demo-failed-test",
+        "trace_id": "trace-demo-code-red-primary",
+        "span_id": "span-human-intervention",
+        "operation": "human.checkpoint_fork"
+      }
+    },
+    {
+      "at_ms": 10500,
+      "phase": "forking",
+      "source": "nullboiler",
+      "level": "info",
+      "title": "Recovered fork started",
+      "detail": "run-demo-recovered-fork replayed from cp-demo-before-test.",
+      "trace": {
+        "kind": "span",
+        "run_id": "run-demo-recovered-fork",
+        "trace_id": "trace-demo-code-red-recovered",
+        "span_id": "span-recovered-fork",
+        "operation": "workflow.fork"
+      }
+    },
+    {
+      "at_ms": 13000,
+      "phase": "retesting",
+      "source": "nullwatch",
+      "level": "info",
+      "title": "Recovered tests passed",
+      "detail": "tool_success eval changed from fail to pass.",
+      "trace": {
+        "kind": "eval",
+        "run_id": "run-demo-recovered-fork",
+        "trace_id": "trace-demo-code-red-recovered",
+        "span_id": "span-recovered-tests",
+        "eval_key": "tool_success",
+        "operation": "tool.shell.zig_build_test"
+      }
+    },
+    {
+      "at_ms": 15000,
+      "phase": "completed",
+      "source": "nulltickets",
+      "level": "success",
+      "title": "Mission done",
+      "detail": "Ticket moved to review-approved terminal stage.",
+      "trace": {
+        "kind": "span",
+        "run_id": "run-demo-recovered-fork",
+        "trace_id": "trace-demo-code-red-recovered",
+        "span_id": "span-ticket-completed",
+        "operation": "ticket.complete"
+      }
+    }
+  ],
+  "telemetry": [
+    {
+      "phase": "idle",
+      "runs": 0,
+      "spans": 0,
+      "evals": 0,
+      "errors": 0,
+      "total_tokens": 0,
+      "total_cost_usd": 0.0,
+      "verdict": "not_started"
+    },
+    {
+      "phase": "research",
+      "runs": 1,
+      "spans": 2,
+      "evals": 0,
+      "errors": 0,
+      "total_tokens": 740,
+      "total_cost_usd": 0.006,
+      "verdict": "running"
+    },
+    {
+      "phase": "checkpoint",
+      "runs": 1,
+      "spans": 5,
+      "evals": 1,
+      "errors": 0,
+      "total_tokens": 1810,
+      "total_cost_usd": 0.017,
+      "verdict": "running"
+    },
+    {
+      "phase": "testing",
+      "runs": 1,
+      "spans": 7,
+      "evals": 1,
+      "errors": 0,
+      "total_tokens": 2320,
+      "total_cost_usd": 0.021,
+      "verdict": "running"
+    },
+    {
+      "phase": "failed",
+      "runs": 1,
+      "spans": 8,
+      "evals": 2,
+      "errors": 2,
+      "total_tokens": 2760,
+      "total_cost_usd": 0.022,
+      "verdict": "fail"
+    },
+    {
+      "phase": "retesting",
+      "runs": 2,
+      "spans": 13,
+      "evals": 3,
+      "errors": 2,
+      "total_tokens": 3910,
+      "total_cost_usd": 0.033,
+      "verdict": "recovering"
+    },
+    {
+      "phase": "completed",
+      "runs": 2,
+      "spans": 16,
+      "evals": 4,
+      "errors": 2,
+      "total_tokens": 4280,
+      "total_cost_usd": 0.036,
+      "verdict": "pass"
+    }
+  ],
+  "failure": {
+    "visible_from_phase": "failed",
+    "run_id": "run-demo-failed-test",
+    "checkpoint_id": "cp-demo-before-test",
+    "failed_step": "test",
+    "error_message": "zig build test exited with status 1",
+    "suggested_intervention": "Fork from checkpoint and inject the missing validation guard."
+  },
+  "recovery": {
+    "visible_from_phase": "forking",
+    "run_id": "run-demo-recovered-fork",
+    "forked_from": "cp-demo-before-test",
+    "human_instruction": "apply missing validation guard"
+  }
+}

@@ -1,98 +1,189 @@
-# Agent Flight Recorder
+# NullOS Mission Control
 
 ## Problem Discovered
 
-NullWatch already provides the observability layer for the nullclaw ecosystem:
-run summaries, spans, evals, OTLP ingest, cost, token usage, and failure context.
-It also exports a NullHub-compatible manifest. NullHub already provides the
-operator UI and orchestration pages, but it did not register NullWatch or expose
-its tracing/eval data in the UI.
+The nullclaw ecosystem already has the building blocks of a lightweight local
+agent platform: NullHub for control, NullBoiler for orchestration,
+NullTickets for tracker-backed work, and NullWatch for traces and evals.
+What was missing was a memorable local demo that shows these ideas as one
+operator experience.
+
+Without that vertical slice, a new contributor or hackathon judge has to infer
+the platform story from separate repositories, APIs, and docs.
 
 ## Chosen Solution
 
-Add a local-first Observability cockpit to NullHub:
+Add a local-first Mission Control page to NullHub:
 
-- register `nullwatch` as a known component
-- proxy `/api/observability/*` to a managed NullWatch instance
-- add a Flight Recorder page for runs, spans, evals, cost, tokens, and errors
-- document the local demo flow through NullHub's managed install path
+- a deterministic backend mission API under `/api/mission-control`
+- a versioned embedded replay fixture for scenario data
+- a `/mission-control` control-room UI
+- one cinematic workflow showing agent roles, checkpointing, test failure,
+  human intervention, recovered replay, review, and telemetry
+- schema-versioned API responses and structured errors for invalid actions
+- NullWatch-style trace references that map replay events to run ids, span ids,
+  operations, and eval keys
+- a replay artifact export for sharing the current snapshot, source fixture,
+  and ecosystem mapping as JSON
+- a local smoke test for the full mission lifecycle
+- a judge-mode demo driver and macOS local video recorder
+- screenshots and a written demo plan for PR review
+
+The demo is intentionally deterministic. It does not call hosted services,
+require model keys, or depend on a running multi-repo stack.
 
 ## Why This Idea Was Chosen
 
-This is stronger than a single CLI preflight because it connects multiple parts
-of the ecosystem into a visible agent platform story: execution, orchestration,
-task tracking, observability, and operations. It is still hackathon-sized because
-it uses existing NullWatch APIs and NullHub UI patterns instead of changing core
-agent runtime behavior.
+This was chosen over a smaller CLI-only contribution because it creates a
+stronger hackathon story: judges can see autonomy, orchestration,
+observability, failure recovery, and human-in-the-loop control in under three
+minutes.
+
+It belongs in NullHub because NullHub is already the control plane for the
+ecosystem. The page can honestly present simulated NullTickets-style tasks,
+NullBoiler-style checkpoints, and NullWatch-style telemetry while leaving a
+clear future path to real cross-service wiring.
 
 ## What Was Implemented
 
-- NullWatch component registration in the NullHub registry.
-- Observability reverse proxy with optional bearer token forwarding.
-- Sidebar entry and `/observability` UI page.
-- API client methods for NullWatch summary, runs, spans, evals, and health.
-- README documentation for the proxy and local demo setup.
+- Added `src/api/mission_control.zig` with structured mission state, reset,
+  launch, recover, deterministic phase progression, telemetry, graph nodes,
+  graph edges, agent roles, failure details, and recovery details.
+- Added `src/api/mission_control/code_red.v1.json` as the versioned replay
+  fixture for phase timing, graph, events, telemetry, and failure/recovery
+  metadata.
+- Added `src/api/mission_control_replay.zig` to parse and validate replay
+  fixtures before serving mission state.
+- Added validated trace references in mission events so the demo can deep-link
+  from Mission Control to `/observability?run_id=...` without requiring
+  NullWatch to be running for the local replay.
+- Added explicit response metadata: `schema_version`, `mode`, `scenario_id`,
+  `scenario_version`, and `generated_at_ms`.
+- Added `GET /api/mission-control/replay` to export the current snapshot,
+  source fixture, and NullTickets/NullBoiler/NullClaw/NullWatch mapping
+  metadata as a portable JSON artifact.
+- Added transition guards so early recovery and duplicate launch return
+  actionable `409 Conflict` responses.
+- Registered the Mission Control API in the NullHub server route table and API
+  metadata.
+- Added typed frontend client methods for mission state and actions.
+- Added a sidebar entry and `/mission-control` Svelte page with adaptive
+  polling, retry handling, trace chips, observability deep links, and responsive
+  mission panels.
+- Added in-screen three-minute story beats and a failed-vs-recovered comparison
+  panel so the demo narrative remains visible during judging and PR review.
+- Added a PR-ready plan file, README documentation, and screenshots.
+- Added backend tests for mission path routing, idle state, failure state,
+  recovery state, action handlers, invalid transitions, and route semantics.
+- Added replay fixture tests for duplicate ids, graph references, telemetry
+  references, trace references, ordering, required fields, and required phases.
+- Added `tests/test_mission_control_smoke.sh` for live API validation.
+- Added `scripts/mission_control_demo.sh` for a timed judge-mode mission run.
+- Added `scripts/record_mission_control_demo.sh` and
+  `docs/demo/mission-control-local-demo.md` so the local demo can be recorded
+  as a review video artifact.
+- Added `docs/demo/mission-control-replay-artifact.md` to document the export
+  schema and ecosystem mapping.
+- Added `docs/demo/mission-control-pr-package.md` with the copy-ready PR title,
+  PR description, reviewer path, validation matrix, and three-minute hackathon
+  story.
 
 ## Files Changed
 
-- `src/installer/registry.zig`
-- `src/api/observability.zig`
-- `src/api/proxy.zig`
-- `src/api/components.zig`
+- `MISSION_CONTROL_PLAN.md`
+- `src/api/mission_control.zig`
+- `src/api/mission_control_replay.zig`
+- `src/api/mission_control/code_red.v1.json`
 - `src/api/meta.zig`
 - `src/root.zig`
 - `src/server.zig`
 - `ui/src/lib/api/client.ts`
 - `ui/src/lib/components/Sidebar.svelte`
 - `ui/src/routes/observability/+page.svelte`
+- `ui/src/routes/mission-control/+page.svelte`
+- `tests/test_mission_control_smoke.sh`
+- `scripts/mission_control_demo.sh`
+- `scripts/record_mission_control_demo.sh`
+- `docs/demo/.gitignore`
+- `docs/demo/mission-control-local-demo.md`
+- `docs/demo/mission-control-replay-artifact.md`
+- `docs/demo/mission-control-pr-package.md`
+- `docs/screenshots/nullhub-mission-control-live.png`
+- `docs/screenshots/nullhub-mission-control-recovered.png`
 - `README.md`
 - `HACKATHON_SUBMISSION.md`
 
 ## How To Test Or Demo
 
-Start NullHub:
+Run the backend tests:
 
 ```bash
-zig build run -- serve --no-open
+zig build test -Dembed-ui=false --summary all
 ```
 
-Install NullWatch from NullHub:
-
-1. Open the web UI.
-2. Go to `Install Component`.
-3. Select `NullWatch`.
-4. Keep or set the API port to `7710`.
-5. Finish the wizard. The installer starts the NullWatch instance and NullHub
-   discovers it automatically.
-
-Optional sample data can be ingested through the NullHub proxy:
+Build the UI:
 
 ```bash
-curl -X POST http://127.0.0.1:19800/api/observability/v1/spans \
-  -H 'Content-Type: application/json' \
-  -d '{"run_id":"demo-run-1","trace_id":"trace-demo-1","span_id":"span-1","source":"nullclaw","operation":"tool.call","status":"error","started_at_ms":1710000000000,"ended_at_ms":1710000001500,"tool_name":"shell","error_message":"tool call failed: command timed out","attributes_json":"{\"exit_code\":124}"}'
-
-curl -X POST http://127.0.0.1:19800/api/observability/v1/evals \
-  -H 'Content-Type: application/json' \
-  -d '{"run_id":"demo-run-1","eval_key":"tool_success","scorer":"deterministic","score":0.0,"verdict":"fail","dataset":"demo","notes":"The tool call timed out."}'
+npm --prefix ui run build
 ```
 
-Open `/observability` in NullHub and inspect the NullWatch runs.
+Start NullHub locally:
 
-## Screenshots
+```bash
+zig build run -- serve --host 127.0.0.1 --port 19802 --no-open
+```
 
-Flight Recorder overview:
+Run the live smoke test:
 
-![NullHub Observability overview](docs/screenshots/nullhub-observability-overview.png)
+```bash
+NULLHUB_URL=http://127.0.0.1:19802 ./tests/test_mission_control_smoke.sh
+```
 
-Failure detail with tool-call error context:
+Run the automated local demo:
 
-![NullHub Observability failure detail](docs/screenshots/nullhub-observability-failure.png)
+```bash
+MISSION_CONTROL_OPEN_BROWSER=1 ./scripts/mission_control_demo.sh
+```
+
+Export the current replay artifact:
+
+```bash
+curl -fsS http://127.0.0.1:19802/api/mission-control/replay \
+  -o mission-control-replay.json
+```
+
+Record a local macOS video artifact:
+
+```bash
+./scripts/record_mission_control_demo.sh
+```
+
+The generated `.mov` is ignored by git and can be uploaded directly to the PR
+discussion or hackathon submission.
+
+Open `/mission-control`, then:
+
+1. Click `Launch Mission`.
+2. Watch the workflow progress through research, patching, checkpointing, and
+   test execution.
+3. When the test fails, click `Fork From Checkpoint`.
+4. Use the trace chips or failed/recovered run links to jump into Flight
+   Recorder deep links.
+5. Watch the recovered run pass and complete review.
+
+Live mission state:
+
+![NullHub Mission Control live workflow](docs/screenshots/nullhub-mission-control-live.png)
+
+Recovered mission:
+
+![NullHub Mission Control recovered workflow](docs/screenshots/nullhub-mission-control-recovered.png)
 
 ## Limitations And Future Improvements
 
-- `NULLWATCH_URL` remains useful for pointing NullHub at an external NullWatch
-  instance, but the default demo path uses a managed NullWatch install.
-- The first UI version renders a compact timeline, not a full waterfall chart.
-- Run correlation with NullBoiler orchestration pages can be added as a follow-up
-  when both systems share stable run ids.
+- The MVP uses deterministic demo state instead of real cross-service execution.
+- The mission replay maps to NullTickets, NullBoiler, and NullWatch concepts,
+  but does not yet write into those services.
+- A future version could add durable replay storage, side-by-side replay
+  comparison, exportable replay bundles, real NullWatch span hydration, and a
+  judge-mode one-click replay.

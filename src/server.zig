@@ -27,6 +27,7 @@ const usage_api = @import("api/usage.zig");
 const report_api = @import("api/report.zig");
 const orchestration_api = @import("api/orchestration.zig");
 const observability_api = @import("api/observability.zig");
+const mission_control_api = @import("api/mission_control.zig");
 const launch_args_mod = @import("core/launch_args.zig");
 const ui_modules = @import("installer/ui_modules.zig");
 const orchestrator = @import("installer/orchestrator.zig");
@@ -790,10 +791,16 @@ pub const Server = struct {
             instances_api.isTicketsActionPath(target) or
             logs_api.isLogsPath(target) or
             orchestration_api.isProxyPath(target) or
-            observability_api.isProxyPath(target);
+            observability_api.isProxyPath(target) or
+            mission_control_api.isPath(target);
     }
 
     fn route(self: *Server, allocator: std.mem.Allocator, method: []const u8, target: []const u8, body: []const u8) Response {
+        if (mission_control_api.isPath(target)) {
+            const resp = mission_control_api.handle(allocator, method, target);
+            return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
+        }
+
         if (std.mem.eql(u8, method, "GET")) {
             if (std.mem.eql(u8, target, "/health")) {
                 return .{
@@ -2191,6 +2198,7 @@ test "routeWithoutServerMutex keeps orchestration proxy requests off global lock
     try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration/runs"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration/store/search"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/observability/v1/runs"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/mission-control/state"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nullclaw/demo/logs"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nulltickets/tracker-a/tickets"));
     try std.testing.expect(!Server.routeWithoutServerMutex("/api/components"));
