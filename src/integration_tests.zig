@@ -364,6 +364,47 @@ test "integration harness covers settings and config round-trips" {
     }
 }
 
+test "integration harness covers settings and config route contracts" {
+    var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+        fn call(srv: *IntegrationServer) !void {
+            try seedManagedInstance(srv, "nullboiler", "demo");
+        }
+    }.call);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/settings", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/instances/nullboiler/demo/config",
+            .method = .PATCH,
+            .body = "{\"gateway\":{\"port\":43124},\"provider\":\"patched\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"saved\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/config?path=gateway.port" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"value\":43124") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/config", .method = .DELETE });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+}
+
 test "integration harness covers settings and config failure paths" {
     var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
         fn call(srv: *IntegrationServer) !void {
