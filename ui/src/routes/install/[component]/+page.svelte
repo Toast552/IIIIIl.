@@ -7,21 +7,39 @@
   let componentName = $derived($page.params.component);
   let wizardData = $state<any>(null);
   let wizardError = $state('');
+  let selectedVersion = $state('latest');
+  let wizardRequestSeq = 0;
+  let wizardSteps = $derived(
+    (wizardData?.wizard?.steps || wizardData?.steps || []).filter((step: any) => {
+      if (step.id === 'gateway_port') return false;
+      if (step.id === 'port') return componentName !== 'nullclaw';
+      return true;
+    }),
+  );
 
   $effect(() => {
     const comp = componentName;
+    const version = selectedVersion;
+    const requestSeq = ++wizardRequestSeq;
     wizardData = null;
     wizardError = '';
-    api.getWizard(comp).then((data) => {
+    api.getWizard(comp, version).then((data) => {
+      if (requestSeq !== wizardRequestSeq) return;
       if (data?.error) {
         wizardError = data.error;
       } else {
         wizardData = data;
       }
     }).catch((e) => {
+      if (requestSeq !== wizardRequestSeq) return;
       wizardError = (e as Error).message;
     });
   });
+
+  function handleVersionChange(version: string) {
+    selectedVersion = version || 'latest';
+  }
+
 </script>
 
 <div class="wizard-page">
@@ -33,7 +51,8 @@
   {:else if wizardData}
     <WizardRenderer
       component={componentName}
-      steps={(wizardData?.wizard?.steps || wizardData?.steps || []).filter((s: any) => s.id !== 'gateway_port' && s.id !== 'port')}
+      steps={wizardSteps}
+      onVersionChange={handleVersionChange}
       onComplete={() => goto('/')}
     />
   {:else}

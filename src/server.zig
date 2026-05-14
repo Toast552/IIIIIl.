@@ -14,16 +14,19 @@ const updates_api = @import("api/updates.zig");
 const access = @import("access.zig");
 const mdns_mod = @import("mdns.zig");
 const state_mod = @import("core/state.zig");
+const integration_mod = @import("core/integration.zig");
 const paths_mod = @import("core/paths.zig");
 const manager_mod = @import("supervisor/manager.zig");
 const process_mod = @import("supervisor/process.zig");
 const runtime_state_mod = @import("supervisor/runtime_state.zig");
+const instance_runtime = @import("api/instance_runtime.zig");
 const wizard_api = @import("api/wizard.zig");
 const providers_api = @import("api/providers.zig");
 const channels_api = @import("api/channels.zig");
 const usage_api = @import("api/usage.zig");
 const report_api = @import("api/report.zig");
 const orchestration_api = @import("api/orchestration.zig");
+const observability_api = @import("api/observability.zig");
 const launch_args_mod = @import("core/launch_args.zig");
 const ui_modules = @import("installer/ui_modules.zig");
 const orchestrator = @import("installer/orchestrator.zig");
@@ -156,11 +159,22 @@ pub const Server = struct {
         };
         defer self.allocator.free(desired_binary);
 
-        var desired_launch = launch_args_mod.resolve(self.allocator, entry.launch_mode, entry.verbose) catch {
+        const launch_mode = normalizedLaunchModeForRestore(component, entry.launch_mode);
+        var desired_launch = launch_args_mod.resolve(self.allocator, launch_mode, entry.verbose) catch {
             self.terminatePersistedRuntime(&runtime, component, name);
             return false;
         };
         defer desired_launch.deinit();
+
+        if (!std.mem.eql(u8, launch_mode, entry.launch_mode)) {
+            _ = self.state.updateInstance(component, name, .{
+                .version = entry.version,
+                .auto_start = entry.auto_start,
+                .launch_mode = launch_mode,
+                .verbose = entry.verbose,
+            }) catch {};
+            self.state.save() catch {};
+        }
 
         if (!persistedMatchesDesired(runtime, desired_binary, desired_launch.primary_command, desired_launch.argv)) {
             self.terminatePersistedRuntime(&runtime, component, name);
@@ -170,6 +184,18 @@ pub const Server = struct {
         const restored = self.manager.adoptInstance(component, name, runtime) catch return false;
         if (!restored) runtime_state_mod.delete(self.allocator, self.paths, component, name);
         return restored;
+    }
+
+    fn normalizedLaunchModeForRestore(component: []const u8, launch_mode: []const u8) []const u8 {
+        const known = registry.findKnownComponent(component) orelse return launch_mode;
+        const normalized = registry.normalizeLaunchCommand(component, launch_mode);
+        if (!std.mem.eql(u8, known.default_launch_command, "gateway") and std.mem.eql(u8, normalized, "gateway")) {
+            return known.default_launch_command;
+        }
+        if (std.mem.eql(u8, component, "nullwatch") and std.mem.eql(u8, normalized, "nullwatch")) {
+            return known.default_launch_command;
+        }
+        return normalized;
     }
 
     fn terminatePersistedRuntime(
@@ -527,6 +553,10 @@ pub const Server = struct {
             "NULLTICKETS_URL"
         else if (std.mem.eql(u8, name, "NULLTICKETS_TOKEN"))
             "NULLTICKETS_TOKEN"
+        else if (std.mem.eql(u8, name, "NULLWATCH_URL"))
+            "NULLWATCH_URL"
+        else if (std.mem.eql(u8, name, "NULLWATCH_TOKEN"))
+            "NULLWATCH_TOKEN"
         else
             return null;
         return if (std.c.getenv(name_z)) |value| std.mem.span(value) else null;
@@ -552,8 +582,215 @@ pub const Server = struct {
         return getEnv("NULLTICKETS_TOKEN");
     }
 
+    const ManagedBackendConfig = struct {
+        url: []u8,
+        token: ?[]u8 = null,
+
+        fn deinit(self: *ManagedBackendConfig, allocator: std.mem.Allocator) void {
+            allocator.free(self.url);
+            if (self.token) |token| allocator.free(token);
+            self.* = undefined;
+        }
+    };
+
+    fn resolveManagedBackend(self: *Server, allocator: std.mem.Allocator, component: []const u8, requested_name: ?[]const u8) ?ManagedBackendConfig {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (std.mem.eql(u8, component, "nullboiler")) {
+            const configs = integration_mod.listNullBoilers(allocator, self.state, self.paths) catch return null;
+            defer integration_mod.deinitNullBoilerConfigs(allocator, configs);
+            return self.resolveManagedBackendFromConfigs(allocator, "nullboiler", requested_name, configs);
+        }
+
+        if (std.mem.eql(u8, component, "nulltickets")) {
+            const configs = integration_mod.listNullTickets(allocator, self.state, self.paths) catch return null;
+            defer integration_mod.deinitNullTicketsConfigs(allocator, configs);
+            return self.resolveManagedBackendFromConfigs(allocator, "nulltickets", requested_name, configs);
+        }
+
+        return null;
+    }
+
+    fn resolveManagedBackendFromConfigs(self: *Server, allocator: std.mem.Allocator, component: []const u8, requested_name: ?[]const u8, configs: anytype) ?ManagedBackendConfig {
+        if (configs.len == 0) return null;
+        if (requested_name) |wanted| {
+            for (configs) |cfg| {
+                if (std.mem.eql(u8, cfg.name, wanted)) {
+                    return managedBackendFromConfig(allocator, cfg.port, cfg.api_token);
+                }
+            }
+            return null;
+        }
+
+        const selected = self.selectManagedBackendIndex(component, configs);
+        return managedBackendFromConfig(allocator, configs[selected].port, configs[selected].api_token);
+    }
+
+    fn selectManagedBackendIndex(self: *Server, component: []const u8, configs: anytype) usize {
+        var fallback: usize = 0;
+        for (configs, 0..) |cfg, idx| {
+            if (std.mem.eql(u8, cfg.name, "default")) fallback = idx;
+            const status = self.manager.getStatus(component, cfg.name) orelse continue;
+            if (status.status == .running) return idx;
+        }
+        return fallback;
+    }
+
+    fn managedBackendFromConfig(allocator: std.mem.Allocator, port: u16, token: ?[]const u8) ?ManagedBackendConfig {
+        const url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port}) catch return null;
+        const owned_token = if (token) |value| allocator.dupe(u8, value) catch {
+            allocator.free(url);
+            return null;
+        } else null;
+        return .{
+            .url = url,
+            .token = owned_token,
+        };
+    }
+
+    fn shouldResolveManagedBackend(env_url: ?[]const u8, requested_name: ?[]const u8) bool {
+        return requested_name != null or env_url == null;
+    }
+
+    fn selectBackendUrl(env_url: ?[]const u8, managed: ?ManagedBackendConfig, requested_name: ?[]const u8) ?[]const u8 {
+        if (requested_name != null) return if (managed) |cfg| cfg.url else null;
+        return env_url orelse if (managed) |cfg| cfg.url else null;
+    }
+
+    fn selectBackendToken(env_token: ?[]const u8, managed: ?ManagedBackendConfig, requested_name: ?[]const u8) ?[]const u8 {
+        if (requested_name != null) return if (managed) |cfg| cfg.token else null;
+        return env_token orelse if (managed) |cfg| cfg.token else null;
+    }
+
+    const WatchTarget = struct {
+        url: ?[]const u8 = null,
+        url_owned: bool = false,
+        token: ?[]const u8 = null,
+        token_owned: bool = false,
+
+        fn deinit(self: WatchTarget, allocator: std.mem.Allocator) void {
+            if (self.url_owned) if (self.url) |value| allocator.free(value);
+            if (self.token_owned) if (self.token) |value| allocator.free(value);
+        }
+    };
+
+    const WatchCandidate = struct {
+        name: []const u8,
+        port: u16,
+    };
+
+    const WatchCandidateSelection = struct {
+        running: ?WatchCandidate = null,
+        starting: ?WatchCandidate = null,
+        selected: ?WatchCandidate = null,
+
+        fn prefer(current: ?WatchCandidate, next: WatchCandidate) WatchCandidate {
+            const existing = current orelse return next;
+            return if (std.mem.order(u8, next.name, existing.name) == .lt) next else existing;
+        }
+
+        fn add(self: *@This(), selected_name: ?[]const u8, candidate: WatchCandidate, status: manager_mod.Status) void {
+            if (candidate.port == 0) return;
+
+            switch (status) {
+                .running => {
+                    if (selected_name) |name| {
+                        if (std.mem.eql(u8, name, candidate.name)) self.selected = candidate;
+                    }
+                    self.running = prefer(self.running, candidate);
+                },
+                .starting, .restarting => {
+                    if (selected_name) |name| {
+                        if (std.mem.eql(u8, name, candidate.name)) self.selected = candidate;
+                    }
+                    self.starting = prefer(self.starting, candidate);
+                },
+                .stopped, .stopping, .failed => {},
+            }
+        }
+    };
+
+    fn getWatchTarget(self: *Server, allocator: std.mem.Allocator, selected_name: ?[]const u8) WatchTarget {
+        const env_token = getEnv("NULLWATCH_TOKEN");
+        if (selected_name == null) {
+            if (getEnv("NULLWATCH_URL")) |url| return .{ .url = url, .token = env_token };
+        }
+        return self.getManagedWatchTarget(allocator, env_token, selected_name) catch .{ .token = env_token };
+    }
+
+    fn getManagedWatchTarget(self: *Server, allocator: std.mem.Allocator, token_override: ?[]const u8, selected_name: ?[]const u8) !WatchTarget {
+        var candidates = WatchCandidateSelection{};
+
+        if (self.state.instances.getPtr("nullwatch")) |watch_instances| {
+            var state_it = watch_instances.iterator();
+            while (state_it.next()) |entry| {
+                const snapshot = instance_runtime.resolve(
+                    allocator,
+                    self.paths,
+                    self.manager,
+                    "nullwatch",
+                    entry.key_ptr.*,
+                    entry.value_ptr.*,
+                );
+                candidates.add(selected_name, .{ .name = entry.key_ptr.*, .port = snapshot.port }, snapshot.status);
+            }
+        }
+
+        var manager_it = self.manager.instances.iterator();
+        while (manager_it.next()) |entry| {
+            const inst = entry.value_ptr.*;
+            if (!std.mem.eql(u8, inst.component, "nullwatch")) continue;
+            candidates.add(selected_name, .{ .name = inst.name, .port = inst.port }, inst.status);
+        }
+
+        if (selected_name != null) {
+            if (candidates.selected) |candidate| {
+                return try self.buildManagedWatchTarget(allocator, candidate.name, candidate.port, token_override);
+            }
+            return .{ .token = token_override };
+        }
+        if (candidates.running) |candidate| {
+            return try self.buildManagedWatchTarget(allocator, candidate.name, candidate.port, token_override);
+        }
+        if (candidates.starting) |candidate| {
+            return try self.buildManagedWatchTarget(allocator, candidate.name, candidate.port, token_override);
+        }
+        return .{ .token = token_override };
+    }
+
+    fn buildManagedWatchTarget(self: *Server, allocator: std.mem.Allocator, name: []const u8, port: u16, token_override: ?[]const u8) !WatchTarget {
+        var cfg = (try integration_mod.loadNullWatchConfig(allocator, self.paths, name)) orelse blk: {
+            const cfg_name = try allocator.dupe(u8, name);
+            errdefer allocator.free(cfg_name);
+            const cfg_host = try allocator.dupe(u8, "127.0.0.1");
+            break :blk integration_mod.NullWatchConfig{
+                .name = cfg_name,
+                .host = cfg_host,
+            };
+        };
+        defer integration_mod.deinitNullWatchConfig(allocator, &cfg);
+        cfg.port = port;
+
+        var target = WatchTarget{};
+        errdefer target.deinit(allocator);
+        target.url = try integration_mod.buildNullWatchEndpoint(allocator, cfg);
+        target.url_owned = true;
+        if (token_override) |token| {
+            target.token = token;
+        } else if (cfg.api_token) |token| {
+            target.token = try allocator.dupe(u8, token);
+            target.token_owned = true;
+        }
+        return target;
+    }
+
     fn routeWithoutServerMutex(target: []const u8) bool {
-        return instances_api.isIntegrationPath(target) or orchestration_api.isProxyPath(target);
+        return instances_api.isIntegrationPath(target) or
+            instances_api.isTicketsActionPath(target) or
+            logs_api.isLogsPath(target) or
+            orchestration_api.isProxyPath(target) or
+            observability_api.isProxyPath(target);
     }
 
     fn route(self: *Server, allocator: std.mem.Allocator, method: []const u8, target: []const u8, body: []const u8) Response {
@@ -700,8 +937,12 @@ pub const Server = struct {
                 }
             }
             if (std.mem.eql(u8, method, "PUT")) {
-                if (settings_api.handlePutSettings(allocator, body)) |json| {
-                    return jsonResponse(json);
+                if (settings_api.handlePutSettings(allocator, body)) |resp| {
+                    return .{
+                        .status = resp.status,
+                        .content_type = resp.content_type,
+                        .body = resp.body,
+                    };
                 } else |_| {
                     return .{
                         .status = "500 Internal Server Error",
@@ -865,7 +1106,7 @@ pub const Server = struct {
         if (wizard_api.isWizardPath(target)) {
             if (wizard_api.extractComponentName(target)) |comp_name| {
                 if (std.mem.eql(u8, method, "GET")) {
-                    if (wizard_api.handleGetWizard(allocator, comp_name, self.paths, self.state)) |json| {
+                    if (wizard_api.handleGetWizard(allocator, comp_name, target, self.paths, self.state)) |json| {
                         const status = if (std.mem.indexOf(u8, json, "\"error\"") != null)
                             "400 Bad Request"
                         else
@@ -1122,11 +1363,50 @@ pub const Server = struct {
         }
 
         if (orchestration_api.isProxyPath(target)) {
+            const env_boiler_url = self.getBoilerUrl();
+            const env_boiler_token = self.getBoilerToken();
+            const env_tickets_url = self.getTicketsUrl();
+            const env_tickets_token = self.getTicketsToken();
+            const requested_boiler = orchestration_api.requestedBoilerInstance(allocator, target) catch null;
+            defer if (requested_boiler) |value| allocator.free(value);
+            const requested_tickets = orchestration_api.requestedTicketsInstance(allocator, target) catch null;
+            defer if (requested_tickets) |value| allocator.free(value);
+
+            var managed_boiler = if (shouldResolveManagedBackend(env_boiler_url, requested_boiler))
+                self.resolveManagedBackend(allocator, "nullboiler", requested_boiler)
+            else
+                null;
+            defer if (managed_boiler) |*cfg| cfg.deinit(allocator);
+            var managed_tickets = if (shouldResolveManagedBackend(env_tickets_url, requested_tickets))
+                self.resolveManagedBackend(allocator, "nulltickets", requested_tickets)
+            else
+                null;
+            defer if (managed_tickets) |*cfg| cfg.deinit(allocator);
+
             const resp = orchestration_api.handle(allocator, method, target, body, .{
-                .boiler_url = self.getBoilerUrl(),
-                .boiler_token = self.getBoilerToken(),
-                .tickets_url = self.getTicketsUrl(),
-                .tickets_token = self.getTicketsToken(),
+                .boiler_url = selectBackendUrl(env_boiler_url, managed_boiler, requested_boiler),
+                .boiler_token = selectBackendToken(env_boiler_token, managed_boiler, requested_boiler),
+                .tickets_url = selectBackendUrl(env_tickets_url, managed_tickets, requested_tickets),
+                .tickets_token = selectBackendToken(env_tickets_token, managed_tickets, requested_tickets),
+            });
+            return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
+        }
+
+        if (observability_api.isProxyPath(target)) {
+            const selected_watch = observability_api.selectedWatchNameAlloc(allocator, target) catch
+                return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
+            defer if (selected_watch) |value| allocator.free(value);
+
+            const watch_target = blk: {
+                self.mutex.lock();
+                defer self.mutex.unlock();
+                break :blk self.getWatchTarget(allocator, selected_watch);
+            };
+            defer watch_target.deinit(allocator);
+
+            const resp = observability_api.handle(allocator, method, target, body, .{
+                .watch_url = watch_target.url,
+                .watch_token = watch_target.token,
             });
             return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
         }
@@ -1637,6 +1917,54 @@ test "reconcileInstancesOnBoot terminates mismatched persisted runtime without r
     try std.testing.expectEqualStrings("started\n", contents);
 }
 
+test "reconcileInstancesOnBoot adopts legacy nullwatch launch mode as serve" {
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+    try ctx.paths.ensureDirs();
+
+    const binary_path = try ctx.paths.binary(allocator, "nullwatch", "1.0.0");
+    defer allocator.free(binary_path);
+
+    try ctx.state.addInstance("nullwatch", "watch", .{
+        .version = "1.0.0",
+        .auto_start = false,
+        .launch_mode = "gateway",
+    });
+
+    var launch = try launch_args_mod.resolve(allocator, "serve", false);
+    defer launch.deinit();
+
+    const spawned = try process_mod.spawn(allocator, .{
+        .binary = "/bin/sleep",
+        .argv = &.{"60"},
+    });
+
+    try runtime_state_mod.write(allocator, ctx.paths, "nullwatch", "watch", .{
+        .pid = process_mod.persistedPidValue(spawned.pid).?,
+        .port = 0,
+        .health_endpoint = "/health",
+        .binary_path = binary_path,
+        .launch_command = launch.primary_command,
+        .launch_args = launch.argv,
+        .started_at = std_compat.time.milliTimestamp(),
+        .starting_since = std_compat.time.milliTimestamp(),
+    });
+
+    ctx.reconcileInstancesOnBoot();
+
+    const status = ctx.manager.getStatus("nullwatch", "watch").?;
+    try std.testing.expectEqual(manager_mod.Status.running, status.status);
+    try std.testing.expect(process_mod.isAlive(spawned.pid));
+    try std.testing.expectEqualStrings("serve", ctx.state.getInstance("nullwatch", "watch").?.launch_mode);
+
+    ctx.manager.stopInstance("nullwatch", "watch") catch {};
+    _ = spawned.child.wait() catch {};
+}
+
 test "route GET /api/status returns version and platform" {
     var ctx = TestContext.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
@@ -1862,8 +2190,167 @@ test "routeWithoutServerMutex keeps orchestration proxy requests off global lock
     try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration/runs"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration/store/search"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/observability/v1/runs"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nullclaw/demo/logs"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nulltickets/tracker-a/tickets"));
     try std.testing.expect(!Server.routeWithoutServerMutex("/api/components"));
+}
+
+test "explicit managed orchestration backend selection overrides env fallback" {
+    const allocator = std.testing.allocator;
+    var managed = Server.ManagedBackendConfig{
+        .url = try allocator.dupe(u8, "http://127.0.0.1:8081"),
+        .token = try allocator.dupe(u8, "managed-token"),
+    };
+    defer managed.deinit(allocator);
+
+    try std.testing.expect(Server.shouldResolveManagedBackend("http://env.example", "worker-a"));
+    try std.testing.expectEqualStrings(
+        "http://127.0.0.1:8081",
+        Server.selectBackendUrl("http://env.example", managed, "worker-a").?,
+    );
+    try std.testing.expectEqualStrings(
+        "managed-token",
+        Server.selectBackendToken("env-token", managed, "worker-a").?,
+    );
+    try std.testing.expectEqualStrings(
+        "http://env.example",
+        Server.selectBackendUrl("http://env.example", managed, null).?,
+    );
+    try std.testing.expectEqualStrings(
+        "env-token",
+        Server.selectBackendToken("env-token", managed, null).?,
+    );
+}
+
+test "managed NullWatch target is discovered from supervisor state" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "nullwatch", "watch" });
+    try ctx.manager.instances.put(key, .{
+        .component = "nullwatch",
+        .name = "watch",
+        .status = .running,
+        .port = 7710,
+    });
+
+    const target = try ctx.server.getManagedWatchTarget(allocator, null, null);
+    defer target.deinit(allocator);
+    try std.testing.expect(target.url != null);
+    try std.testing.expectEqualStrings("http://127.0.0.1:7710", target.url.?);
+    try std.testing.expect(target.token == null);
+}
+
+test "managed NullWatch target prefers first running instance by name" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+
+    const key_z = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "nullwatch", "zulu" });
+    try ctx.manager.instances.put(key_z, .{
+        .component = "nullwatch",
+        .name = "zulu",
+        .status = .running,
+        .port = 7712,
+    });
+    const key_a = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "nullwatch", "alpha" });
+    try ctx.manager.instances.put(key_a, .{
+        .component = "nullwatch",
+        .name = "alpha",
+        .status = .running,
+        .port = 7711,
+    });
+
+    const target = try ctx.server.getManagedWatchTarget(allocator, null, null);
+    defer target.deinit(allocator);
+    try std.testing.expectEqualStrings("http://127.0.0.1:7711", target.url.?);
+}
+
+test "managed NullWatch target can select a specific running instance" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+
+    const key_alpha = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "nullwatch", "alpha" });
+    try ctx.manager.instances.put(key_alpha, .{
+        .component = "nullwatch",
+        .name = "alpha",
+        .status = .running,
+        .port = 7711,
+    });
+    const key_zulu = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "nullwatch", "zulu" });
+    try ctx.manager.instances.put(key_zulu, .{
+        .component = "nullwatch",
+        .name = "zulu",
+        .status = .running,
+        .port = 7712,
+    });
+
+    const target = try ctx.server.getManagedWatchTarget(allocator, null, "zulu");
+    defer target.deinit(allocator);
+    try std.testing.expectEqualStrings("http://127.0.0.1:7712", target.url.?);
+}
+
+test "managed NullWatch target reads host and token from config" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+    try ctx.paths.ensureDirs();
+
+    const inst_dir = try ctx.paths.instanceDir(allocator, "nullwatch", "watch");
+    defer allocator.free(inst_dir);
+    try std_compat.fs.makeDirAbsolute(inst_dir);
+
+    const config_path = try ctx.paths.instanceConfig(allocator, "nullwatch", "watch");
+    defer allocator.free(config_path);
+    var file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("{\"host\":\"0.0.0.0\",\"api_token\":\"managed-secret\"}");
+
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "nullwatch", "watch" });
+    try ctx.manager.instances.put(key, .{
+        .component = "nullwatch",
+        .name = "watch",
+        .status = .running,
+        .port = 7710,
+    });
+
+    const target = try ctx.server.getManagedWatchTarget(allocator, null, null);
+    defer target.deinit(allocator);
+    try std.testing.expectEqualStrings("http://127.0.0.1:7710", target.url.?);
+    try std.testing.expectEqualStrings("managed-secret", target.token.?);
+}
+
+test "managed NullWatch target brackets IPv6 host and lets env token override config" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+    try ctx.paths.ensureDirs();
+
+    const inst_dir = try ctx.paths.instanceDir(allocator, "nullwatch", "watch");
+    defer allocator.free(inst_dir);
+    try std_compat.fs.makeDirAbsolute(inst_dir);
+
+    const config_path = try ctx.paths.instanceConfig(allocator, "nullwatch", "watch");
+    defer allocator.free(config_path);
+    var file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("{\"host\":\"::1\",\"api_token\":\"managed-secret\"}");
+
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "nullwatch", "watch" });
+    try ctx.manager.instances.put(key, .{
+        .component = "nullwatch",
+        .name = "watch",
+        .status = .running,
+        .port = 7710,
+    });
+
+    const target = try ctx.server.getManagedWatchTarget(allocator, "env-secret", null);
+    defer target.deinit(allocator);
+    try std.testing.expectEqualStrings("http://[::1]:7710", target.url.?);
+    try std.testing.expectEqualStrings("env-secret", target.token.?);
 }
 
 test "extractBody returns body after headers" {
@@ -2000,6 +2487,16 @@ test "route PUT /api/settings returns ok" {
     defer std.testing.allocator.free(resp.body);
     try std.testing.expectEqualStrings("200 OK", resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"ok\"") != null);
+}
+
+test "route PUT /api/settings rejects invalid JSON" {
+    var ctx = TestContext.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    const resp = ctx.route(std.testing.allocator, "PUT", "/api/settings", "not json");
+    defer std.testing.allocator.free(resp.body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"error\":\"invalid JSON body\"") != null);
 }
 
 test "route POST /api/service/install returns platform info" {
