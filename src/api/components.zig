@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const builtin = @import("builtin");
 const registry = @import("../installer/registry.zig");
 const paths_mod = @import("../core/paths.zig");
 const state_mod = @import("../core/state.zig");
@@ -21,7 +22,12 @@ pub fn deriveDisplayName(allocator: std.mem.Allocator, name: []const u8) ![]cons
 
 /// Check if a component has a standalone installation at ~/.{component}/config.json
 fn hasStandaloneInstall(allocator: std.mem.Allocator, component: []const u8) bool {
-    const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch return false;
+    const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch blk: {
+        if (builtin.os.tag == .windows) {
+            break :blk std_compat.process.getEnvVarOwned(allocator, "USERPROFILE") catch return false;
+        }
+        return false;
+    };
     defer allocator.free(home);
     const dot_name = std.fmt.allocPrint(allocator, ".{s}", .{component}) catch return false;
     defer allocator.free(dot_name);
@@ -62,13 +68,14 @@ fn buildListJson(allocator: std.mem.Allocator, s: *state_mod.State) ![]const u8 
         const installed = has_dot_dir or instance_count > 0;
 
         try buf.print(
-            "{{\"name\":\"{s}\",\"display_name\":\"{s}\",\"description\":\"{s}\",\"repo\":\"{s}\",\"alpha\":{s},\"installed\":{s},\"standalone\":{s},\"instance_count\":{d}}}",
+            "{{\"name\":\"{s}\",\"display_name\":\"{s}\",\"description\":\"{s}\",\"repo\":\"{s}\",\"alpha\":{s},\"installable\":{s},\"installed\":{s},\"standalone\":{s},\"instance_count\":{d}}}",
             .{
                 comp.name,
                 comp.display_name,
                 comp.description,
                 comp.repo,
                 if (comp.is_alpha) "true" else "false",
+                if (comp.installable) "true" else "false",
                 if (installed) "true" else "false",
                 if (standalone) "true" else "false",
                 instance_count,
@@ -176,7 +183,7 @@ test "deriveDisplayName capitalizes first letter" {
     try std.testing.expectEqualStrings("", name3);
 }
 
-test "handleList returns valid JSON with all 3 known components" {
+test "handleList returns valid JSON with all known components" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
     defer fixture.deinit();
@@ -192,30 +199,36 @@ test "handleList returns valid JSON with all 3 known components" {
     try std.testing.expect(std.mem.startsWith(u8, json, "{\"components\":["));
     try std.testing.expect(std.mem.endsWith(u8, json, "]}"));
 
-    // Verify all 3 components are present
+    // Verify all components are present
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nullboiler\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nulltickets\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"nullwatch\"") != null);
 
     // Verify display names
     try std.testing.expect(std.mem.indexOf(u8, json, "\"NullClaw\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"NullBoiler\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"NullTickets\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"NullWatch\"") != null);
 
     // Verify descriptions are present
     try std.testing.expect(std.mem.indexOf(u8, json, "Autonomous AI agent runtime") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "DAG-based workflow orchestrator") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "Task and issue tracker") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "Headless observability") != null);
 
     // Verify repo fields
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw/nullclaw\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw/NullBoiler\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw/nullboiler\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw/nulltickets\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw/nullwatch\"") != null);
 
     // Verify structural fields
     try std.testing.expect(std.mem.indexOf(u8, json, "\"alpha\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"installable\"") != null);
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, json, "\"installable\":true"));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, json, "\"alpha\":true"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, "\"alpha\":false"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, json, "\"alpha\":false"));
     try std.testing.expect(std.mem.indexOf(u8, json, "\"installed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"instance_count\"") != null);
 }
