@@ -624,4 +624,48 @@ test "integration harness covers wizard failure contracts" {
         try std.testing.expectEqual(std.http.Status.not_found, resp.status);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
     }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw/validate-channels",
+            .method = .POST,
+            .body = "{",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component/validate-channels",
+            .method = .POST,
+            .body = "{\"channels\":{}}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw/models",
+            .method = .POST,
+            .body = "{",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component/models",
+            .method = .POST,
+            .body = "{\"provider\":\"openrouter\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
+    }
 }
