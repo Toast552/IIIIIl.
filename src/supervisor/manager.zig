@@ -509,7 +509,10 @@ pub const Manager = struct {
         const pid = process.reopenPersistedPid(runtime.pid) orelse return false;
         errdefer process.releasePidHandle(pid);
 
-        if (!process.isAlive(pid)) return false;
+        if (!process.isAlive(pid)) {
+            process.releasePidHandle(pid);
+            return false;
+        }
 
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ component, name });
         errdefer self.allocator.free(key);
@@ -1072,6 +1075,30 @@ test "status reporting for manually-added instance" {
     try std.testing.expectEqual(@as(u32, 1), s.health_consecutive_failures);
 }
 
+test "adoptInstance returns false for dead persisted pid" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    var runtime = try makePersistedRuntime(
+        allocator,
+        fixture.paths,
+        "comp",
+        "stale",
+        99999999,
+        0,
+        null,
+        null,
+    );
+    defer runtime.deinit(allocator);
+
+    try std.testing.expect(!(try mgr.adoptInstance("comp", "stale", runtime)));
+    try std.testing.expect(mgr.getStatus("comp", "stale") == null);
+}
+
 test "restart preserves launch args with spaces" {
     const builtin = @import("builtin");
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
@@ -1499,6 +1526,31 @@ test "tick: running instance with dead pid transitions to restarting" {
 
     const inst = mgr.instances.get("comp/crashed").?;
     try std.testing.expectEqual(Status.restarting, inst.status);
+}
+
+test "tick: running instance with null pid transitions to restarting" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "comp", "pid-lost" });
+    try mgr.instances.put(key, .{
+        .component = "comp",
+        .name = "pid-lost",
+        .status = .running,
+        .pid = null,
+        .port = 0,
+    });
+
+    mgr.tick();
+
+    const inst = mgr.instances.get("comp/pid-lost").?;
+    try std.testing.expectEqual(Status.restarting, inst.status);
+    try std.testing.expect(inst.last_restart_attempt != null);
+    try std.testing.expectEqual(@as(u32, 0), inst.health_consecutive_failures);
 }
 
 test "adoptInstance marks live portless runtime as running" {
