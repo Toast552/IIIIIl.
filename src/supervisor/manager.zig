@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const net_compat = @import("../net_compat.zig");
 const process = @import("process.zig");
 const health = @import("health.zig");
 const runtime_state = @import("runtime_state.zig");
@@ -336,6 +337,68 @@ pub const Manager = struct {
         self.clearPid(inst);
     }
 
+    const HealthHost = struct {
+        value: []const u8 = "127.0.0.1",
+        owned: bool = false,
+
+        fn deinit(self: HealthHost, allocator: std.mem.Allocator) void {
+            if (self.owned) allocator.free(self.value);
+        }
+    };
+
+    fn normalizeHealthHost(allocator: std.mem.Allocator, host: []const u8) ![]const u8 {
+        if (host.len == 0 or
+            std.mem.eql(u8, host, "0.0.0.0") or
+            std.mem.eql(u8, host, "::") or
+            std.mem.eql(u8, host, "localhost"))
+        {
+            return allocator.dupe(u8, "127.0.0.1");
+        }
+        return allocator.dupe(u8, host);
+    }
+
+    fn readHealthHostFromConfigPath(self: *Manager, config_path: []const u8) ?[]const u8 {
+        const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch return null;
+        defer file.close();
+
+        const contents = file.readToEndAlloc(self.allocator, 1024 * 1024) catch return null;
+        defer self.allocator.free(contents);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, contents, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+
+        const host_value = parsed.value.object.get("host") orelse return null;
+        if (host_value != .string) return null;
+        return normalizeHealthHost(self.allocator, host_value.string) catch null;
+    }
+
+    fn instanceConfigPathForHealth(self: *Manager, inst: *const ManagedInstance) ?[]const u8 {
+        if (inst.config_path.len > 0) {
+            return self.allocator.dupe(u8, inst.config_path) catch null;
+        }
+        if (inst.working_dir.len > 0) {
+            return std.fs.path.join(self.allocator, &.{ inst.working_dir, "config.json" }) catch null;
+        }
+        return null;
+    }
+
+    fn resolveInstanceHealthHost(self: *Manager, inst: *const ManagedInstance) HealthHost {
+        const config_path = self.instanceConfigPathForHealth(inst) orelse return .{};
+        defer self.allocator.free(config_path);
+        const host = self.readHealthHostFromConfigPath(config_path) orelse return .{};
+        return .{ .value = host, .owned = true };
+    }
+
+    fn checkInstanceHealth(self: *Manager, inst: *const ManagedInstance) health.HealthCheckResult {
+        const host = self.resolveInstanceHealthHost(inst);
+        defer host.deinit(self.allocator);
+        return health.check(self.allocator, host.value, inst.port, inst.health_endpoint);
+    }
+
     /// Start an instance. binary_path is the path to the component binary.
     pub fn startInstance(
         self: *Manager,
@@ -446,7 +509,10 @@ pub const Manager = struct {
         const pid = process.reopenPersistedPid(runtime.pid) orelse return false;
         errdefer process.releasePidHandle(pid);
 
-        if (!process.isAlive(pid)) return false;
+        if (!process.isAlive(pid)) {
+            process.releasePidHandle(pid);
+            return false;
+        }
 
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ component, name });
         errdefer self.allocator.free(key);
@@ -464,10 +530,17 @@ pub const Manager = struct {
         errdefer owned.deinit(self.allocator);
 
         const now = std_compat.time.milliTimestamp();
-        const probe = if (runtime.port > 0)
-            health.check(self.allocator, "127.0.0.1", runtime.port, runtime.health_endpoint)
-        else
-            health.HealthCheckResult{ .ok = true };
+        const probe = if (runtime.port > 0) blk: {
+            const probe_inst = ManagedInstance{
+                .component = owned.component,
+                .name = owned.name,
+                .port = runtime.port,
+                .health_endpoint = owned.health_endpoint,
+                .working_dir = owned.working_dir,
+                .config_path = owned.config_path,
+            };
+            break :blk self.checkInstanceHealth(&probe_inst);
+        } else health.HealthCheckResult{ .ok = true };
 
         const status: Status = if (runtime.port == 0 or probe.ok) .running else .starting;
         const starting_since = if (status == .starting)
@@ -634,7 +707,7 @@ pub const Manager = struct {
         }
 
         // Check health endpoint
-        const result = health.check(self.allocator, "127.0.0.1", inst.port, inst.health_endpoint);
+        const result = self.checkInstanceHealth(inst);
         if (result.ok) {
             inst.status = .running;
             inst.last_health_ok = now;
@@ -699,7 +772,7 @@ pub const Manager = struct {
         }
 
         inst.last_health_check = now;
-        const result = health.check(self.allocator, "127.0.0.1", inst.port, inst.health_endpoint);
+        const result = self.checkInstanceHealth(inst);
         if (result.ok) {
             if (inst.health_consecutive_failures > 0) {
                 self.logSupervisor(inst.component, inst.name, "health check recovered after {d} consecutive failures", .{inst.health_consecutive_failures});
@@ -816,6 +889,31 @@ pub const Manager = struct {
 
 // ── Tests ───────────────────────────────────────────────────────────
 
+fn makePersistedRuntime(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    pid: u64,
+    port: u16,
+    started_at: ?i64,
+    starting_since: ?i64,
+) !runtime_state.PersistedRuntime {
+    try runtime_state.write(allocator, paths, component, name, .{
+        .pid = pid,
+        .port = port,
+        .health_endpoint = "/health",
+        .binary_path = "/bin/sleep",
+        .working_dir = "",
+        .config_path = "",
+        .launch_command = "gateway",
+        .launch_args = &.{"60"},
+        .started_at = started_at,
+        .starting_since = starting_since,
+    });
+    return (try runtime_state.load(allocator, paths, component, name)).?;
+}
+
 test "Manager init and deinit (no leaks)" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
@@ -892,6 +990,56 @@ test "logSupervisor appends diagnostics to nullhub.log" {
     try std.testing.expect(std.mem.indexOf(u8, contents, "second diagnostic") != null);
 }
 
+test "normalizeHealthHost maps wildcard and localhost to loopback" {
+    const allocator = std.testing.allocator;
+
+    const empty = try Manager.normalizeHealthHost(allocator, "");
+    defer allocator.free(empty);
+    try std.testing.expectEqualStrings("127.0.0.1", empty);
+
+    const wildcard = try Manager.normalizeHealthHost(allocator, "::");
+    defer allocator.free(wildcard);
+    try std.testing.expectEqualStrings("127.0.0.1", wildcard);
+
+    const localhost = try Manager.normalizeHealthHost(allocator, "localhost");
+    defer allocator.free(localhost);
+    try std.testing.expectEqualStrings("127.0.0.1", localhost);
+
+    const ipv6 = try Manager.normalizeHealthHost(allocator, "::1");
+    defer allocator.free(ipv6);
+    try std.testing.expectEqualStrings("::1", ipv6);
+}
+
+test "resolveInstanceHealthHost reads host from working dir config" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const inst_dir = try fixture.path(allocator, "watch");
+    defer allocator.free(inst_dir);
+    try std_compat.fs.makeDirAbsolute(inst_dir);
+
+    const config_path = try std.fs.path.join(allocator, &.{ inst_dir, "config.json" });
+    defer allocator.free(config_path);
+    const file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("{\"host\":\"::1\"}");
+
+    const inst = ManagedInstance{
+        .component = "nullwatch",
+        .name = "watch",
+        .working_dir = inst_dir,
+    };
+    const host = mgr.resolveInstanceHealthHost(&inst);
+    defer host.deinit(allocator);
+
+    try std.testing.expect(host.owned);
+    try std.testing.expectEqualStrings("::1", host.value);
+}
+
 test "status reporting for manually-added instance" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
@@ -925,6 +1073,30 @@ test "status reporting for manually-added instance" {
     try std.testing.expect(s.uptime_seconds.? >= 4); // at least 4s
     try std.testing.expectEqual(@as(u32, 2), s.restart_count);
     try std.testing.expectEqual(@as(u32, 1), s.health_consecutive_failures);
+}
+
+test "adoptInstance returns false for dead persisted pid" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    var runtime = try makePersistedRuntime(
+        allocator,
+        fixture.paths,
+        "comp",
+        "stale",
+        99999999,
+        0,
+        null,
+        null,
+    );
+    defer runtime.deinit(allocator);
+
+    try std.testing.expect(!(try mgr.adoptInstance("comp", "stale", runtime)));
+    try std.testing.expect(mgr.getStatus("comp", "stale") == null);
 }
 
 test "restart preserves launch args with spaces" {
@@ -1352,6 +1524,76 @@ test "tick: restarting with binary_path spawns new process" {
     }
 }
 
+test "tick: restarting waits for backoff window before spawning" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const now = std_compat.time.milliTimestamp();
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "comp", "backoff-wait" });
+    try mgr.instances.put(key, .{
+        .component = "comp",
+        .name = "backoff-wait",
+        .status = .restarting,
+        .restart_count = 2,
+        .max_restarts = 5,
+        .binary_path = "/bin/sleep",
+        .launch_args = &.{"60"},
+        .last_restart_attempt = now - 500,
+    });
+
+    mgr.tick();
+
+    const inst = mgr.instances.get("comp/backoff-wait").?;
+    try std.testing.expectEqual(Status.restarting, inst.status);
+    try std.testing.expectEqual(@as(u32, 2), inst.restart_count);
+    try std.testing.expectEqual(now - 500, inst.last_restart_attempt.?);
+    try std.testing.expectEqual(@as(?std_compat.process.Child.Id, null), inst.pid);
+    try std.testing.expect(inst.child == null);
+}
+
+test "tick: restarting uses capped backoff before spawning" {
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "comp", "backoff-cap" });
+    try mgr.instances.put(key, .{
+        .component = "comp",
+        .name = "backoff-cap",
+        .status = .restarting,
+        .restart_count = 8,
+        .max_restarts = 10,
+        .binary_path = "/bin/sleep",
+        .launch_args = &.{"60"},
+        .last_restart_attempt = std_compat.time.milliTimestamp() - 20_000,
+    });
+
+    mgr.tick();
+
+    const inst_ptr = mgr.instances.getPtr("comp/backoff-cap").?;
+    try std.testing.expectEqual(Status.starting, inst_ptr.status);
+    try std.testing.expect(inst_ptr.pid != null);
+    try std.testing.expectEqual(@as(u32, 9), inst_ptr.restart_count);
+    try std.testing.expect(inst_ptr.last_restart_attempt != null);
+    try std.testing.expect(inst_ptr.last_restart_attempt.? >= std_compat.time.milliTimestamp() - 5_000);
+
+    if (inst_ptr.child) |*child| {
+        process.terminate(child.id) catch {};
+        _ = child.wait() catch {};
+        inst_ptr.child = null;
+    }
+}
+
 test "tick: running instance with dead pid transitions to restarting" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
@@ -1374,4 +1616,141 @@ test "tick: running instance with dead pid transitions to restarting" {
 
     const inst = mgr.instances.get("comp/crashed").?;
     try std.testing.expectEqual(Status.restarting, inst.status);
+}
+
+test "tick: running instance with null pid transitions to restarting" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ "comp", "pid-lost" });
+    try mgr.instances.put(key, .{
+        .component = "comp",
+        .name = "pid-lost",
+        .status = .running,
+        .pid = null,
+        .port = 0,
+    });
+
+    mgr.tick();
+
+    const inst = mgr.instances.get("comp/pid-lost").?;
+    try std.testing.expectEqual(Status.restarting, inst.status);
+    try std.testing.expect(inst.last_restart_attempt != null);
+    try std.testing.expectEqual(@as(u32, 0), inst.health_consecutive_failures);
+}
+
+test "adoptInstance marks live portless runtime as running" {
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const spawned = try process.spawn(allocator, .{
+        .binary = "/bin/sleep",
+        .argv = &.{"60"},
+    });
+    errdefer {
+        process.terminate(spawned.pid) catch {};
+        _ = spawned.child.wait() catch {};
+    }
+
+    var runtime = try makePersistedRuntime(
+        allocator,
+        fixture.paths,
+        "comp",
+        "portless",
+        process.persistedPidValue(spawned.pid).?,
+        0,
+        std_compat.time.milliTimestamp() - 5_000,
+        std_compat.time.milliTimestamp() - 5_000,
+    );
+    defer runtime.deinit(allocator);
+
+    try std.testing.expect(try mgr.adoptInstance("comp", "portless", runtime));
+
+    const inst = mgr.instances.get("comp/portless").?;
+    try std.testing.expectEqual(Status.running, inst.status);
+    try std.testing.expectEqual(@as(u16, 0), inst.port);
+    try std.testing.expect(inst.pid != null);
+    try std.testing.expect(inst.last_health_ok != null);
+    try std.testing.expectEqual(@as(?i64, null), inst.starting_since);
+
+    try mgr.stopInstance("comp", "portless");
+    _ = spawned.child.wait() catch {};
+}
+
+test "adoptInstance keeps unhealthy http runtime in starting state" {
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var mgr = Manager.init(allocator, fixture.paths);
+    defer mgr.deinit();
+
+    const ThreadCtx = struct {
+        server: *std_compat.net.Server,
+
+        fn run(ctx: @This()) void {
+            var conn = ctx.server.accept() catch return;
+            defer conn.stream.close();
+            net_compat.streamWriteAll(
+                conn.stream,
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ) catch {};
+        }
+    };
+    const addr = try std_compat.net.Address.resolveIp("127.0.0.1", 0);
+    var server = try addr.listen(.{});
+    const unhealthy_port = server.listen_address.in.getPort();
+    const thread = try std.Thread.spawn(.{}, ThreadCtx.run, .{.{ .server = &server }});
+    defer thread.join();
+    defer server.deinit();
+
+    const spawned = try process.spawn(allocator, .{
+        .binary = "/bin/sleep",
+        .argv = &.{"60"},
+    });
+    errdefer {
+        process.terminate(spawned.pid) catch {};
+        _ = spawned.child.wait() catch {};
+    }
+
+    const original_started = std_compat.time.milliTimestamp() - 10_000;
+    const original_starting_since = std_compat.time.milliTimestamp() - 4_000;
+    var runtime = try makePersistedRuntime(
+        allocator,
+        fixture.paths,
+        "comp",
+        "http",
+        process.persistedPidValue(spawned.pid).?,
+        unhealthy_port,
+        original_started,
+        original_starting_since,
+    );
+    defer runtime.deinit(allocator);
+
+    try std.testing.expect(try mgr.adoptInstance("comp", "http", runtime));
+
+    const inst = mgr.instances.get("comp/http").?;
+    try std.testing.expectEqual(Status.starting, inst.status);
+    try std.testing.expectEqual(unhealthy_port, inst.port);
+    try std.testing.expect(inst.pid != null);
+    try std.testing.expectEqual(original_started, inst.started_at.?);
+    try std.testing.expectEqual(original_starting_since, inst.starting_since.?);
+    try std.testing.expectEqual(@as(?i64, null), inst.last_health_ok);
+
+    try mgr.stopInstance("comp", "http");
+    _ = spawned.child.wait() catch {};
 }
