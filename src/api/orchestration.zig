@@ -1,12 +1,10 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const http_proxy = @import("proxy.zig");
 const Allocator = std.mem.Allocator;
+const query_api = @import("query.zig");
 
-const Response = struct {
-    status: []const u8,
-    content_type: []const u8,
-    body: []const u8,
-};
+const Response = http_proxy.Response;
 
 const prefix = "/api/orchestration";
 const store_prefix = "/api/orchestration/store";
@@ -38,11 +36,13 @@ const Backend = enum {
 };
 
 pub fn isProxyPath(target: []const u8) bool {
-    return std.mem.eql(u8, target, prefix) or std.mem.startsWith(u8, target, prefix ++ "/");
+    const clean = query_api.stripTarget(target);
+    return http_proxy.isPathInNamespace(clean, prefix);
 }
 
 fn isStorePath(target: []const u8) bool {
-    return std.mem.eql(u8, target, store_prefix) or std.mem.startsWith(u8, target, store_prefix ++ "/");
+    const clean = query_api.stripTarget(target);
+    return std.mem.eql(u8, clean, store_prefix) or std.mem.startsWith(u8, clean, store_prefix ++ "/");
 }
 
 const ProxyTarget = struct {
@@ -54,6 +54,26 @@ const ProxyTarget = struct {
 fn backendForPath(target: []const u8) ?Backend {
     if (!isProxyPath(target)) return null;
     return if (isStorePath(target)) .tickets else .boiler;
+}
+
+pub fn requestedTicketsInstance(allocator: Allocator, target: []const u8) !?[]u8 {
+    if (!isStorePath(target)) return null;
+    const value = (try query_api.valueAlloc(allocator, target, "tickets_instance")) orelse return null;
+    if (value.len == 0) {
+        allocator.free(value);
+        return null;
+    }
+    return value;
+}
+
+pub fn requestedBoilerInstance(allocator: Allocator, target: []const u8) !?[]u8 {
+    if (!isProxyPath(target) or isStorePath(target)) return null;
+    const value = (try query_api.valueAlloc(allocator, target, "boiler_instance")) orelse return null;
+    if (value.len == 0) {
+        allocator.free(value);
+        return null;
+    }
+    return value;
 }
 
 fn resolveProxyTarget(target: []const u8, cfg: Config) ?ProxyTarget {
@@ -90,81 +110,62 @@ pub fn handle(allocator: Allocator, method: []const u8, target: []const u8, body
     const resolved = resolveProxyTarget(target, cfg) orelse
         return .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = backend.notConfiguredBody() };
 
-    const http_method = parseMethod(method) orelse
-        return .{ .status = "405 Method Not Allowed", .content_type = "application/json", .body = "{\"error\":\"method not allowed\"}" };
+    var forwarded = forwardedTarget(allocator, target) catch
+        return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
+    defer forwarded.deinit(allocator);
 
-    const proxied_path = target[prefix.len..];
+    const proxied_path = forwarded.value[prefix.len..];
     const path = if (proxied_path.len == 0) "/" else proxied_path;
 
-    const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ resolved.base_url, path }) catch
-        return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
-    defer allocator.free(url);
-
-    var auth_header: ?[]const u8 = null;
-    defer if (auth_header) |value| allocator.free(value);
-    var header_buf: [1]std.http.Header = undefined;
-    const extra_headers: []const std.http.Header = if (resolved.token) |token| blk: {
-        auth_header = std.fmt.allocPrint(allocator, "Bearer {s}", .{token}) catch
-            return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
-        header_buf[0] = .{ .name = "Authorization", .value = auth_header.? };
-        break :blk header_buf[0..1];
-    } else &.{};
-
-    var client: std.http.Client = .{ .allocator = allocator, .io = std_compat.io() };
-    defer client.deinit();
-
-    var response_body: std.Io.Writer.Allocating = .init(allocator);
-    defer response_body.deinit();
-
-    const result = client.fetch(.{
-        .location = .{ .url = url },
-        .method = http_method,
-        .payload = if (body.len > 0) body else null,
-        .response_writer = &response_body.writer,
-        .extra_headers = extra_headers,
-    }) catch {
-        return .{ .status = "502 Bad Gateway", .content_type = "application/json", .body = resolved.backend.unreachableBody() };
-    };
-
-    const status_code: u10 = @intFromEnum(result.status);
-    const resp_body = response_body.toOwnedSlice() catch
-        return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
-
-    const status = mapStatus(status_code);
-
-    return .{
-        .status = status,
-        .content_type = "application/json",
-        .body = resp_body,
-    };
+    return http_proxy.forward(allocator, .{
+        .method = method,
+        .base_url = resolved.base_url,
+        .path = path,
+        .body = body,
+        .bearer_token = resolved.token,
+        .unreachable_body = resolved.backend.unreachableBody(),
+    });
 }
 
-fn parseMethod(method: []const u8) ?std.http.Method {
-    if (std.mem.eql(u8, method, "GET")) return .GET;
-    if (std.mem.eql(u8, method, "POST")) return .POST;
-    if (std.mem.eql(u8, method, "PUT")) return .PUT;
-    if (std.mem.eql(u8, method, "DELETE")) return .DELETE;
-    if (std.mem.eql(u8, method, "PATCH")) return .PATCH;
-    return null;
+const ForwardedTarget = struct {
+    value: []const u8,
+    owned: bool = false,
+
+    fn deinit(self: *ForwardedTarget, allocator: Allocator) void {
+        if (self.owned) allocator.free(self.value);
+        self.* = .{ .value = "" };
+    }
+};
+
+fn forwardedTarget(allocator: Allocator, target: []const u8) !ForwardedTarget {
+    const qmark = std.mem.indexOfScalar(u8, target, '?') orelse return .{ .value = target };
+    var stripped_any = false;
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+
+    try buf.appendSlice(target[0..qmark]);
+    var wrote_query = false;
+    var params = std.mem.splitScalar(u8, target[qmark + 1 ..], '&');
+    while (params.next()) |param| {
+        if (isHubProxyParam(param)) {
+            stripped_any = true;
+            continue;
+        }
+        try buf.append(if (wrote_query) '&' else '?');
+        wrote_query = true;
+        try buf.appendSlice(param);
+    }
+
+    if (!stripped_any) {
+        buf.deinit();
+        return .{ .value = target };
+    }
+    return .{ .value = try buf.toOwnedSlice(), .owned = true };
 }
 
-fn mapStatus(code: u10) []const u8 {
-    return switch (code) {
-        200 => "200 OK",
-        201 => "201 Created",
-        204 => "204 No Content",
-        400 => "400 Bad Request",
-        401 => "401 Unauthorized",
-        403 => "403 Forbidden",
-        404 => "404 Not Found",
-        405 => "405 Method Not Allowed",
-        409 => "409 Conflict",
-        422 => "422 Unprocessable Entity",
-        500 => "500 Internal Server Error",
-        502 => "502 Bad Gateway",
-        503 => "503 Service Unavailable",
-        else => if (code >= 200 and code < 300) "200 OK" else if (code >= 400 and code < 500) "400 Bad Request" else "500 Internal Server Error",
-    };
+fn isHubProxyParam(param: []const u8) bool {
+    const key = if (std.mem.indexOfScalar(u8, param, '=')) |eq| param[0..eq] else param;
+    return std.mem.eql(u8, key, "tickets_instance") or std.mem.eql(u8, key, "boiler_instance");
 }
 
 const TestUpstream = struct {
@@ -181,7 +182,7 @@ const TestUpstream = struct {
             while (!ctx.stop_flag.load(.acquire)) {
                 var conn = ctx.server.accept() catch |err| switch (err) {
                     error.WouldBlock => {
-                        std.time.sleep(10 * std.time.ns_per_ms);
+                        std_compat.thread.sleep(10 * std.time.ns_per_ms);
                         continue;
                     },
                     else => return,
@@ -209,7 +210,7 @@ const TestUpstream = struct {
         };
 
         const addr = try std_compat.net.Address.resolveIp("127.0.0.1", 0);
-        ctx.server = try addr.listen(.{ .force_nonblocking = true });
+        ctx.server = try addr.listen(.{});
         errdefer ctx.server.deinit();
 
         const thread = try std.Thread.spawn(.{}, Context.run, .{ctx});
@@ -236,14 +237,42 @@ const TestUpstream = struct {
 
 test "isProxyPath matches orchestration namespace" {
     try std.testing.expect(isProxyPath("/api/orchestration"));
+    try std.testing.expect(isProxyPath("/api/orchestration?tickets_instance=tracker-a"));
     try std.testing.expect(isProxyPath("/api/orchestration/runs"));
     try std.testing.expect(isProxyPath("/api/orchestration/store/search"));
     try std.testing.expect(!isProxyPath("/api/instances"));
 }
 
 test "backendForPath routes store requests to tickets backend" {
-    try std.testing.expectEqual(Backend.tickets, backendForPath("/api/orchestration/store/search").?);
+    try std.testing.expectEqual(Backend.tickets, backendForPath("/api/orchestration/store/search?tickets_instance=tracker-a").?);
     try std.testing.expectEqual(Backend.boiler, backendForPath("/api/orchestration/runs").?);
+}
+
+test "requestedTicketsInstance decodes store target selection" {
+    const allocator = std.testing.allocator;
+    const value = (try requestedTicketsInstance(allocator, "/api/orchestration/store/ns?tickets_instance=tracker%20a")).?;
+    defer allocator.free(value);
+    try std.testing.expectEqualStrings("tracker a", value);
+    try std.testing.expect(try requestedTicketsInstance(allocator, "/api/orchestration/runs?tickets_instance=tracker-a") == null);
+}
+
+test "requestedBoilerInstance decodes orchestration target selection" {
+    const allocator = std.testing.allocator;
+    const value = (try requestedBoilerInstance(allocator, "/api/orchestration/workflows?boiler_instance=boiler%20a")).?;
+    defer allocator.free(value);
+    try std.testing.expectEqualStrings("boiler a", value);
+    try std.testing.expect(try requestedBoilerInstance(allocator, "/api/orchestration/store/ns?boiler_instance=boiler-a") == null);
+}
+
+test "forwardedTarget strips hub-only proxy params" {
+    const allocator = std.testing.allocator;
+    var forwarded = try forwardedTarget(allocator, "/api/orchestration/store/search?q=tasks&tickets_instance=tracker-a&limit=10");
+    defer forwarded.deinit(allocator);
+    try std.testing.expectEqualStrings("/api/orchestration/store/search?q=tasks&limit=10", forwarded.value);
+
+    var boiler_forwarded = try forwardedTarget(allocator, "/api/orchestration/runs?boiler_instance=boiler-a&status=running");
+    defer boiler_forwarded.deinit(allocator);
+    try std.testing.expectEqualStrings("/api/orchestration/runs?status=running", boiler_forwarded.value);
 }
 
 test "handle routes store paths to NullTickets config" {
@@ -280,7 +309,7 @@ test "handle passes through upstream 409 status and body" {
     if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
-    var upstream = try TestUpstream.start(allocator, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 19\r\n\r\n{\"error\":\"conflict\"}");
+    var upstream = try TestUpstream.start(allocator, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{\"error\":\"conflict\"}");
     defer upstream.deinit();
 
     const base_url = try upstream.baseUrl(allocator);

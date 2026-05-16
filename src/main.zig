@@ -87,31 +87,18 @@ pub fn main(init: std.process.Init) !void {
             }
             std.process.exit(1);
         },
-        .install => |opts| {
-            std.debug.print("install {s}", .{opts.component});
-            if (opts.name) |n| std.debug.print(" --name {s}", .{n});
-            if (opts.version) |v| std.debug.print(" --version {s}", .{v});
-            std.debug.print(" (not yet implemented)\n", .{});
-        },
-        .start => |ref| std.debug.print("start {s}/{s} (not yet implemented)\n", .{ ref.component, ref.name }),
-        .stop => |ref| std.debug.print("stop {s}/{s} (not yet implemented)\n", .{ ref.component, ref.name }),
-        .restart => |ref| std.debug.print("restart {s}/{s} (not yet implemented)\n", .{ ref.component, ref.name }),
-        .start_all => std.debug.print("start-all (not yet implemented)\n", .{}),
-        .stop_all => std.debug.print("stop-all (not yet implemented)\n", .{}),
-        .logs => |opts| {
-            std.debug.print("logs {s}/{s}", .{ opts.instance.component, opts.instance.name });
-            if (opts.follow) std.debug.print(" -f", .{});
-            std.debug.print(" --lines {d} (not yet implemented)\n", .{opts.lines});
-        },
-        .check_updates => std.debug.print("check-updates (not yet implemented)\n", .{}),
-        .update => |ref| std.debug.print("update {s}/{s} (not yet implemented)\n", .{ ref.component, ref.name }),
-        .update_all => std.debug.print("update-all (not yet implemented)\n", .{}),
-        .config => |opts| {
-            std.debug.print("config {s}/{s}", .{ opts.instance.component, opts.instance.name });
-            if (opts.edit) std.debug.print(" --edit", .{});
-            std.debug.print(" (not yet implemented)\n", .{});
-        },
-        .wizard => |opts| std.debug.print("wizard {s} (not yet implemented)\n", .{opts.component}),
+        .install => |opts| runInstallCommand(allocator, opts),
+        .start => |ref| runInstanceAction(allocator, ref, "start"),
+        .stop => |ref| runInstanceAction(allocator, ref, "stop"),
+        .restart => |ref| runInstanceAction(allocator, ref, "restart"),
+        .start_all => runBulkInstanceAction(allocator, "start"),
+        .stop_all => runBulkInstanceAction(allocator, "stop"),
+        .logs => |opts| runLogsCommand(allocator, opts),
+        .check_updates => runApiChecked(allocator, .{ .method = "GET", .target = "/api/updates", .pretty = true }),
+        .update => |ref| runInstanceAction(allocator, ref, "update"),
+        .update_all => runBulkInstanceAction(allocator, "update"),
+        .config => |opts| runConfigCommand(allocator, opts),
+        .wizard => |opts| runWizardCommand(allocator, opts),
         .service => |sc| handleServiceCommand(allocator, sc) catch |err| {
             const any_err: anyerror = err;
             switch (any_err) {
@@ -130,11 +117,7 @@ pub fn main(init: std.process.Init) !void {
             }
             std.process.exit(1);
         },
-        .uninstall => |opts| {
-            std.debug.print("uninstall {s}/{s}", .{ opts.instance.component, opts.instance.name });
-            if (opts.remove_data) std.debug.print(" --remove-data", .{});
-            std.debug.print(" (not yet implemented)\n", .{});
-        },
+        .uninstall => |opts| runUninstallCommand(allocator, opts),
         .add_source => |opts| std.debug.print("add-source {s} (not yet implemented)\n", .{opts.repo}),
         .report => |opts| report_cli.run(allocator, opts) catch |err| {
             const any_err: anyerror = err;
@@ -148,6 +131,157 @@ pub fn main(init: std.process.Init) !void {
             }
         },
         .help => cli.printUsage(),
+    }
+}
+
+fn runApiChecked(allocator: std.mem.Allocator, opts: cli.ApiOptions) void {
+    api_cli.run(allocator, opts) catch |err| {
+        printApiError(opts, err);
+        std.process.exit(1);
+    };
+}
+
+fn printApiError(opts: cli.ApiOptions, err: anyerror) void {
+    switch (err) {
+        error.InvalidMethod => std.debug.print("Invalid HTTP method: {s}\n", .{opts.method}),
+        error.InvalidTarget => std.debug.print("Invalid API target: {s}\n", .{opts.target}),
+        error.FileNotFound => std.debug.print("Body file not found.\n", .{}),
+        error.ConnectionRefused => std.debug.print("nullhub is not running on http://{s}:{d}\n", .{ opts.host, opts.port }),
+        error.RequestFailed => {},
+        else => std.debug.print("API request failed: {s}\n", .{@errorName(err)}),
+    }
+}
+
+fn instanceActionTarget(allocator: std.mem.Allocator, ref: cli.InstanceRef, action: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "/api/instances/{s}/{s}/{s}", .{ ref.component, ref.name, action });
+}
+
+fn runInstanceAction(allocator: std.mem.Allocator, ref: cli.InstanceRef, action: []const u8) void {
+    const target = instanceActionTarget(allocator, ref, action) catch {
+        std.debug.print("failed to build API target\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(target);
+    runApiChecked(allocator, .{ .method = "POST", .target = target, .pretty = true });
+}
+
+fn runInstallCommand(allocator: std.mem.Allocator, opts: cli.InstallOptions) void {
+    const target = std.fmt.allocPrint(allocator, "/api/wizard/{s}", .{opts.component}) catch {
+        std.debug.print("failed to build API target\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(target);
+
+    const body = std.json.Stringify.valueAlloc(allocator, .{
+        .instance_name = opts.name orelse "default",
+        .version = opts.version orelse "latest",
+    }, .{}) catch {
+        std.debug.print("failed to build install request\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(body);
+
+    runApiChecked(allocator, .{ .method = "POST", .target = target, .body = body, .pretty = true });
+}
+
+fn runWizardCommand(allocator: std.mem.Allocator, opts: cli.WizardOptions) void {
+    const target = std.fmt.allocPrint(allocator, "/api/wizard/{s}", .{opts.component}) catch {
+        std.debug.print("failed to build API target\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(target);
+    runApiChecked(allocator, .{ .method = "GET", .target = target, .pretty = true });
+}
+
+fn runLogsCommand(allocator: std.mem.Allocator, opts: cli.LogsOptions) void {
+    if (opts.follow) {
+        std.debug.print("nullhub logs -f is not stream-backed yet; showing current logs.\n", .{});
+    }
+    const target = std.fmt.allocPrint(
+        allocator,
+        "/api/instances/{s}/{s}/logs?lines={d}",
+        .{ opts.instance.component, opts.instance.name, opts.lines },
+    ) catch {
+        std.debug.print("failed to build API target\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(target);
+    runApiChecked(allocator, .{ .method = "GET", .target = target });
+}
+
+fn runConfigCommand(allocator: std.mem.Allocator, opts: cli.ConfigOptions) void {
+    if (opts.edit) {
+        std.debug.print("nullhub config --edit is not stream-backed yet; showing current config.\n", .{});
+    }
+    const target = std.fmt.allocPrint(
+        allocator,
+        "/api/instances/{s}/{s}/config",
+        .{ opts.instance.component, opts.instance.name },
+    ) catch {
+        std.debug.print("failed to build API target\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(target);
+    runApiChecked(allocator, .{ .method = "GET", .target = target, .pretty = true });
+}
+
+fn runUninstallCommand(allocator: std.mem.Allocator, opts: cli.UninstallOptions) void {
+    _ = opts.remove_data;
+    const target = std.fmt.allocPrint(
+        allocator,
+        "/api/instances/{s}/{s}",
+        .{ opts.instance.component, opts.instance.name },
+    ) catch {
+        std.debug.print("failed to build API target\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(target);
+    runApiChecked(allocator, .{ .method = "DELETE", .target = target, .pretty = true });
+}
+
+fn runBulkInstanceAction(allocator: std.mem.Allocator, action: []const u8) void {
+    var result = api_cli.execute(allocator, .{ .method = "GET", .target = "/api/instances" }) catch |err| {
+        printApiError(.{ .method = "GET", .target = "/api/instances" }, err);
+        std.process.exit(1);
+    };
+    defer result.deinit(allocator);
+
+    const code = @intFromEnum(result.status);
+    if (code < 200 or code >= 300) {
+        if (result.body.len > 0) printStdout(result.body) catch {};
+        std.debug.print("HTTP {d}\n", .{code});
+        std.process.exit(1);
+    }
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, result.body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch {
+        std.debug.print("Invalid /api/instances response.\n", .{});
+        std.process.exit(1);
+    };
+    defer parsed.deinit();
+
+    const instances_value = if (parsed.value == .object) parsed.value.object.get("instances") else null;
+    if (instances_value == null or instances_value.? != .object) {
+        std.debug.print("Invalid /api/instances response.\n", .{});
+        std.process.exit(1);
+    }
+
+    var count: usize = 0;
+    var comp_it = instances_value.?.object.iterator();
+    while (comp_it.next()) |comp_entry| {
+        if (comp_entry.value_ptr.* != .object) continue;
+        var inst_it = comp_entry.value_ptr.object.iterator();
+        while (inst_it.next()) |inst_entry| {
+            const ref = cli.InstanceRef{ .component = comp_entry.key_ptr.*, .name = inst_entry.key_ptr.* };
+            runInstanceAction(allocator, ref, action);
+            count += 1;
+        }
+    }
+
+    if (count == 0) {
+        printStdout("No instances.\n") catch {};
     }
 }
 

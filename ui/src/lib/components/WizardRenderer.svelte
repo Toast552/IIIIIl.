@@ -8,10 +8,12 @@
   let {
     component = "",
     steps = [],
+    onVersionChange = (_version: string) => {},
     onComplete,
   } = $props<{
     component: string;
     steps: any[];
+    onVersionChange?: (version: string) => void;
     onComplete?: () => void;
   }>();
 
@@ -23,6 +25,7 @@
   let versions = $state<any[]>([]);
   let selectedVersion = $state("latest");
   let channels = $state<Record<string, Record<string, Record<string, any>>>>({});
+  let showAdvanced = $state(false);
   const instanceNameId = "wizard-instance-name";
 
   // Validation state
@@ -71,15 +74,33 @@
           versions = Array.isArray(data) ? data : [];
           if (versions.length > 0) {
             const rec = versions.find((v: any) => v.recommended);
-            selectedVersion = rec?.value || versions[0].value;
+            setSelectedVersion(rec?.value || versions[0].value);
           }
         })
         .catch(() => {
           versions = [{ value: "latest", label: "latest", recommended: true }];
-          selectedVersion = "latest";
+          setSelectedVersion("latest");
         });
     }
   });
+
+  function setSelectedVersion(version: string) {
+    const next = version || "latest";
+    if (selectedVersion === next) return;
+    selectedVersion = next;
+    resetWizardInputs();
+    onVersionChange(next);
+  }
+
+  function resetWizardInputs() {
+    answers = {};
+    channels = {};
+    providerValidationResults = [];
+    channelValidationResults = [];
+    validationError = "";
+    validationWarning = "";
+    showAdvanced = false;
+  }
 
   // Apply default values from steps
   $effect(() => {
@@ -94,8 +115,11 @@
   });
 
   $effect(() => {
-    if (component === "nullboiler" && (answers["tracker_instance"] || "").length > 0) {
+    if (component !== "nullboiler" || !("tracker_instance" in answers)) return;
+    if ((answers["tracker_instance"] || "").length > 0) {
       answers["tracker_enabled"] = "true";
+    } else if (answers["tracker_enabled"] === "true") {
+      answers["tracker_enabled"] = "false";
     }
   });
 
@@ -117,11 +141,16 @@
   function isStepVisible(step: any): boolean {
     if (!step.condition) return true;
     const ref = answers[step.condition.step] || "";
-    if (step.condition.equals) return ref === step.condition.equals;
-    if (step.condition.not_equals) return ref !== step.condition.not_equals;
-    if (step.condition.contains)
+    if (step.condition.equals !== undefined && step.condition.equals !== null) {
+      return ref === step.condition.equals;
+    }
+    if (step.condition.not_equals !== undefined && step.condition.not_equals !== null) {
+      return ref !== step.condition.not_equals;
+    }
+    if (step.condition.contains !== undefined && step.condition.contains !== null) {
       return ref.split(",").includes(step.condition.contains);
-    if (step.condition.not_in) {
+    }
+    if (step.condition.not_in !== undefined && step.condition.not_in !== null) {
       const excluded = step.condition.not_in.split(",");
       return !excluded.includes(ref);
     }
@@ -151,8 +180,6 @@
         isStepVisible(s),
     ),
   );
-
-  let showAdvanced = $state(false);
 
   let providerStep = $derived(steps.find((s) => s.id === "provider"));
   let hasChannelsPage = $derived(component === "nullclaw");
@@ -415,7 +442,11 @@
       {#if versions.length > 0}
         <div class="version-select">
           <label for="version-picker">Version</label>
-          <select id="version-picker" bind:value={selectedVersion}>
+          <select
+            id="version-picker"
+            value={selectedVersion}
+            onchange={(e) => setSelectedVersion(e.currentTarget.value)}
+          >
             {#each versions as v, i}
               <option value={v.value}>
                 {v.label}{i === 0 ? " (latest, recommended)" : ""}
