@@ -221,6 +221,8 @@ pub fn handlePostModels(
     paths: paths_mod.Paths,
     body: []const u8,
 ) ?[]const u8 {
+    if (registry.findKnownComponent(component_name) == null) return null;
+
     const parsed = std.json.parseFromSlice(struct {
         provider: []const u8,
         api_key: []const u8 = "",
@@ -1118,6 +1120,19 @@ pub fn handleValidateChannels(
 ) ?[]const u8 {
     if (registry.findKnownComponent(component_name) == null) return null;
 
+    var tree = std.json.parseFromSlice(std.json.Value, allocator, body, .{ .allocate = .alloc_always }) catch
+        return allocator.dupe(u8, "{\"error\":\"invalid JSON body\"}") catch null;
+    defer tree.deinit();
+
+    const channels_val = switch (tree.value) {
+        .object => |obj| obj.get("channels") orelse return allocator.dupe(u8, "{\"error\":\"missing channels field\"}") catch null,
+        else => return allocator.dupe(u8, "{\"error\":\"invalid JSON body\"}") catch null,
+    };
+    const channels_map = switch (channels_val) {
+        .object => |obj| obj,
+        else => return allocator.dupe(u8, "{\"error\":\"channels must be an object\"}") catch null,
+    };
+
     const bin_path = findOrFetchComponentBinary(allocator, component_name, paths) orelse
         return allocator.dupe(u8, "{\"error\":\"component binary not found\"}") catch null;
     defer allocator.free(bin_path);
@@ -1137,20 +1152,6 @@ pub fn handleValidateChannels(
         defer file.close();
         file.writeAll(body) catch return null;
     }
-
-    // Parse body to iterate channels and accounts
-    var tree = std.json.parseFromSlice(std.json.Value, allocator, body, .{ .allocate = .alloc_always }) catch
-        return allocator.dupe(u8, "{\"error\":\"invalid JSON body\"}") catch null;
-    defer tree.deinit();
-
-    const channels_val = switch (tree.value) {
-        .object => |obj| obj.get("channels") orelse return allocator.dupe(u8, "{\"error\":\"missing channels field\"}") catch null,
-        else => return allocator.dupe(u8, "{\"error\":\"invalid JSON body\"}") catch null,
-    };
-    const channels_map = switch (channels_val) {
-        .object => |obj| obj,
-        else => return allocator.dupe(u8, "{\"error\":\"channels must be an object\"}") catch null,
-    };
 
     var buf = std.array_list.Managed(u8).init(allocator);
     errdefer buf.deinit();
