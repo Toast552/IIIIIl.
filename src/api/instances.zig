@@ -4,6 +4,9 @@ const builtin = @import("builtin");
 const state_mod = @import("../core/state.zig");
 const manager_mod = @import("../supervisor/manager.zig");
 const paths_mod = @import("../core/paths.zig");
+const registry = @import("../installer/registry.zig");
+const downloader = @import("../installer/downloader.zig");
+const platform = @import("../core/platform.zig");
 const helpers = @import("helpers.zig");
 const local_binary = @import("../core/local_binary.zig");
 const component_cli = @import("../core/component_cli.zig");
@@ -24,10 +27,140 @@ const notFound = helpers.notFound;
 const badRequest = helpers.badRequest;
 const methodNotAllowed = helpers.methodNotAllowed;
 
-const default_tracker_prompt_template =
-    "Task {{task.id}}: {{task.title}}\n\n{{task.description}}\n\nMetadata:\n{{task.metadata}}";
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn defaultLaunchModeForComponent(component: []const u8) []const u8 {
+    if (registry.findKnownComponent(component)) |known| return known.default_launch_command;
+    return "gateway";
+}
+
+fn isLegacyDefaultLaunchMode(component: []const u8, launch_mode: []const u8) bool {
+    const default_launch = defaultLaunchModeForComponent(component);
+    return !std.mem.eql(u8, default_launch, "gateway") and std.mem.eql(u8, launch_mode, "gateway");
+}
+
+const StartBinary = struct {
+    path: []const u8,
+    version: []const u8,
+    version_owned: bool = false,
+
+    fn deinit(self: StartBinary, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        if (self.version_owned) allocator.free(self.version);
+    }
+};
+
+fn persistStartVersion(
+    s: *state_mod.State,
+    component: []const u8,
+    name: []const u8,
+    entry: state_mod.InstanceEntry,
+    version: []const u8,
+) !void {
+    const updated = try s.updateInstance(component, name, .{
+        .version = version,
+        .auto_start = entry.auto_start,
+        .launch_mode = entry.launch_mode,
+        .verbose = entry.verbose,
+    });
+    if (!updated) return error.StateError;
+    s.save() catch return error.StateError;
+}
+
+fn resolveStandaloneStartBinary(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    entry: state_mod.InstanceEntry,
+) !StartBinary {
+    if (local_binary.stageDevLocal(allocator, paths, component)) |dest_bin| {
+        persistStartVersion(s, component, name, entry, local_binary.dev_local_version) catch |err| {
+            allocator.free(dest_bin);
+            return err;
+        };
+        return .{ .path = dest_bin, .version = local_binary.dev_local_version };
+    }
+
+    const known = registry.findKnownComponent(component) orelse return error.NoPlatformAsset;
+    var release = registry.fetchLatestRelease(allocator, known.repo) catch return error.FetchFailed;
+    defer release.deinit();
+
+    const platform_key = comptime platform.detect().toString();
+    const asset = registry.findAssetForComponentPlatform(allocator, release.value, component, platform_key) orelse return error.NoPlatformAsset;
+
+    const version = try allocator.dupe(u8, release.value.tag_name);
+    errdefer allocator.free(version);
+    const bin_path = try paths.binary(allocator, component, version);
+    errdefer allocator.free(bin_path);
+
+    downloader.downloadIfMissing(allocator, asset.browser_download_url, bin_path) catch return error.DownloadFailed;
+    persistStartVersion(s, component, name, entry, version) catch |err| return err;
+
+    return .{ .path = bin_path, .version = version, .version_owned = true };
+}
+
+fn resolveStartBinary(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    entry: state_mod.InstanceEntry,
+) !StartBinary {
+    if (std.mem.eql(u8, entry.version, "standalone")) {
+        return resolveStandaloneStartBinary(allocator, s, paths, component, name, entry);
+    }
+
+    local_binary.refreshStagedDevLocal(allocator, paths, component, entry.version);
+    return .{
+        .path = try paths.binary(allocator, component, entry.version),
+        .version = entry.version,
+    };
+}
+
+fn startBinaryError(err: anyerror) ApiResponse {
+    return switch (err) {
+        error.FetchFailed => .{
+            .status = "502 Bad Gateway",
+            .content_type = "application/json",
+            .body = "{\"error\":\"failed to fetch latest release\"}",
+        },
+        error.NoPlatformAsset => .{
+            .status = "502 Bad Gateway",
+            .content_type = "application/json",
+            .body = "{\"error\":\"no platform asset for latest version\"}",
+        },
+        error.DownloadFailed => .{
+            .status = "502 Bad Gateway",
+            .content_type = "application/json",
+            .body = "{\"error\":\"failed to download latest binary\"}",
+        },
+        else => helpers.serverError(),
+    };
+}
+
+fn isExternalStandaloneRunning(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    manager: *manager_mod.Manager,
+    component: []const u8,
+    name: []const u8,
+    entry: state_mod.InstanceEntry,
+) bool {
+    if (manager.getStatus(component, name) != null) return false;
+    const snapshot = instance_runtime.resolve(allocator, paths, manager, component, name, entry);
+    return snapshot.status == .running;
+}
+
+fn externalStandaloneConflict() ApiResponse {
+    return .{
+        .status = "409 Conflict",
+        .content_type = "application/json",
+        .body = "{\"error\":\"instance is running outside nullhub supervision\"}",
+    };
+}
 
 const FetchedJsonValue = struct {
     bytes: []u8,
@@ -78,6 +211,249 @@ fn fetchJsonValue(allocator: std.mem.Allocator, url: []const u8, bearer_token: ?
 
 fn buildInstanceUrl(allocator: std.mem.Allocator, port: u16, path: []const u8) ?[]const u8 {
     return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ port, path }) catch null;
+}
+
+const NullTicketsActionRequest = struct {
+    method: ?[]const u8 = null,
+    path: []const u8,
+    payload: ?std.json.Value = null,
+    bearer_token: ?[]const u8 = null,
+};
+
+fn parseNullTicketsActionMethod(method: []const u8) ?std.http.Method {
+    if (std.mem.eql(u8, method, "GET")) return .GET;
+    if (std.mem.eql(u8, method, "POST")) return .POST;
+    if (std.mem.eql(u8, method, "DELETE")) return .DELETE;
+    return null;
+}
+
+fn actionStatus(code: u10) []const u8 {
+    return switch (code) {
+        200 => "200 OK",
+        201 => "201 Created",
+        204 => "204 No Content",
+        400 => "400 Bad Request",
+        401 => "401 Unauthorized",
+        403 => "403 Forbidden",
+        404 => "404 Not Found",
+        405 => "405 Method Not Allowed",
+        409 => "409 Conflict",
+        410 => "410 Gone",
+        422 => "422 Unprocessable Entity",
+        500 => "500 Internal Server Error",
+        502 => "502 Bad Gateway",
+        503 => "503 Service Unavailable",
+        else => if (code >= 200 and code < 300) "200 OK" else if (code >= 400 and code < 500) "400 Bad Request" else "500 Internal Server Error",
+    };
+}
+
+fn hasUnsafeActionPathByte(path: []const u8) bool {
+    for (path) |ch| {
+        if (ch <= 0x20 or ch == 0x7f) return true;
+    }
+    return false;
+}
+
+fn hasSinglePathTail(path: []const u8, prefix: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, prefix)) return false;
+    const tail = path[prefix.len..];
+    return tail.len > 0 and std.mem.indexOfScalar(u8, tail, '/') == null;
+}
+
+fn isTaskSubpath(path: []const u8, suffix: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, "/tasks/")) return false;
+    if (!std.mem.endsWith(u8, path, suffix)) return false;
+    const tail = path["/tasks/".len .. path.len - suffix.len];
+    return tail.len > 0 and std.mem.indexOfScalar(u8, tail, '/') == null;
+}
+
+fn isTaskAssignmentTarget(path: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, "/tasks/")) return false;
+    const tail = path["/tasks/".len..];
+    const slash = std.mem.indexOfScalar(u8, tail, '/') orelse return false;
+    const task_id = tail[0..slash];
+    const rest = tail[slash + 1 ..];
+    if (task_id.len == 0) return false;
+    if (!std.mem.startsWith(u8, rest, "assignments/")) return false;
+    const agent_id = rest["assignments/".len..];
+    return agent_id.len > 0 and std.mem.indexOfScalar(u8, agent_id, '/') == null;
+}
+
+fn isRunSubpath(path: []const u8, suffix: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, "/runs/")) return false;
+    if (!std.mem.endsWith(u8, path, suffix)) return false;
+    const tail = path["/runs/".len .. path.len - suffix.len];
+    return tail.len > 0 and std.mem.indexOfScalar(u8, tail, '/') == null;
+}
+
+fn isLeaseHeartbeatTarget(path: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, "/leases/")) return false;
+    if (!std.mem.endsWith(u8, path, "/heartbeat")) return false;
+    const lease_id = path["/leases/".len .. path.len - "/heartbeat".len];
+    return lease_id.len > 0 and std.mem.indexOfScalar(u8, lease_id, '/') == null;
+}
+
+const NullTicketsActionAuthMode = enum {
+    instance_token,
+    lease_token,
+};
+
+fn classifyNullTicketsAction(method: std.http.Method, path: []const u8) ?NullTicketsActionAuthMode {
+    if (path.len == 0 or path.len > 2048) return null;
+    if (path[0] != '/') return null;
+    if (std.mem.startsWith(u8, path, "//")) return null;
+    if (std.mem.indexOfScalar(u8, path, '#') != null) return null;
+    if (hasUnsafeActionPathByte(path)) return null;
+
+    const clean = stripQuery(path);
+    return switch (method) {
+        .GET => if (std.mem.eql(u8, clean, "/pipelines") or
+            hasSinglePathTail(clean, "/pipelines/") or
+            std.mem.eql(u8, clean, "/tasks") or
+            hasSinglePathTail(clean, "/tasks/") or
+            isTaskSubpath(clean, "/run-state") or
+            isTaskSubpath(clean, "/dependencies") or
+            isTaskSubpath(clean, "/assignments") or
+            isRunSubpath(clean, "/events") or
+            std.mem.eql(u8, clean, "/artifacts") or
+            std.mem.eql(u8, clean, "/ops/queue")) .instance_token else null,
+        .POST => blk: {
+            if (path.len != clean.len) break :blk null;
+            if (isLeaseHeartbeatTarget(clean) or
+                isRunSubpath(clean, "/events") or
+                isRunSubpath(clean, "/transition") or
+                isRunSubpath(clean, "/fail"))
+            {
+                break :blk .lease_token;
+            }
+            if (std.mem.eql(u8, clean, "/pipelines") or
+                std.mem.eql(u8, clean, "/tasks") or
+                std.mem.eql(u8, clean, "/tasks/bulk") or
+                isTaskSubpath(clean, "/dependencies") or
+                isTaskSubpath(clean, "/assignments") or
+                std.mem.eql(u8, clean, "/leases/claim") or
+                std.mem.eql(u8, clean, "/artifacts"))
+            {
+                break :blk .instance_token;
+            }
+            break :blk null;
+        },
+        .DELETE => if (path.len == clean.len and isTaskAssignmentTarget(clean)) .instance_token else null,
+        else => null,
+    };
+}
+
+fn isAllowedNullTicketsAction(method: std.http.Method, path: []const u8) bool {
+    return classifyNullTicketsAction(method, path) != null;
+}
+
+fn nullTicketsForwardedToken(
+    auth_mode: NullTicketsActionAuthMode,
+    instance_token: ?[]const u8,
+    request_bearer_token: ?[]const u8,
+) ?[]const u8 {
+    return switch (auth_mode) {
+        .instance_token => instance_token,
+        .lease_token => blk: {
+            const token = request_bearer_token orelse break :blk null;
+            break :blk if (token.len > 0) token else null;
+        },
+    };
+}
+
+fn handleNullTicketsAction(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    manager: *manager_mod.Manager,
+    mutex: *std_compat.sync.Mutex,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    body: []const u8,
+) ApiResponse {
+    if (!std.mem.eql(u8, component, "nulltickets")) {
+        return badRequest("{\"error\":\"tickets actions are only supported for nulltickets\"}");
+    }
+
+    var parsed = std.json.parseFromSlice(NullTicketsActionRequest, allocator, body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch return badRequest("{\"error\":\"invalid JSON body\"}");
+    defer parsed.deinit();
+
+    const method_name = parsed.value.method orelse "GET";
+    const http_method = parseNullTicketsActionMethod(method_name) orelse
+        return methodNotAllowed();
+    const auth_mode = classifyNullTicketsAction(http_method, parsed.value.path) orelse {
+        return badRequest("{\"error\":\"unsupported nulltickets action\"}");
+    };
+
+    var tickets_cfg = blk: {
+        mutex.lock();
+        defer mutex.unlock();
+        _ = s.getInstance(component, name) orelse return notFound();
+        const runtime = manager.getStatus("nulltickets", name) orelse
+            return conflict("{\"error\":\"nulltickets instance is not running\"}");
+        if (runtime.status != .running) {
+            return conflict("{\"error\":\"nulltickets instance is not running\"}");
+        }
+        break :blk integration_mod.loadNullTicketsConfig(allocator, paths, name) catch null orelse return notFound();
+    };
+    defer integration_mod.deinitNullTicketsConfig(allocator, &tickets_cfg);
+
+    var payload_json: ?[]u8 = null;
+    defer if (payload_json) |value| allocator.free(value);
+    if (parsed.value.payload) |payload| {
+        payload_json = std.json.Stringify.valueAlloc(allocator, payload, .{
+            .emit_null_optional_fields = false,
+        }) catch return helpers.serverError();
+    }
+
+    const url = buildInstanceUrl(allocator, tickets_cfg.port, parsed.value.path) orelse return helpers.serverError();
+    defer allocator.free(url);
+
+    var auth_header: ?[]const u8 = null;
+    defer if (auth_header) |value| allocator.free(value);
+    var header_buf: [2]std.http.Header = undefined;
+    var header_count: usize = 0;
+    const forwarded_token = nullTicketsForwardedToken(auth_mode, tickets_cfg.api_token, parsed.value.bearer_token);
+    if (forwarded_token) |token| {
+        auth_header = std.fmt.allocPrint(allocator, "Bearer {s}", .{token}) catch return helpers.serverError();
+        header_buf[header_count] = .{ .name = "Authorization", .value = auth_header.? };
+        header_count += 1;
+    }
+    if (payload_json != null) {
+        header_buf[header_count] = .{ .name = "Content-Type", .value = "application/json" };
+        header_count += 1;
+    }
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = std_compat.io() };
+    defer client.deinit();
+
+    var response_body: std.Io.Writer.Allocating = .init(allocator);
+    defer response_body.deinit();
+
+    const result = client.fetch(.{
+        .location = .{ .url = url },
+        .method = http_method,
+        .payload = if (payload_json) |value| value else null,
+        .response_writer = &response_body.writer,
+        .extra_headers = header_buf[0..header_count],
+    }) catch {
+        return .{
+            .status = "502 Bad Gateway",
+            .content_type = "application/json",
+            .body = "{\"error\":\"NullTickets unreachable\"}",
+        };
+    };
+
+    const response_bytes = response_body.toOwnedSlice() catch return helpers.serverError();
+    const status_code: u10 = @intFromEnum(result.status);
+    return .{
+        .status = actionStatus(status_code),
+        .content_type = "application/json",
+        .body = response_bytes,
+    };
 }
 
 fn getStatusLocked(
@@ -262,6 +638,17 @@ fn listNullBoilersLocked(
     return integration_mod.listNullBoilers(allocator, state, paths);
 }
 
+fn listNullWatchLocked(
+    allocator: std.mem.Allocator,
+    mutex: *std_compat.sync.Mutex,
+    state: *state_mod.State,
+    paths: paths_mod.Paths,
+) ![]integration_mod.NullWatchConfig {
+    mutex.lock();
+    defer mutex.unlock();
+    return integration_mod.listNullWatch(allocator, state, paths);
+}
+
 const PipelineSummary = struct {
     id: []const u8,
     name: []const u8,
@@ -274,6 +661,19 @@ const TrackerIntegrationOption = struct {
     port: u16,
     running: bool,
     pipelines: []const PipelineSummary = &.{},
+};
+
+const WatchIntegrationOption = struct {
+    name: []const u8,
+    host: []const u8,
+    port: u16,
+    running: bool,
+};
+
+const ClawIntegrationOption = struct {
+    name: []const u8,
+    running: bool,
+    linked: bool,
 };
 
 fn fetchPipelineSummaries(allocator: std.mem.Allocator, url: []const u8, bearer_token: ?[]const u8) ?[]PipelineSummary {
@@ -306,13 +706,18 @@ fn fetchPipelineSummaries(allocator: std.mem.Allocator, url: []const u8, bearer_
         .ignore_unknown_fields = true,
     }) catch return null;
     defer parsed.deinit();
-    if (parsed.value != .array) return null;
+    const pipeline_items = pipelineItemsFromValue(parsed.value) orelse return null;
 
     var list: std.ArrayListUnmanaged(PipelineSummary) = .empty;
-    errdefer deinitPipelineSummaries(allocator, list.items);
+    var summaries_owned = false;
+    defer {
+        if (!summaries_owned) {
+            for (list.items) |summary| deinitPipelineSummary(allocator, summary);
+        }
+    }
     defer list.deinit(allocator);
 
-    for (parsed.value.array.items) |item| {
+    for (pipeline_items) |item| {
         const summary = parsePipelineSummary(allocator, item) catch continue;
         list.append(allocator, summary) catch {
             deinitPipelineSummary(allocator, summary);
@@ -320,20 +725,66 @@ fn fetchPipelineSummaries(allocator: std.mem.Allocator, url: []const u8, bearer_
         };
     }
 
-    return list.toOwnedSlice(allocator) catch null;
+    const summaries = list.toOwnedSlice(allocator) catch return null;
+    summaries_owned = true;
+    return summaries;
+}
+
+fn pipelineItemsFromValue(value: std.json.Value) ?[]const std.json.Value {
+    return switch (value) {
+        .array => |array| array.items,
+        .object => |object| blk: {
+            if (object.get("pipelines")) |pipelines| {
+                if (pipelines == .array) break :blk pipelines.array.items;
+            }
+            if (object.get("items")) |items| {
+                if (items == .array) break :blk items.array.items;
+            }
+            break :blk null;
+        },
+        else => null,
+    };
 }
 
 fn parsePipelineSummary(allocator: std.mem.Allocator, value: std.json.Value) !PipelineSummary {
     if (value != .object) return error.InvalidPipelineSummary;
     const obj = value.object;
-    const definition = obj.get("definition") orelse return error.InvalidPipelineSummary;
-    if (definition != .object) return error.InvalidPipelineSummary;
+    var parsed_definition: ?std.json.Parsed(std.json.Value) = null;
+    defer if (parsed_definition) |*parsed| parsed.deinit();
+    const definition = try pipelineDefinitionValue(
+        allocator,
+        obj.get("definition") orelse obj.get("definition_json") orelse return error.InvalidPipelineSummary,
+        &parsed_definition,
+    );
 
-    return .{
-        .id = try allocator.dupe(u8, jsonStringOrEmpty(obj, "id")),
-        .name = try allocator.dupe(u8, jsonStringOrEmpty(obj, "name")),
-        .roles = try collectPipelineRoles(allocator, definition),
-        .triggers = try collectPipelineTriggers(allocator, definition),
+    const id = try allocator.dupe(u8, jsonStringOrEmpty(obj, "id"));
+    errdefer allocator.free(id);
+    const name = try allocator.dupe(u8, jsonStringOrEmpty(obj, "name"));
+    errdefer allocator.free(name);
+    const roles = try collectPipelineRoles(allocator, definition);
+    errdefer freeStringList(allocator, roles);
+    const triggers = try collectPipelineTriggers(allocator, definition);
+
+    return .{ .id = id, .name = name, .roles = roles, .triggers = triggers };
+}
+
+fn pipelineDefinitionValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    parsed_out: *?std.json.Parsed(std.json.Value),
+) !std.json.Value {
+    return switch (value) {
+        .object => value,
+        .string => |raw| blk: {
+            parsed_out.* = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            });
+            const parsed = &parsed_out.*.?;
+            if (parsed.value != .object) return error.InvalidPipelineSummary;
+            break :blk parsed.value;
+        },
+        else => error.InvalidPipelineSummary,
     };
 }
 
@@ -343,6 +794,7 @@ fn collectPipelineRoles(allocator: std.mem.Allocator, definition: std.json.Value
     if (states_val != .object) return allocator.alloc([]const u8, 0);
 
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer for (list.items) |role| allocator.free(role);
     defer list.deinit(allocator);
 
     var it = states_val.object.iterator();
@@ -361,6 +813,7 @@ fn collectPipelineTriggers(allocator: std.mem.Allocator, definition: std.json.Va
     if (transitions_val != .array) return allocator.alloc([]const u8, 0);
 
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer for (list.items) |trigger| allocator.free(trigger);
     defer list.deinit(allocator);
 
     for (transitions_val.array.items) |transition| {
@@ -376,16 +829,21 @@ fn appendUniqueString(allocator: std.mem.Allocator, list: *std.ArrayListUnmanage
     for (list.items) |existing| {
         if (std.mem.eql(u8, existing, value)) return;
     }
-    try list.append(allocator, try allocator.dupe(u8, value));
+    const owned = try allocator.dupe(u8, value);
+    errdefer allocator.free(owned);
+    try list.append(allocator, owned);
+}
+
+fn freeStringList(allocator: std.mem.Allocator, values: []const []const u8) void {
+    for (values) |value| allocator.free(value);
+    allocator.free(@constCast(values));
 }
 
 fn deinitPipelineSummary(allocator: std.mem.Allocator, summary: PipelineSummary) void {
     allocator.free(summary.id);
     allocator.free(summary.name);
-    for (summary.roles) |role| allocator.free(role);
-    allocator.free(summary.roles);
-    for (summary.triggers) |trigger| allocator.free(trigger);
-    allocator.free(summary.triggers);
+    freeStringList(allocator, summary.roles);
+    freeStringList(allocator, summary.triggers);
 }
 
 fn deinitPipelineSummaries(allocator: std.mem.Allocator, summaries: []const PipelineSummary) void {
@@ -413,52 +871,17 @@ fn ensurePath(path: []const u8) !void {
     try std_compat.fs.cwd().makePath(path);
 }
 
-fn ensureObjectField(
-    allocator: std.mem.Allocator,
-    parent: *std.json.ObjectMap,
-    key: []const u8,
-) !*std.json.ObjectMap {
-    if (parent.getPtr(key)) |value_ptr| {
-        if (value_ptr.* != .object) {
-            value_ptr.* = .{ .object = .empty };
-        }
-        return &value_ptr.object;
-    }
+fn writeJsonConfigValue(allocator: std.mem.Allocator, config_path: []const u8, value: std.json.Value) !void {
+    const rendered = try std.json.Stringify.valueAlloc(allocator, value, .{
+        .whitespace = .indent_2,
+        .emit_null_optional_fields = false,
+    });
+    defer allocator.free(rendered);
 
-    try parent.put(allocator, key, .{ .object = .empty });
-    return &parent.getPtr(key).?.object;
-}
-
-fn resolvePathFromConfig(allocator: std.mem.Allocator, config_path: []const u8, value: []const u8) ![]const u8 {
-    if (value.len == 0 or std.fs.path.isAbsolute(value)) return allocator.dupe(u8, value);
-    const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
-    return std.fs.path.resolve(allocator, &.{ config_dir, value });
-}
-
-fn isNullHubManagedWorkflow(
-    allocator: std.mem.Allocator,
-    workflow_path: []const u8,
-) bool {
-    const file = std_compat.fs.openFileAbsolute(workflow_path, .{}) catch return false;
-    defer file.close();
-
-    const bytes = file.readToEndAlloc(allocator, 1024 * 1024) catch return false;
-    defer allocator.free(bytes);
-
-    const parsed = std.json.parseFromSlice(struct {
-        id: []const u8 = "",
-        execution: []const u8 = "",
-        prompt_template: ?[]const u8 = null,
-    }, allocator, bytes, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    }) catch return false;
-    defer parsed.deinit();
-
-    return std.mem.startsWith(u8, parsed.value.id, "wf-") and
-        std.mem.eql(u8, parsed.value.execution, "subprocess") and
-        parsed.value.prompt_template != null and
-        std.mem.eql(u8, parsed.value.prompt_template.?, default_tracker_prompt_template);
+    const out = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer out.close();
+    try out.writeAll(rendered);
+    try out.writeAll("\n");
 }
 
 const ProviderHealthConfig = struct {
@@ -1193,6 +1616,14 @@ fn jsonCliConflict(
     };
 }
 
+fn conflict(body: []const u8) ApiResponse {
+    return .{
+        .status = "409 Conflict",
+        .content_type = "application/json",
+        .body = body,
+    };
+}
+
 const ParsedCronPath = struct {
     component: []const u8,
     name: []const u8,
@@ -1848,6 +2279,9 @@ pub fn handleGet(allocator: std.mem.Allocator, s: *state_mod.State, manager: *ma
 /// POST /api/instances/{component}/{name}/start
 pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *manager_mod.Manager, paths: paths_mod.Paths, component: []const u8, name: []const u8, body: []const u8) ApiResponse {
     const entry = s.getInstance(component, name) orelse return notFound();
+    if (isExternalStandaloneRunning(allocator, paths, manager, component, name, entry)) {
+        return externalStandaloneConflict();
+    }
 
     _ = nullclaw_web_channel.ensureNullclawWebChannelConfig(
         allocator,
@@ -1872,6 +2306,7 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
     };
     var launch_cmd: []const u8 = entry.launch_mode;
     var launch_verbose = entry.verbose;
+    var launch_mode_overridden = false;
     var parsed_body: ?std.json.Parsed(StartBody) = null;
     defer if (parsed_body) |*pb| pb.deinit();
     if (body.len > 0) {
@@ -1882,21 +2317,28 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
             .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
         ) catch null;
         if (parsed_body) |pb| {
-            if (pb.value.launch_mode) |mode| launch_cmd = mode;
+            if (pb.value.launch_mode) |mode| {
+                launch_cmd = mode;
+                launch_mode_overridden = true;
+            }
             if (pb.value.verbose) |verbose| launch_verbose = verbose;
         }
     }
 
-    local_binary.refreshStagedDevLocal(allocator, paths, component, entry.version);
+    const start_binary = resolveStartBinary(allocator, s, paths, component, name, entry) catch |err| return startBinaryError(err);
+    defer start_binary.deinit(allocator);
+    const bin_path = start_binary.path;
+    const current_version = start_binary.version;
 
-    // Resolve binary path
-    const bin_path = paths.binary(allocator, component, entry.version) catch return helpers.serverError();
-    defer allocator.free(bin_path);
-
-    // Read manifest from binary to get health endpoint and port
-    var health_endpoint: []const u8 = "/health";
-    var port: u16 = 0;
+    // Read manifest from binary to get health endpoint and port, falling back
+    // to registry/config defaults for older binaries without manifest support.
+    const known_component = registry.findKnownComponent(component);
+    var health_endpoint: []const u8 = if (known_component) |known| known.default_health_endpoint else "/health";
+    var port: u16 = if (known_component) |known| known.default_port else 0;
     var port_from_config: []const u8 = "";
+    var manifest_launch_command: []const u8 = "";
+    var manifest_launch_mode: ?[]const u8 = null;
+    defer if (manifest_launch_mode) |mode| allocator.free(mode);
     const manifest_json = component_cli.exportManifest(allocator, bin_path) catch null;
     var parsed_manifest: ?std.json.Parsed(manifest_mod.Manifest) = null;
     if (manifest_json) |mj| {
@@ -1905,19 +2347,52 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
             health_endpoint = pm.value.health.endpoint;
             port_from_config = pm.value.health.port_from_config;
             if (pm.value.ports.len > 0) port = pm.value.ports[0].default;
+            manifest_launch_command = pm.value.launch.command;
+            manifest_launch_mode = launch_args_mod.fromManifestLaunch(
+                allocator,
+                component,
+                pm.value.launch.command,
+                pm.value.launch.args,
+            ) catch null;
         }
     }
     defer if (manifest_json) |mj| allocator.free(mj);
     defer if (parsed_manifest) |*pm| pm.deinit();
 
-    // Try to read actual port from instance config.json using port_from_config key
+    if (!launch_mode_overridden) {
+        if (manifest_launch_mode) |mode| {
+            const should_normalize_launch =
+                (std.mem.eql(u8, launch_cmd, manifest_launch_command) and !std.mem.eql(u8, launch_cmd, mode)) or
+                isLegacyDefaultLaunchMode(component, launch_cmd);
+            if (should_normalize_launch) {
+                launch_cmd = registry.normalizeLaunchCommand(component, mode);
+                _ = s.updateInstance(component, name, .{
+                    .version = current_version,
+                    .auto_start = entry.auto_start,
+                    .launch_mode = launch_cmd,
+                    .verbose = entry.verbose,
+                }) catch {};
+                s.save() catch {};
+            }
+        }
+    }
+
+    // Try to read actual port from instance config.json using port_from_config key.
+    // If manifest probing failed, fall back to the common service port keys.
     if (port_from_config.len > 0) {
         if (instance_runtime.readPortFromConfig(allocator, paths, component, name, port_from_config)) |config_port| {
             port = config_port;
         }
+    } else {
+        if (instance_runtime.readPortFromConfig(allocator, paths, component, name, "port")) |config_port| {
+            port = config_port;
+        } else if (instance_runtime.readPortFromConfig(allocator, paths, component, name, "gateway.port")) |config_port| {
+            port = config_port;
+        }
     }
 
-    var launch = launch_args_mod.resolve(allocator, launch_cmd, launch_verbose) catch return badRequest("{\"error\":\"invalid launch_mode\"}");
+    const normalized_launch_cmd = registry.normalizeLaunchCommand(component, launch_cmd);
+    var launch = launch_args_mod.resolve(allocator, normalized_launch_cmd, launch_verbose) catch return badRequest("{\"error\":\"invalid launch_mode\"}");
     defer launch.deinit();
     // The launch-mode helper decides whether this mode should be supervised via
     // an HTTP health endpoint or process liveness only.
@@ -1932,15 +2407,21 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
 }
 
 /// POST /api/instances/{component}/{name}/stop
-pub fn handleStop(s: *state_mod.State, manager: *manager_mod.Manager, component: []const u8, name: []const u8) ApiResponse {
-    _ = s.getInstance(component, name) orelse return notFound();
+pub fn handleStop(allocator: std.mem.Allocator, s: *state_mod.State, manager: *manager_mod.Manager, paths: paths_mod.Paths, component: []const u8, name: []const u8) ApiResponse {
+    const entry = s.getInstance(component, name) orelse return notFound();
+    if (isExternalStandaloneRunning(allocator, paths, manager, component, name, entry)) {
+        return externalStandaloneConflict();
+    }
     manager.stopInstance(component, name) catch return helpers.serverError();
     return jsonOk("{\"status\":\"stopped\"}");
 }
 
 /// POST /api/instances/{component}/{name}/restart
 pub fn handleRestart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *manager_mod.Manager, paths: paths_mod.Paths, component: []const u8, name: []const u8, body: []const u8) ApiResponse {
-    _ = s.getInstance(component, name) orelse return notFound();
+    const entry = s.getInstance(component, name) orelse return notFound();
+    if (isExternalStandaloneRunning(allocator, paths, manager, component, name, entry)) {
+        return externalStandaloneConflict();
+    }
     manager.stopInstance(component, name) catch {};
     return handleStart(allocator, s, manager, paths, component, name, body);
 }
@@ -3027,13 +3508,277 @@ pub fn handleSkills(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
     });
 }
 
+const DeleteDependent = struct {
+    component: []const u8,
+    name: []const u8,
+    relation: []const u8,
+};
+
+const DeleteDependencyList = struct {
+    items: std.ArrayListUnmanaged(DeleteDependent) = .empty,
+
+    fn append(
+        self: *DeleteDependencyList,
+        allocator: std.mem.Allocator,
+        component: []const u8,
+        name: []const u8,
+        relation: []const u8,
+    ) !void {
+        const owned_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_name);
+        try self.items.append(allocator, .{
+            .component = component,
+            .name = owned_name,
+            .relation = relation,
+        });
+    }
+
+    fn deinit(self: *DeleteDependencyList, allocator: std.mem.Allocator) void {
+        for (self.items.items) |dep| allocator.free(dep.name);
+        self.items.deinit(allocator);
+        self.* = .{};
+    }
+};
+
+const DeleteImpact = struct {
+    dependents: DeleteDependencyList = .{},
+    nullwatch: ?integration_mod.NullWatchConfig = null,
+    nulltickets: ?integration_mod.NullTicketsConfig = null,
+
+    fn deinit(self: *DeleteImpact, allocator: std.mem.Allocator) void {
+        self.dependents.deinit(allocator);
+        if (self.nullwatch) |*cfg| integration_mod.deinitNullWatchConfig(allocator, cfg);
+        if (self.nulltickets) |*cfg| integration_mod.deinitNullTicketsConfig(allocator, cfg);
+        self.* = .{};
+    }
+};
+
+fn collectDeleteImpact(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+) !DeleteImpact {
+    var impact: DeleteImpact = .{};
+    errdefer impact.deinit(allocator);
+
+    if (std.mem.eql(u8, component, "nullwatch")) {
+        impact.nullwatch = try integration_mod.loadNullWatchConfig(allocator, paths, name) orelse return impact;
+        const watch_cfg = impact.nullwatch.?;
+
+        if (try s.instanceNames("nullclaw")) |claw_names| {
+            defer s.allocator.free(claw_names);
+            for (claw_names) |claw_name| {
+                var link = integration_mod.loadNullClawTelemetryLink(allocator, paths, claw_name) catch |err| switch (err) {
+                    error.NotFound => continue,
+                    else => return err,
+                };
+                defer link.deinit(allocator);
+
+                if (integration_mod.findNullWatchByEndpoint(&.{watch_cfg}, link.endpoint) != null) {
+                    try impact.dependents.append(allocator, "nullclaw", claw_name, "telemetry");
+                }
+            }
+        }
+    } else if (std.mem.eql(u8, component, "nulltickets")) {
+        impact.nulltickets = try integration_mod.loadNullTicketsConfig(allocator, paths, name) orelse return impact;
+        const tickets_cfg = impact.nulltickets.?;
+
+        if (try s.instanceNames("nullboiler")) |boiler_names| {
+            defer s.allocator.free(boiler_names);
+            for (boiler_names) |boiler_name| {
+                var boiler_cfg = try integration_mod.loadNullBoilerConfig(allocator, paths, boiler_name) orelse continue;
+                defer integration_mod.deinitNullBoilerConfig(allocator, &boiler_cfg);
+
+                if (integration_mod.matchNullTicketsTarget(boiler_cfg, &.{tickets_cfg}) != null) {
+                    try impact.dependents.append(allocator, "nullboiler", boiler_name, "tracker");
+                }
+            }
+        }
+    }
+
+    return impact;
+}
+
+fn deleteDependencyConflict(allocator: std.mem.Allocator, dependents: []const DeleteDependent) ApiResponse {
+    const body = std.json.Stringify.valueAlloc(allocator, .{
+        .@"error" = "instance has dependent links",
+        .force_required = true,
+        .dependents = dependents,
+    }, .{}) catch return helpers.serverError();
+
+    return .{
+        .status = "409 Conflict",
+        .content_type = "application/json",
+        .body = body,
+    };
+}
+
+fn unlinkNullClawTelemetryForDeletedWatch(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    claw_name: []const u8,
+    watch_cfg: integration_mod.NullWatchConfig,
+) !bool {
+    var link = integration_mod.loadNullClawTelemetryLink(allocator, paths, claw_name) catch |err| switch (err) {
+        error.NotFound => return false,
+        else => return err,
+    };
+    defer link.deinit(allocator);
+    if (integration_mod.findNullWatchByEndpoint(&.{watch_cfg}, link.endpoint) == null) return false;
+
+    const config_path = try paths.instanceConfig(allocator, "nullclaw", claw_name);
+    defer allocator.free(config_path);
+    const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer file.close();
+
+    const config_bytes = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(config_bytes);
+
+    var parsed_config = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed_config.deinit();
+    if (parsed_config.value != .object) return error.InvalidConfig;
+
+    if (parsed_config.value.object.getPtr("diagnostics")) |diagnostics_value| {
+        if (diagnostics_value.* == .object) {
+            if (jsonString(diagnostics_value.object, "backend")) |backend| {
+                if (std.mem.eql(u8, backend, "otel") or std.mem.eql(u8, backend, "otlp")) {
+                    try diagnostics_value.object.put(allocator, "backend", .{ .string = "jsonl" });
+                }
+            }
+            _ = diagnostics_value.object.swapRemove("otel");
+        }
+    }
+
+    try writeJsonConfigValue(allocator, config_path, parsed_config.value);
+    return true;
+}
+
+fn unlinkNullBoilerTrackerForDeletedTickets(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    boiler_name: []const u8,
+    tickets_cfg: integration_mod.NullTicketsConfig,
+) !bool {
+    var boiler_cfg = try integration_mod.loadNullBoilerConfig(allocator, paths, boiler_name) orelse return false;
+    defer integration_mod.deinitNullBoilerConfig(allocator, &boiler_cfg);
+    if (integration_mod.matchNullTicketsTarget(boiler_cfg, &.{tickets_cfg}) == null) return false;
+
+    const config_path = try paths.instanceConfig(allocator, "nullboiler", boiler_name);
+    defer allocator.free(config_path);
+    const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer file.close();
+
+    const config_bytes = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(config_bytes);
+
+    var parsed_config = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed_config.deinit();
+    if (parsed_config.value != .object) return error.InvalidConfig;
+
+    _ = parsed_config.value.object.swapRemove("tracker");
+    try writeJsonConfigValue(allocator, config_path, parsed_config.value);
+    return true;
+}
+
+fn unlinkDeleteImpact(allocator: std.mem.Allocator, paths: paths_mod.Paths, component: []const u8, impact: DeleteImpact) !void {
+    if (std.mem.eql(u8, component, "nullwatch")) {
+        const watch_cfg = impact.nullwatch orelse return;
+        for (impact.dependents.items.items) |dep| {
+            if (!std.mem.eql(u8, dep.component, "nullclaw")) continue;
+            _ = try unlinkNullClawTelemetryForDeletedWatch(allocator, paths, dep.name, watch_cfg);
+        }
+    } else if (std.mem.eql(u8, component, "nulltickets")) {
+        const tickets_cfg = impact.nulltickets orelse return;
+        for (impact.dependents.items.items) |dep| {
+            if (!std.mem.eql(u8, dep.component, "nullboiler")) continue;
+            _ = try unlinkNullBoilerTrackerForDeletedTickets(allocator, paths, dep.name, tickets_cfg);
+        }
+    }
+}
+
+fn restartRunningDeleteDependents(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    manager: *manager_mod.Manager,
+    paths: paths_mod.Paths,
+    impact: DeleteImpact,
+) void {
+    for (impact.dependents.items.items) |dep| {
+        const status = manager.getStatus(dep.component, dep.name) orelse continue;
+        if (status.status != .running) continue;
+
+        const resp = handleRestart(allocator, s, manager, paths, dep.component, dep.name, "");
+        if (!std.mem.eql(u8, resp.status, "200 OK")) {
+            std.log.warn("unlinked dependent {s}/{s} but failed to restart after delete: {s}", .{
+                dep.component,
+                dep.name,
+                resp.status,
+            });
+        }
+    }
+}
+
+fn restoreDeletedInstance(
+    s: *state_mod.State,
+    component: []const u8,
+    name: []const u8,
+    rollback_version: []const u8,
+    rollback_auto_start: bool,
+    rollback_launch_mode: []const u8,
+    rollback_verbose: bool,
+    inst_dir: []const u8,
+    hidden_inst_dir: ?[]const u8,
+) void {
+    _ = s.addInstance(component, name, .{
+        .version = rollback_version,
+        .auto_start = rollback_auto_start,
+        .launch_mode = rollback_launch_mode,
+        .verbose = rollback_verbose,
+    }) catch {};
+    _ = s.save() catch {};
+    if (hidden_inst_dir) |path| {
+        std_compat.fs.renameAbsolute(path, inst_dir) catch {};
+    }
+}
+
 /// DELETE /api/instances/{component}/{name}
-pub fn handleDelete(allocator: std.mem.Allocator, s: *state_mod.State, manager: *manager_mod.Manager, paths: paths_mod.Paths, component: []const u8, name: []const u8) ApiResponse {
+pub fn handleDelete(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    manager: *manager_mod.Manager,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    target: []const u8,
+) ApiResponse {
     const existing = s.getInstance(component, name) orelse return notFound();
     const rollback_version = allocator.dupe(u8, existing.version) catch return helpers.serverError();
     defer allocator.free(rollback_version);
+    const rollback_auto_start = existing.auto_start;
     const rollback_launch_mode = allocator.dupe(u8, existing.launch_mode) catch return helpers.serverError();
     defer allocator.free(rollback_launch_mode);
+    const rollback_verbose = existing.verbose;
+
+    var delete_impact = collectDeleteImpact(allocator, s, paths, component, name) catch return helpers.serverError();
+    defer delete_impact.deinit(allocator);
+    const force = query_api.boolValue(target, "force");
+    if (delete_impact.dependents.items.items.len > 0 and !force) {
+        return deleteDependencyConflict(allocator, delete_impact.dependents.items.items);
+    }
 
     const inst_dir = paths.instanceDir(allocator, component, name) catch return helpers.serverError();
     defer allocator.free(inst_dir);
@@ -3049,18 +3794,18 @@ pub fn handleDelete(allocator: std.mem.Allocator, s: *state_mod.State, manager: 
         return notFound();
     }
     s.save() catch {
-        _ = s.addInstance(component, name, .{
-            .version = rollback_version,
-            .auto_start = existing.auto_start,
-            .launch_mode = rollback_launch_mode,
-            .verbose = existing.verbose,
-        }) catch {};
-        _ = s.save() catch {};
-        if (hidden_inst_dir) |path| {
-            std_compat.fs.renameAbsolute(path, inst_dir) catch {};
-        }
+        restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, inst_dir, hidden_inst_dir);
         return helpers.serverError();
     };
+
+    if (delete_impact.dependents.items.items.len > 0) {
+        unlinkDeleteImpact(allocator, paths, component, delete_impact) catch {
+            restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, inst_dir, hidden_inst_dir);
+            _ = s.save() catch {};
+            return helpers.serverError();
+        };
+        restartRunningDeleteDependents(allocator, s, manager, paths, delete_impact);
+    }
 
     if (hidden_inst_dir) |path| {
         std_compat.fs.deleteTreeAbsolute(path) catch |err| {
@@ -3106,10 +3851,75 @@ fn hideInstanceDirForDelete(allocator: std.mem.Allocator, inst_dir: []const u8) 
     return error.PathAlreadyExists;
 }
 
+fn findInstalledBinaryVersion(allocator: std.mem.Allocator, paths: paths_mod.Paths, component: []const u8) ?[]const u8 {
+    const bin_dir = std.fmt.allocPrint(allocator, "{s}/bin", .{paths.root}) catch return null;
+    defer allocator.free(bin_dir);
+
+    var dir = std_compat.fs.openDirAbsolute(bin_dir, .{ .iterate = true }) catch return null;
+    defer dir.close();
+
+    const prefix = std.fmt.allocPrint(allocator, "{s}-", .{component}) catch return null;
+    defer allocator.free(prefix);
+
+    var best_version: ?[]const u8 = null;
+    var it = dir.iterate();
+    while (it.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+
+        var version = entry.name[prefix.len..];
+        if (builtin.os.tag == .windows and std.mem.endsWith(u8, version, ".exe")) {
+            version = version[0 .. version.len - 4];
+        }
+        if (version.len == 0) continue;
+
+        const candidate_path = std.fs.path.join(allocator, &.{ bin_dir, entry.name }) catch continue;
+        defer allocator.free(candidate_path);
+        std_compat.fs.accessAbsolute(candidate_path, .{}) catch continue;
+
+        if (best_version == null or std.mem.order(u8, version, best_version.?) == .gt) {
+            const owned_version = allocator.dupe(u8, version) catch continue;
+            if (best_version) |owned| allocator.free(owned);
+            best_version = owned_version;
+        }
+    }
+
+    return best_version;
+}
+
+fn downloadLatestBinaryVersion(allocator: std.mem.Allocator, paths: paths_mod.Paths, component: []const u8) ?[]const u8 {
+    const known = registry.findKnownComponent(component) orelse return null;
+    var release = registry.fetchLatestRelease(allocator, known.repo) catch return null;
+    defer release.deinit();
+
+    const platform_key = comptime platform.detect().toString();
+    const asset = registry.findAssetForComponentPlatform(allocator, release.value, component, platform_key) orelse return null;
+
+    paths.ensureDirs() catch return null;
+    const bin_path = paths.binary(allocator, component, release.value.tag_name) catch return null;
+    defer allocator.free(bin_path);
+
+    downloader.downloadIfMissing(allocator, asset.browser_download_url, bin_path) catch return null;
+    return allocator.dupe(u8, release.value.tag_name) catch null;
+}
+
+fn resolveImportBinaryVersion(allocator: std.mem.Allocator, paths: paths_mod.Paths, component: []const u8) ?[]const u8 {
+    if (local_binary.stageDevLocal(allocator, paths, component)) |dest_bin| {
+        allocator.free(dest_bin);
+        return allocator.dupe(u8, local_binary.dev_local_version) catch null;
+    }
+    if (findInstalledBinaryVersion(allocator, paths, component)) |version| return version;
+    return downloadLatestBinaryVersion(allocator, paths, component);
+}
+
 /// POST /api/instances/{component}/import — import a standalone installation.
 /// Copies config and data from ~/.{component}/ into the nullhub instance directory.
-/// The binary will be downloaded via the normal install flow on first start.
+/// A runnable binary is staged during import so the managed instance can start.
 pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8) ApiResponse {
+    if (s.getInstance(component, "default") != null) {
+        return conflict("{\"error\":\"default instance already exists\"}");
+    }
+
     const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch blk: {
         if (builtin.os.tag == .windows) {
             break :blk std_compat.process.getEnvVarOwned(allocator, "USERPROFILE") catch return helpers.serverError();
@@ -3126,6 +3936,12 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
     // 2. Create instance directory structure
     const inst_dir = paths.instanceDir(allocator, component, "default") catch return helpers.serverError();
     defer allocator.free(inst_dir);
+    if (std_compat.fs.accessAbsolute(inst_dir, .{})) |_| {
+        return conflict("{\"error\":\"default instance directory already exists\"}");
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return helpers.serverError(),
+    }
 
     // Ensure parent component dir exists
     const comp_dir = std.fs.path.join(allocator, &.{ paths.root, "instances", component }) catch return helpers.serverError();
@@ -3135,29 +3951,30 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
         else => return helpers.serverError(),
     };
 
-    // 3. Symlink the entire standalone dir as the instance dir
+    // 3. Stage or reuse a runnable binary before mutating the instance path.
+    const version = resolveImportBinaryVersion(allocator, paths, component) orelse return helpers.serverError();
+    defer allocator.free(version);
+
+    // 4. Symlink the entire standalone dir as the instance dir
     //    ~/.nullclaw → ~/.nullhub/instances/nullclaw/default
     //    This preserves all data in place (config, auth, workspace, state, logs)
-    std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
-    std_compat.fs.deleteTreeAbsolute(inst_dir) catch {};
     std_compat.fs.symLinkAbsolute(dot_dir, inst_dir, .{ .is_directory = true }) catch return helpers.serverError();
-
-    // 4. Stage binary from local dev build or leave for download on start.
-    const version = blk: {
-        if (local_binary.stageDevLocal(allocator, paths, component)) |dest_bin| {
-            allocator.free(dest_bin);
-            break :blk local_binary.dev_local_version;
-        }
-        break :blk "standalone";
-    };
 
     // 5. Register in state
     s.addInstance(component, "default", .{
         .version = version,
         .auto_start = false,
+        .launch_mode = defaultLaunchModeForComponent(component),
         .verbose = false,
-    }) catch return helpers.serverError();
-    s.save() catch return helpers.serverError();
+    }) catch {
+        std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
+        return helpers.serverError();
+    };
+    s.save() catch {
+        _ = s.removeInstance(component, "default");
+        std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
+        return helpers.serverError();
+    };
 
     return jsonOk("{\"status\":\"imported\",\"instance\":\"default\"}");
 }
@@ -3180,7 +3997,7 @@ pub fn handlePatch(s: *state_mod.State, component: []const u8, name: []const u8,
     defer parsed.deinit();
 
     const new_auto_start = parsed.value.auto_start orelse entry.auto_start;
-    const new_launch_mode = parsed.value.launch_mode orelse entry.launch_mode;
+    const new_launch_mode = registry.normalizeLaunchCommand(component, parsed.value.launch_mode orelse entry.launch_mode);
     const new_verbose = parsed.value.verbose orelse entry.verbose;
 
     var validated_launch = launch_args_mod.resolve(s.allocator, new_launch_mode, new_verbose) catch
@@ -3212,6 +4029,94 @@ fn handleIntegrationGet(
     component: []const u8,
     name: []const u8,
 ) ApiResponse {
+    if (std.mem.eql(u8, component, "nullclaw")) {
+        var link = integration_mod.loadNullClawTelemetryLink(allocator, paths, name) catch |err| switch (err) {
+            error.NotFound => return notFound(),
+            else => return helpers.serverError(),
+        };
+        defer link.deinit(allocator);
+        const watches = listNullWatchLocked(allocator, mutex, s, paths) catch return helpers.serverError();
+        defer integration_mod.deinitNullWatchConfigs(allocator, watches);
+        const linked = integration_mod.findNullWatchByEndpoint(watches, link.endpoint);
+
+        var watch_options: std.ArrayListUnmanaged(WatchIntegrationOption) = .empty;
+        defer watch_options.deinit(allocator);
+        for (watches) |watch| {
+            const is_running = blk: {
+                const status = getStatusLocked(mutex, manager, "nullwatch", watch.name) orelse break :blk false;
+                break :blk status.status == .running;
+            };
+            watch_options.append(allocator, .{
+                .name = watch.name,
+                .host = watch.host,
+                .port = watch.port,
+                .running = is_running,
+            }) catch return helpers.serverError();
+        }
+
+        const body = std.json.Stringify.valueAlloc(allocator, .{
+            .kind = "nullclaw",
+            .configured = link.configured,
+            .linked_watch = if (linked) |watch| .{
+                .name = watch.name,
+                .host = watch.host,
+                .port = watch.port,
+            } else null,
+            .available_watches = watch_options.items,
+            .current_link = if (link.endpoint) |endpoint| .{
+                .endpoint = endpoint,
+                .service_name = link.service_name orelse "",
+                .auth_header = link.auth_configured,
+                .source_header = link.source_header_configured,
+            } else null,
+        }, .{ .emit_null_optional_fields = false }) catch return helpers.serverError();
+        return jsonOk(body);
+    }
+
+    if (std.mem.eql(u8, component, "nullwatch")) {
+        var watch_cfg = integration_mod.loadNullWatchConfig(allocator, paths, name) catch null orelse return notFound();
+        defer integration_mod.deinitNullWatchConfig(allocator, &watch_cfg);
+
+        const claw_names_opt = blk: {
+            mutex.lock();
+            defer mutex.unlock();
+            break :blk s.instanceNames("nullclaw") catch return helpers.serverError();
+        };
+        defer if (claw_names_opt) |claw_names| s.allocator.free(claw_names);
+
+        var claw_options: std.ArrayListUnmanaged(ClawIntegrationOption) = .empty;
+        defer claw_options.deinit(allocator);
+        if (claw_names_opt) |claw_names| {
+            for (claw_names) |claw_name| {
+                const is_running = blk: {
+                    const status = getStatusLocked(mutex, manager, "nullclaw", claw_name) orelse break :blk false;
+                    break :blk status.status == .running;
+                };
+                const is_linked = blk: {
+                    var link = integration_mod.loadNullClawTelemetryLink(allocator, paths, claw_name) catch break :blk false;
+                    defer link.deinit(allocator);
+                    break :blk integration_mod.findNullWatchByEndpoint(&.{watch_cfg}, link.endpoint) != null;
+                };
+                claw_options.append(allocator, .{
+                    .name = claw_name,
+                    .running = is_running,
+                    .linked = is_linked,
+                }) catch return helpers.serverError();
+            }
+        }
+
+        const body = std.json.Stringify.valueAlloc(allocator, .{
+            .kind = "nullwatch",
+            .watch = .{
+                .name = watch_cfg.name,
+                .host = watch_cfg.host,
+                .port = watch_cfg.port,
+            },
+            .available_claws = claw_options.items,
+        }, .{ .emit_null_optional_fields = false }) catch return helpers.serverError();
+        return jsonOk(body);
+    }
+
     if (std.mem.eql(u8, component, "nullboiler")) {
         var boiler_cfg = integration_mod.loadNullBoilerConfig(allocator, paths, name) catch null orelse return notFound();
         defer integration_mod.deinitNullBoilerConfig(allocator, &boiler_cfg);
@@ -3248,8 +4153,9 @@ fn handleIntegrationGet(
             pipelines = &.{};
         }
 
+        const boiler_runtime = getStatusLocked(mutex, manager, "nullboiler", name);
         var tracker_status = blk: {
-            const status = getStatusLocked(mutex, manager, "nullboiler", name) orelse break :blk null;
+            const status = boiler_runtime orelse break :blk null;
             if (status.status != .running) break :blk null;
             const url = buildInstanceUrl(allocator, boiler_cfg.port, "/tracker/status") orelse break :blk null;
             defer allocator.free(url);
@@ -3269,7 +4175,19 @@ fn handleIntegrationGet(
 
         const body = std.json.Stringify.valueAlloc(allocator, .{
             .kind = "nullboiler",
+            .instance = .{
+                .name = boiler_cfg.name,
+                .port = boiler_cfg.port,
+                .running = if (boiler_runtime) |status| status.status == .running else false,
+                .token_configured = boiler_cfg.api_token != null,
+            },
             .configured = boiler_cfg.tracker != null,
+            .configured_tracker = if (boiler_cfg.tracker) |tracker| .{
+                .url = tracker.url,
+                .agent_id = tracker.agent_id,
+                .token_configured = tracker.api_token != null,
+                .max_concurrent_tasks = tracker.max_concurrent_tasks,
+            } else null,
             .linked_tracker = if (linked) |tracker| .{
                 .name = tracker.name,
                 .port = tracker.port,
@@ -3341,6 +4259,7 @@ fn handleIntegrationGet(
             break :blk fetchJsonValue(allocator, url, tickets_cfg.api_token);
         };
         defer if (queue) |*value| value.deinit(allocator);
+        const tickets_runtime = getStatusLocked(mutex, manager, "nulltickets", name);
 
         var linked_boiler_views: std.ArrayListUnmanaged(LinkedBoilerView) = .empty;
         defer linked_boiler_views.deinit(allocator);
@@ -3354,6 +4273,12 @@ fn handleIntegrationGet(
 
         const body = std.json.Stringify.valueAlloc(allocator, .{
             .kind = "nulltickets",
+            .instance = .{
+                .name = tickets_cfg.name,
+                .port = tickets_cfg.port,
+                .running = if (tickets_runtime) |status| status.status == .running else false,
+                .token_configured = tickets_cfg.api_token != null,
+            },
             .queue = if (queue) |value| value.parsed.value else null,
             .linked_boilers = linked_boiler_views.items,
         }, .{ .emit_null_optional_fields = false }) catch return helpers.serverError();
@@ -3361,6 +4286,109 @@ fn handleIntegrationGet(
     }
 
     return notFound();
+}
+
+fn linkNullClawTelemetry(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    manager: *manager_mod.Manager,
+    mutex: *std_compat.sync.Mutex,
+    paths: paths_mod.Paths,
+    claw_name: []const u8,
+    watch_cfg: integration_mod.NullWatchConfig,
+) ApiResponse {
+    integration_mod.linkNullClawToNullWatch(allocator, paths, claw_name, watch_cfg) catch |err| switch (err) {
+        error.NotFound => return notFound(),
+        else => return helpers.serverError(),
+    };
+
+    if (getStatusLocked(mutex, manager, "nullclaw", claw_name)) |status| {
+        if (status.status == .running) {
+            mutex.lock();
+            defer mutex.unlock();
+            return handleRestart(allocator, s, manager, paths, "nullclaw", claw_name, "");
+        }
+    }
+
+    return jsonOk("{\"status\":\"linked\"}");
+}
+
+const NullBoilerLinkRequest = struct {
+    tickets: integration_mod.NullTicketsConfig,
+    pipeline_id: []const u8,
+    claim_role: []const u8,
+    success_trigger: []const u8,
+    max_concurrent_tasks: ?u32 = null,
+
+    fn deinit(self: *NullBoilerLinkRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.success_trigger);
+        allocator.free(self.claim_role);
+        allocator.free(self.pipeline_id);
+        integration_mod.deinitNullTicketsConfig(allocator, &self.tickets);
+        self.* = undefined;
+    }
+};
+
+const NullBoilerLinkRequestError = error{
+    InvalidJson,
+    TrackerInstanceRequired,
+    PipelineIdRequired,
+    TrackerNotFound,
+    OutOfMemory,
+};
+
+fn parseNullBoilerLinkRequest(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    body: []const u8,
+) NullBoilerLinkRequestError!NullBoilerLinkRequest {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch return error.InvalidJson;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJson;
+
+    const obj = parsed.value.object;
+    const tracker_name = jsonString(obj, "tracker_instance") orelse return error.TrackerInstanceRequired;
+    if (tracker_name.len == 0) return error.TrackerInstanceRequired;
+    const pipeline_id = jsonString(obj, "pipeline_id") orelse return error.PipelineIdRequired;
+    if (pipeline_id.len == 0) return error.PipelineIdRequired;
+
+    var tickets = (integration_mod.loadNullTicketsConfig(allocator, paths, tracker_name) catch null) orelse
+        return error.TrackerNotFound;
+    errdefer integration_mod.deinitNullTicketsConfig(allocator, &tickets);
+
+    const pipeline_id_owned = try allocator.dupe(u8, pipeline_id);
+    errdefer allocator.free(pipeline_id_owned);
+    const claim_role = try allocator.dupe(u8, nonEmptyJsonStringOrDefault(obj, "claim_role", "coder"));
+    errdefer allocator.free(claim_role);
+    const success_trigger = try allocator.dupe(u8, nonEmptyJsonStringOrDefault(obj, "success_trigger", "complete"));
+
+    return .{
+        .tickets = tickets,
+        .pipeline_id = pipeline_id_owned,
+        .claim_role = claim_role,
+        .success_trigger = success_trigger,
+        .max_concurrent_tasks = parseOptionalPositiveU32(obj.get("max_concurrent_tasks")),
+    };
+}
+
+fn nonEmptyJsonStringOrDefault(obj: std.json.ObjectMap, key: []const u8, default_value: []const u8) []const u8 {
+    const value = jsonString(obj, key) orelse return default_value;
+    return if (value.len > 0) value else default_value;
+}
+
+fn parseOptionalPositiveU32(value: ?std.json.Value) ?u32 {
+    const raw = value orelse return null;
+    return switch (raw) {
+        .integer => if (raw.integer > 0 and raw.integer <= std.math.maxInt(u32)) @as(?u32, @intCast(raw.integer)) else null,
+        .string => |text| blk: {
+            const parsed = std.fmt.parseInt(u32, text, 10) catch break :blk null;
+            break :blk if (parsed > 0) parsed else null;
+        },
+        else => null,
+    };
 }
 
 fn handleIntegrationPost(
@@ -3373,54 +4401,61 @@ fn handleIntegrationPost(
     name: []const u8,
     body: []const u8,
 ) ApiResponse {
-    if (!std.mem.eql(u8, component, "nullboiler")) return badRequest("{\"error\":\"integration updates are only supported for nullboiler\"}");
-
-    const tracker_cfg = blk: {
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{
-            .allocate = .alloc_always,
-            .ignore_unknown_fields = true,
-        }) catch return badRequest("{\"error\":\"invalid JSON body\"}");
-        defer parsed.deinit();
-        if (parsed.value != .object) return badRequest("{\"error\":\"invalid JSON body\"}");
-        const tracker_name = if (parsed.value.object.get("tracker_instance")) |value|
-            if (value == .string and value.string.len > 0) value.string else null
-        else
-            null;
-        if (tracker_name == null) return badRequest("{\"error\":\"tracker_instance is required\"}");
-        const pipeline_id = if (parsed.value.object.get("pipeline_id")) |value|
-            if (value == .string and value.string.len > 0) value.string else null
-        else
-            null;
-        if (pipeline_id == null) return badRequest("{\"error\":\"pipeline_id is required\"}");
-        const cfg = integration_mod.loadNullTicketsConfig(allocator, paths, tracker_name.?) catch null orelse return notFound();
-        break :blk .{
-            .tickets = cfg,
-            .pipeline_id = pipeline_id.?,
-            .claim_role = if (parsed.value.object.get("claim_role")) |value|
-                if (value == .string and value.string.len > 0) value.string else "coder"
+    if (std.mem.eql(u8, component, "nullclaw")) {
+        const watch_cfg = blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            }) catch return badRequest("{\"error\":\"invalid JSON body\"}");
+            defer parsed.deinit();
+            if (parsed.value != .object) return badRequest("{\"error\":\"invalid JSON body\"}");
+            const watch_name = if (parsed.value.object.get("watch_instance")) |value|
+                if (value == .string and value.string.len > 0) value.string else null
             else
-                "coder",
-            .success_trigger = if (parsed.value.object.get("success_trigger")) |value|
-                if (value == .string and value.string.len > 0) value.string else "complete"
-            else
-                "complete",
-            .max_concurrent_tasks = if (parsed.value.object.get("max_concurrent_tasks")) |value|
-                switch (value) {
-                    .integer => if (value.integer > 0 and value.integer <= std.math.maxInt(u32)) @as(?u32, @intCast(value.integer)) else null,
-                    .string => std.fmt.parseInt(u32, value.string, 10) catch null,
-                    else => null,
-                }
-            else
-                null,
+                null;
+            if (watch_name == null) return badRequest("{\"error\":\"watch_instance is required\"}");
+            break :blk integration_mod.loadNullWatchConfig(allocator, paths, watch_name.?) catch null orelse return notFound();
         };
-    };
-    defer {
-        var owned_cfg = tracker_cfg.tickets;
-        integration_mod.deinitNullTicketsConfig(allocator, &owned_cfg);
+        defer {
+            var owned_cfg = watch_cfg;
+            integration_mod.deinitNullWatchConfig(allocator, &owned_cfg);
+        }
+
+        return linkNullClawTelemetry(allocator, s, manager, mutex, paths, name, watch_cfg);
     }
 
-    var existing = integration_mod.loadNullBoilerConfig(allocator, paths, name) catch null orelse return notFound();
-    defer integration_mod.deinitNullBoilerConfig(allocator, &existing);
+    if (std.mem.eql(u8, component, "nullwatch")) {
+        const claw_name = blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            }) catch return badRequest("{\"error\":\"invalid JSON body\"}");
+            defer parsed.deinit();
+            if (parsed.value != .object) return badRequest("{\"error\":\"invalid JSON body\"}");
+            const value = if (parsed.value.object.get("claw_instance")) |item|
+                if (item == .string and item.string.len > 0) item.string else null
+            else
+                null;
+            if (value == null) return badRequest("{\"error\":\"claw_instance is required\"}");
+            break :blk allocator.dupe(u8, value.?) catch return helpers.serverError();
+        };
+        defer allocator.free(claw_name);
+
+        var watch_cfg = integration_mod.loadNullWatchConfig(allocator, paths, name) catch null orelse return notFound();
+        defer integration_mod.deinitNullWatchConfig(allocator, &watch_cfg);
+        return linkNullClawTelemetry(allocator, s, manager, mutex, paths, claw_name, watch_cfg);
+    }
+
+    if (!std.mem.eql(u8, component, "nullboiler")) return badRequest("{\"error\":\"integration updates are only supported for nullclaw, nullwatch, and nullboiler\"}");
+
+    var tracker_cfg = parseNullBoilerLinkRequest(allocator, paths, body) catch |err| switch (err) {
+        error.InvalidJson => return badRequest("{\"error\":\"invalid JSON body\"}"),
+        error.TrackerInstanceRequired => return badRequest("{\"error\":\"tracker_instance is required\"}"),
+        error.PipelineIdRequired => return badRequest("{\"error\":\"pipeline_id is required\"}"),
+        error.TrackerNotFound => return notFound(),
+        error.OutOfMemory => return helpers.serverError(),
+    };
+    defer tracker_cfg.deinit(allocator);
 
     const tracker_runtime = getStatusLocked(mutex, manager, "nulltickets", tracker_cfg.tickets.name);
     if (tracker_runtime != null and tracker_runtime.?.status == .running) {
@@ -3446,74 +4481,16 @@ fn handleIntegrationPost(
         }
     }
 
-    const config_path = paths.instanceConfig(allocator, "nullboiler", name) catch return helpers.serverError();
-    defer allocator.free(config_path);
-    const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch return helpers.serverError();
-    defer file.close();
-    const config_bytes = file.readToEndAlloc(allocator, 1024 * 1024) catch return helpers.serverError();
-    defer allocator.free(config_bytes);
-
-    var parsed_config = std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    }) catch return helpers.serverError();
-    defer parsed_config.deinit();
-    if (parsed_config.value != .object) return helpers.serverError();
-
-    const tracker_map = ensureObjectField(allocator, &parsed_config.value.object, "tracker") catch return helpers.serverError();
-    const tracker_url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{tracker_cfg.tickets.port}) catch return helpers.serverError();
-    tracker_map.put(allocator, "url", .{ .string = tracker_url }) catch return helpers.serverError();
-    if (tracker_cfg.tickets.api_token) |token| {
-        tracker_map.put(allocator, "api_token", .{ .string = token }) catch return helpers.serverError();
-    } else {
-        _ = tracker_map.swapRemove("api_token");
-    }
-    if (jsonString(tracker_map.*, "agent_id")) |agent_id| {
-        if (agent_id.len == 0) {
-            tracker_map.put(allocator, "agent_id", .{ .string = if (existing.tracker) |tracker| tracker.agent_id else name }) catch return helpers.serverError();
-        }
-    } else {
-        tracker_map.put(allocator, "agent_id", .{ .string = if (existing.tracker) |tracker| tracker.agent_id else name }) catch return helpers.serverError();
-    }
-    if (jsonString(tracker_map.*, "workflows_dir")) |workflows_dir| {
-        if (workflows_dir.len == 0) {
-            tracker_map.put(allocator, "workflows_dir", .{ .string = "workflows" }) catch return helpers.serverError();
-        }
-    } else {
-        tracker_map.put(allocator, "workflows_dir", .{ .string = "workflows" }) catch return helpers.serverError();
-    }
-
-    const concurrency_map = ensureObjectField(allocator, tracker_map, "concurrency") catch return helpers.serverError();
-    if (tracker_cfg.max_concurrent_tasks) |max_concurrent_tasks| {
-        concurrency_map.put(allocator, "max_concurrent_tasks", .{ .integer = max_concurrent_tasks }) catch return helpers.serverError();
-    } else if (concurrency_map.get("max_concurrent_tasks") == null) {
-        concurrency_map.put(allocator, "max_concurrent_tasks", .{ .integer = if (existing.tracker) |tracker| tracker.max_concurrent_tasks else 1 }) catch return helpers.serverError();
-    }
-
-    const workflows_dir_value = jsonStringOrEmpty(tracker_map.*, "workflows_dir");
-    const rendered = std.json.Stringify.valueAlloc(allocator, parsed_config.value, .{
-        .whitespace = .indent_2,
-        .emit_null_optional_fields = false,
-    }) catch return helpers.serverError();
-    defer allocator.free(rendered);
-
-    const out = std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true }) catch return helpers.serverError();
-    defer out.close();
-    out.writeAll(rendered) catch return helpers.serverError();
-    out.writeAll("\n") catch return helpers.serverError();
-
-    const workflows_dir = resolvePathFromConfig(allocator, config_path, workflows_dir_value) catch return helpers.serverError();
-    defer allocator.free(workflows_dir);
-
-    ensureTrackerWorkflowFile(
-        allocator,
-        config_path,
-        workflows_dir,
-        if (existing.tracker) |tracker| if (tracker.workflow) |workflow| workflow.file_name else null else null,
-        tracker_cfg.pipeline_id,
-        tracker_cfg.claim_role,
-        tracker_cfg.success_trigger,
-    ) catch return helpers.serverError();
+    integration_mod.linkNullBoilerToNullTickets(allocator, paths, name, .{
+        .tickets = tracker_cfg.tickets,
+        .pipeline_id = tracker_cfg.pipeline_id,
+        .claim_role = tracker_cfg.claim_role,
+        .success_trigger = tracker_cfg.success_trigger,
+        .max_concurrent_tasks = tracker_cfg.max_concurrent_tasks,
+    }) catch |err| switch (err) {
+        error.NotFound => return notFound(),
+        else => return helpers.serverError(),
+    };
 
     if (getStatusLocked(mutex, manager, "nullboiler", name)) |status| {
         if (status.status == .running) {
@@ -3526,65 +4503,16 @@ fn handleIntegrationPost(
     return jsonOk("{\"status\":\"linked\"}");
 }
 
-fn ensureTrackerWorkflowFile(
-    allocator: std.mem.Allocator,
-    config_path: []const u8,
-    workflows_dir: []const u8,
-    previous_workflow_file: ?[]const u8,
-    pipeline_id: []const u8,
-    claim_role: []const u8,
-    success_trigger: []const u8,
-) !void {
-    try ensurePath(workflows_dir);
-
-    if (previous_workflow_file) |file_name| {
-        if (!std.mem.eql(u8, file_name, integration_mod.managed_workflow_file_name)) {
-            const previous_path = try std.fs.path.join(allocator, &.{ workflows_dir, file_name });
-            defer allocator.free(previous_path);
-            if (isNullHubManagedWorkflow(allocator, previous_path)) {
-                std_compat.fs.deleteFileAbsolute(previous_path) catch {};
-            }
-        }
-    }
-
-    const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
-    const legacy_path = try std.fs.path.join(allocator, &.{ config_dir, integration_mod.legacy_workflow_file_name });
-    defer allocator.free(legacy_path);
-    std_compat.fs.deleteFileAbsolute(legacy_path) catch {};
-
-    const legacy_workflows_path = try std.fs.path.join(allocator, &.{ workflows_dir, integration_mod.legacy_workflow_file_name });
-    defer allocator.free(legacy_workflows_path);
-    std_compat.fs.deleteFileAbsolute(legacy_workflows_path) catch {};
-
-    const workflow_path = try std.fs.path.join(allocator, &.{ workflows_dir, integration_mod.managed_workflow_file_name });
-    defer allocator.free(workflow_path);
-
-    const rendered = try std.json.Stringify.valueAlloc(allocator, .{
-        .id = try std.fmt.allocPrint(allocator, "wf-{s}-{s}", .{ pipeline_id, claim_role }),
-        .pipeline_id = pipeline_id,
-        .claim_roles = &.{claim_role},
-        .execution = "subprocess",
-        .prompt_template = default_tracker_prompt_template,
-        .on_success = .{
-            .transition_to = success_trigger,
-        },
-    }, .{
-        .whitespace = .indent_2,
-        .emit_null_optional_fields = false,
-    });
-    defer allocator.free(rendered);
-
-    const file_out = try std_compat.fs.createFileAbsolute(workflow_path, .{ .truncate = true });
-    defer file_out.close();
-    try file_out.writeAll(rendered);
-    try file_out.writeAll("\n");
-}
-
 // ─── Top-level dispatcher ────────────────────────────────────────────────────
 
 pub fn isIntegrationPath(target: []const u8) bool {
     const parsed = parsePath(target) orelse return false;
     return parsed.action != null and std.mem.eql(u8, parsed.action.?, "integration");
+}
+
+pub fn isTicketsActionPath(target: []const u8) bool {
+    const parsed = parsePath(target) orelse return false;
+    return parsed.action != null and std.mem.eql(u8, parsed.action.?, "tickets");
 }
 
 /// Route an `/api/instances` request. Called from server.zig.
@@ -3775,12 +4703,16 @@ pub fn dispatch(
             if (std.mem.eql(u8, method, "POST")) return handleIntegrationPost(allocator, s, manager, mutex, paths, parsed.component, parsed.name, body);
             return methodNotAllowed();
         }
+        if (std.mem.eql(u8, action, "tickets")) {
+            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
+            return handleNullTicketsAction(allocator, s, manager, mutex, paths, parsed.component, parsed.name, body);
+        }
 
         // Remaining actions are POST-only.
         if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
 
         if (std.mem.eql(u8, action, "start")) return handleStart(allocator, s, manager, paths, parsed.component, parsed.name, body);
-        if (std.mem.eql(u8, action, "stop")) return handleStop(s, manager, parsed.component, parsed.name);
+        if (std.mem.eql(u8, action, "stop")) return handleStop(allocator, s, manager, paths, parsed.component, parsed.name);
         if (std.mem.eql(u8, action, "restart")) return handleRestart(allocator, s, manager, paths, parsed.component, parsed.name, body);
 
         return notFound();
@@ -3793,7 +4725,7 @@ pub fn dispatch(
 
     // No action — CRUD on the instance itself.
     if (std.mem.eql(u8, method, "GET")) return handleGet(allocator, s, manager, paths, parsed.component, parsed.name);
-    if (std.mem.eql(u8, method, "DELETE")) return handleDelete(allocator, s, manager, paths, parsed.component, parsed.name);
+    if (std.mem.eql(u8, method, "DELETE")) return handleDelete(allocator, s, manager, paths, parsed.component, parsed.name, target);
     if (std.mem.eql(u8, method, "PATCH")) return handlePatch(s, parsed.component, parsed.name, body);
 
     return methodNotAllowed();
@@ -3823,6 +4755,53 @@ const TestManagerCtx = struct {
         self.fixture.deinit();
     }
 };
+
+test "component default launch mode uses registry metadata" {
+    try std.testing.expectEqualStrings("gateway", defaultLaunchModeForComponent("nullclaw"));
+    try std.testing.expectEqualStrings("serve", defaultLaunchModeForComponent("nullwatch"));
+    try std.testing.expectEqualStrings("gateway", defaultLaunchModeForComponent("unknown-component"));
+    try std.testing.expect(isLegacyDefaultLaunchMode("nullwatch", "gateway"));
+    try std.testing.expect(!isLegacyDefaultLaunchMode("nullwatch", "serve"));
+    try std.testing.expect(!isLegacyDefaultLaunchMode("nullclaw", "gateway"));
+}
+
+test "pipeline summaries accept wrapped lists and JSON string definitions" {
+    const allocator = std.testing.allocator;
+    const raw =
+        \\{
+        \\  "pipelines": [{
+        \\    "id": "pipe-dev",
+        \\    "name": "Development",
+        \\    "definition": "{\"states\":{\"claim\":{\"agent_role\":\"reviewer\"},\"build\":{\"agent_role\":\"coder\"}},\"transitions\":[{\"trigger\":\"complete\"},{\"trigger\":\"needs_review\"}]}"
+        \\  }]
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const items = pipelineItemsFromValue(parsed.value) orelse @panic("pipelines missing");
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+
+    const summary = try parsePipelineSummary(allocator, items[0]);
+    defer deinitPipelineSummary(allocator, summary);
+    try std.testing.expectEqualStrings("pipe-dev", summary.id);
+    try std.testing.expectEqualStrings("Development", summary.name);
+    try std.testing.expect(pipelineContainsString(summary.roles, "reviewer"));
+    try std.testing.expect(pipelineContainsString(summary.roles, "coder"));
+    try std.testing.expect(pipelineContainsString(summary.triggers, "complete"));
+    try std.testing.expect(pipelineContainsString(summary.triggers, "needs_review"));
+}
+
+test "parseOptionalPositiveU32 rejects zero values" {
+    try std.testing.expect(parseOptionalPositiveU32(std.json.Value{ .integer = 0 }) == null);
+    try std.testing.expect(parseOptionalPositiveU32(std.json.Value{ .string = "0" }) == null);
+    try std.testing.expect(parseOptionalPositiveU32(std.json.Value{ .string = "" }) == null);
+    try std.testing.expectEqual(@as(?u32, 4), parseOptionalPositiveU32(std.json.Value{ .integer = 4 }));
+    try std.testing.expectEqual(@as(?u32, 5), parseOptionalPositiveU32(std.json.Value{ .string = "5" }));
+}
 
 fn writeTestInstanceConfig(
     allocator: std.mem.Allocator,
@@ -4009,6 +4988,59 @@ test "parseAnyHttpStatusCode extracts first valid http code" {
     try std.testing.expectEqual(@as(?u16, 200), parseAnyHttpStatusCode("{\"x\":1}\n200\n"));
     try std.testing.expectEqual(@as(?u16, 401), parseAnyHttpStatusCode("status=401 unauthorized"));
     try std.testing.expectEqual(@as(?u16, null), parseAnyHttpStatusCode("not-a-code"));
+}
+
+test "isAllowedNullTicketsAction allows only safe tracker actions" {
+    try std.testing.expect(isAllowedNullTicketsAction(.GET, "/pipelines"));
+    try std.testing.expect(isAllowedNullTicketsAction(.POST, "/pipelines"));
+    try std.testing.expect(isAllowedNullTicketsAction(.GET, "/tasks?limit=8"));
+    try std.testing.expect(isAllowedNullTicketsAction(.GET, "/tasks/task-a/dependencies"));
+    try std.testing.expect(isAllowedNullTicketsAction(.POST, "/tasks/task-a/assignments"));
+    try std.testing.expect(isAllowedNullTicketsAction(.DELETE, "/tasks/task-a/assignments/agent-a"));
+    try std.testing.expect(isAllowedNullTicketsAction(.GET, "/ops/queue"));
+    try std.testing.expect(isAllowedNullTicketsAction(.POST, "/tasks"));
+    try std.testing.expect(isAllowedNullTicketsAction(.POST, "/leases/claim"));
+    try std.testing.expect(isAllowedNullTicketsAction(.POST, "/leases/lease-a/heartbeat"));
+    try std.testing.expect(isAllowedNullTicketsAction(.GET, "/runs/run-a/events?limit=20"));
+    try std.testing.expect(isAllowedNullTicketsAction(.POST, "/runs/run-a/events"));
+    try std.testing.expect(isAllowedNullTicketsAction(.POST, "/runs/run-a/transition"));
+    try std.testing.expect(isAllowedNullTicketsAction(.POST, "/runs/run-a/fail"));
+    try std.testing.expect(isAllowedNullTicketsAction(.GET, "/artifacts?task_id=task-a"));
+    try std.testing.expect(isAllowedNullTicketsAction(.POST, "/artifacts"));
+
+    try std.testing.expect(!isAllowedNullTicketsAction(.POST, "/store/default/key"));
+    try std.testing.expect(!isAllowedNullTicketsAction(.DELETE, "/tasks/task-a"));
+    try std.testing.expect(!isAllowedNullTicketsAction(.GET, "http://127.0.0.1:1/tasks"));
+    try std.testing.expect(!isAllowedNullTicketsAction(.GET, "/tasks\n/evil"));
+    try std.testing.expect(!isAllowedNullTicketsAction(.POST, "/tasks?limit=1"));
+    try std.testing.expect(!isAllowedNullTicketsAction(.POST, "/runs/run-a/events?limit=1"));
+    try std.testing.expect(!isAllowedNullTicketsAction(.POST, "/leases/lease-a/heartbeat?ttl=1"));
+}
+
+test "classifyNullTicketsAction separates instance and lease scoped auth" {
+    try std.testing.expectEqual(NullTicketsActionAuthMode.instance_token, classifyNullTicketsAction(.GET, "/tasks?limit=8").?);
+    try std.testing.expectEqual(NullTicketsActionAuthMode.instance_token, classifyNullTicketsAction(.POST, "/leases/claim").?);
+    try std.testing.expectEqual(NullTicketsActionAuthMode.lease_token, classifyNullTicketsAction(.POST, "/leases/lease-a/heartbeat").?);
+    try std.testing.expectEqual(NullTicketsActionAuthMode.lease_token, classifyNullTicketsAction(.POST, "/runs/run-a/events").?);
+    try std.testing.expect(classifyNullTicketsAction(.POST, "/runs/run-a/events?limit=1") == null);
+    try std.testing.expect(classifyNullTicketsAction(.POST, "/store/default/key") == null);
+}
+
+test "nullTicketsForwardedToken does not mix admin and lease credentials" {
+    try std.testing.expectEqualStrings(
+        "admin-token",
+        nullTicketsForwardedToken(.instance_token, "admin-token", "lease-token").?,
+    );
+    try std.testing.expectEqualStrings(
+        "lease-token",
+        nullTicketsForwardedToken(.lease_token, "admin-token", "lease-token").?,
+    );
+    try std.testing.expect(nullTicketsForwardedToken(.lease_token, "admin-token", null) == null);
+    try std.testing.expect(nullTicketsForwardedToken(.lease_token, "admin-token", "") == null);
+}
+
+test "actionStatus preserves expired lease status" {
+    try std.testing.expectEqualStrings("410 Gone", actionStatus(410));
 }
 
 test "classifyProbeFailure maps status codes" {
@@ -4288,6 +5320,93 @@ test "handleStart keeps gateway instances on their HTTP health port" {
     mctx.manager.stopInstance("nullclaw", "my-agent") catch {};
 }
 
+test "handleStart normalizes manifest binary command to runnable launch args" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "watch", .{ .version = "1.0.0", .launch_mode = "nullwatch" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "watch", "{\"port\":43124}");
+    try writeTestBinary(
+        allocator,
+        mctx.paths,
+        "nullwatch",
+        "1.0.0",
+        \\#!/bin/sh
+        \\set -eu
+        \\if [ "$1" = "--export-manifest" ]; then
+        \\  printf '%s\n' '{"launch":{"command":"nullwatch","args":["serve"]},"health":{"endpoint":"/health","port_from_config":"port"},"ports":[{"name":"api","config_key":"port","default":7710,"protocol":"http"}]}'
+        \\  exit 0
+        \\fi
+        \\sleep 60
+        ,
+    );
+
+    const resp = handleStart(allocator, &s, &mctx.manager, mctx.paths, "nullwatch", "watch", "");
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const entry = s.getInstance("nullwatch", "watch").?;
+    try std.testing.expectEqualStrings("serve", entry.launch_mode);
+
+    const status = mctx.manager.getStatus("nullwatch", "watch").?;
+    try std.testing.expectEqual(manager_mod.Status.starting, status.status);
+    try std.testing.expectEqual(@as(u16, 43124), status.port);
+    const inst = mctx.manager.instances.get("nullwatch/watch").?;
+    try std.testing.expectEqual(@as(usize, 1), inst.launch_args.len);
+    try std.testing.expectEqualStrings("serve", inst.launch_args[0]);
+
+    mctx.manager.stopInstance("nullwatch", "watch") catch {};
+}
+
+test "handleStart normalizes legacy default launch mode for nullwatch" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "watch", .{ .version = "1.0.0", .launch_mode = "gateway" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "watch", "{\"port\":43125}");
+    try writeTestBinary(
+        allocator,
+        mctx.paths,
+        "nullwatch",
+        "1.0.0",
+        \\#!/bin/sh
+        \\set -eu
+        \\if [ "$1" = "--export-manifest" ]; then
+        \\  printf '%s\n' '{"launch":{"command":"nullwatch","args":["serve"]},"health":{"endpoint":"/health","port_from_config":"port"},"ports":[{"name":"api","config_key":"port","default":7710,"protocol":"http"}]}'
+        \\  exit 0
+        \\fi
+        \\sleep 60
+        ,
+    );
+
+    const resp = handleStart(allocator, &s, &mctx.manager, mctx.paths, "nullwatch", "watch", "");
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const entry = s.getInstance("nullwatch", "watch").?;
+    try std.testing.expectEqualStrings("serve", entry.launch_mode);
+    const inst = mctx.manager.instances.get("nullwatch/watch").?;
+    try std.testing.expectEqualStrings("serve", inst.launch_args[0]);
+
+    mctx.manager.stopInstance("nullwatch", "watch") catch {};
+}
+
 test "handleStop returns 200 for existing instance" {
     const allocator = std.testing.allocator;
     var state_fixture = try test_helpers.TempPaths.init(allocator);
@@ -4301,7 +5420,7 @@ test "handleStop returns 200 for existing instance" {
 
     try s.addInstance("nullclaw", "my-agent", .{ .version = "1.0.0" });
 
-    const resp = handleStop(&s, &mctx.manager, "nullclaw", "my-agent");
+    const resp = handleStop(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent");
     try std.testing.expectEqualStrings("200 OK", resp.status);
     try std.testing.expectEqualStrings("{\"status\":\"stopped\"}", resp.body);
 }
@@ -4337,7 +5456,7 @@ test "handleDelete removes instance" {
 
     try s.addInstance("nullclaw", "my-agent", .{ .version = "1.0.0" });
 
-    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent");
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent", "/api/instances/nullclaw/my-agent");
     try std.testing.expectEqualStrings("200 OK", resp.status);
     try std.testing.expectEqualStrings("{\"status\":\"deleted\"}", resp.body);
 
@@ -4362,7 +5481,7 @@ test "handleDelete removes instance directory from active path" {
     const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "my-agent");
     defer allocator.free(inst_dir);
 
-    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent");
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent", "/api/instances/nullclaw/my-agent");
     try std.testing.expectEqualStrings("200 OK", resp.status);
 
     std_compat.fs.accessAbsolute(inst_dir, .{}) catch |err| switch (err) {
@@ -4391,7 +5510,7 @@ test "handleDelete restores instance when state save fails" {
     const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "my-agent");
     defer allocator.free(inst_dir);
 
-    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent");
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullclaw", "my-agent", "/api/instances/nullclaw/my-agent");
     try std.testing.expectEqualStrings("500 Internal Server Error", resp.status);
     try std.testing.expect(s.getInstance("nullclaw", "my-agent") != null);
     try std_compat.fs.accessAbsolute(inst_dir, .{});
@@ -4408,8 +5527,125 @@ test "handleDelete returns 404 for missing instance" {
     var mctx = TestManagerCtx.init(allocator);
     defer mctx.deinit(allocator);
 
-    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nope", "nope");
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nope", "nope", "/api/instances/nope/nope");
     try std.testing.expectEqualStrings("404 Not Found", resp.status);
+}
+
+test "handleDelete blocks nulltickets while nullboiler is linked" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nulltickets", "tracker-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullboiler", "boiler-a", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nulltickets", "tracker-a", "{\"port\":7711,\"api_token\":\"admin-token\"}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullboiler", "boiler-a", "{\"port\":8811,\"tracker\":{\"url\":\"http://127.0.0.1:7711\",\"api_token\":\"admin-token\"}}");
+
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nulltickets", "tracker-a", "/api/instances/nulltickets/tracker-a");
+    try std.testing.expectEqualStrings("409 Conflict", resp.status);
+    defer allocator.free(resp.body);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"force_required\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"name\":\"boiler-a\"") != null);
+    try std.testing.expect(s.getInstance("nulltickets", "tracker-a") != null);
+}
+
+test "handleDelete force unlinks nullboiler before deleting nulltickets" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nulltickets", "tracker-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullboiler", "boiler-a", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nulltickets", "tracker-a", "{\"port\":7711,\"api_token\":\"admin-token\"}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullboiler", "boiler-a", "{\"port\":8811,\"tracker\":{\"url\":\"http://127.0.0.1:7711\",\"api_token\":\"admin-token\",\"agent_id\":\"worker\"}}");
+
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nulltickets", "tracker-a", "/api/instances/nulltickets/tracker-a?force=1");
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(s.getInstance("nulltickets", "tracker-a") == null);
+    try std.testing.expect(s.getInstance("nullboiler", "boiler-a") != null);
+
+    const config_path = try mctx.paths.instanceConfig(allocator, "nullboiler", "boiler-a");
+    defer allocator.free(config_path);
+    const config_bytes = try std.fs.readFileAbsolute(allocator, config_path, 1024 * 1024);
+    defer allocator.free(config_bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("tracker") == null);
+}
+
+test "handleDelete blocks nullwatch while nullclaw telemetry is linked" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "observer-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "agent-a", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "observer-a", "{\"port\":7712,\"api_token\":\"watch-token\"}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "agent-a", "{\"diagnostics\":{\"backend\":\"otel\",\"otel\":{\"endpoint\":\"http://127.0.0.1:7712\",\"service_name\":\"nullclaw/agent-a\"}}}");
+
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullwatch", "observer-a", "/api/instances/nullwatch/observer-a");
+    try std.testing.expectEqualStrings("409 Conflict", resp.status);
+    defer allocator.free(resp.body);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"force_required\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"name\":\"agent-a\"") != null);
+    try std.testing.expect(s.getInstance("nullwatch", "observer-a") != null);
+}
+
+test "handleDelete force unlinks nullclaw telemetry before deleting nullwatch" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "observer-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "agent-a", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "observer-a", "{\"port\":7712,\"api_token\":\"watch-token\"}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "agent-a", "{\"diagnostics\":{\"backend\":\"otel\",\"log_tool_calls\":true,\"otel\":{\"endpoint\":\"http://127.0.0.1:7712\",\"service_name\":\"nullclaw/agent-a\",\"headers\":{\"Authorization\":\"Bearer watch-token\"}}}}");
+
+    const resp = handleDelete(allocator, &s, &mctx.manager, mctx.paths, "nullwatch", "observer-a", "/api/instances/nullwatch/observer-a?force=1");
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(s.getInstance("nullwatch", "observer-a") == null);
+    try std.testing.expect(s.getInstance("nullclaw", "agent-a") != null);
+
+    const config_path = try mctx.paths.instanceConfig(allocator, "nullclaw", "agent-a");
+    defer allocator.free(config_path);
+    const config_bytes = try std.fs.readFileAbsolute(allocator, config_path, 1024 * 1024);
+    defer allocator.free(config_bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    const diagnostics = parsed.value.object.get("diagnostics").?.object;
+    try std.testing.expectEqualStrings("jsonl", diagnostics.get("backend").?.string);
+    try std.testing.expect(diagnostics.get("log_tool_calls").?.bool);
+    try std.testing.expect(diagnostics.get("otel") == null);
 }
 
 test "handlePatch updates auto_start" {
@@ -4474,6 +5710,24 @@ test "handlePatch updates launch_mode" {
 
     const entry = s.getInstance("nullclaw", "my-agent").?;
     try std.testing.expectEqualStrings("agent", entry.launch_mode);
+}
+
+test "handlePatch normalizes service component launch_mode" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+
+    try s.addInstance("nullboiler", "default", .{ .version = "1.0.0", .launch_mode = "server" });
+
+    const resp = handlePatch(&s, "nullboiler", "default", "{\"launch_mode\":\"nullboiler\"}");
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const entry = s.getInstance("nullboiler", "default").?;
+    try std.testing.expectEqualStrings("server", entry.launch_mode);
 }
 
 test "handlePatch rejects invalid launch_mode" {
@@ -5082,6 +6336,245 @@ test "dispatch routes GET integration action for linked nullboiler" {
     try std.testing.expectEqual(@as(i64, 2), current_link.get("max_concurrent_tasks").?.integer);
 }
 
+test "dispatch routes nulltickets tickets action to managed instances only" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nulltickets", "tracker-a", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nulltickets", "tracker-a", "{\"port\":7711,\"api_token\":\"admin-token\"}");
+
+    const resp = dispatch(
+        allocator,
+        &s,
+        &mctx.manager,
+        &mctx.mutex,
+        mctx.paths,
+        "POST",
+        "/api/instances/nulltickets/tracker-a/tickets",
+        "{\"method\":\"GET\",\"path\":\"/tasks?limit=8\"}",
+    ).?;
+
+    try std.testing.expectEqualStrings("409 Conflict", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"nulltickets instance is not running\"}", resp.body);
+
+    const unsupported = dispatch(
+        allocator,
+        &s,
+        &mctx.manager,
+        &mctx.mutex,
+        mctx.paths,
+        "POST",
+        "/api/instances/nulltickets/tracker-a/tickets",
+        "{\"method\":\"POST\",\"path\":\"/store/default/key\"}",
+    ).?;
+    try std.testing.expectEqualStrings("400 Bad Request", unsupported.status);
+}
+
+test "dispatch routes GET integration action for nullclaw nullwatch telemetry" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "observer-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "my-agent", .{ .version = "1.0.0" });
+
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "observer-a", "{\"host\":\"127.0.0.1\",\"port\":7711,\"api_token\":\"watch-token\"}");
+    try writeTestInstanceConfig(
+        allocator,
+        mctx.paths,
+        "nullclaw",
+        "my-agent",
+        "{\"diagnostics\":{\"backend\":\"otel\",\"otel\":{\"endpoint\":\"http://127.0.0.1:7711\",\"service_name\":\"nullclaw/my-agent\",\"headers\":{\"Authorization\":\"Bearer watch-token\",\"x-nullwatch-source\":\"nullclaw\"}}}}",
+    );
+
+    const resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/my-agent/integration", "").?;
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp.body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("nullclaw", parsed.value.object.get("kind").?.string);
+    try std.testing.expect(parsed.value.object.get("configured").?.bool);
+    const linked = parsed.value.object.get("linked_watch").?.object;
+    try std.testing.expectEqualStrings("observer-a", linked.get("name").?.string);
+    try std.testing.expectEqual(@as(i64, 7711), linked.get("port").?.integer);
+    const current_link = parsed.value.object.get("current_link").?.object;
+    try std.testing.expectEqualStrings("http://127.0.0.1:7711", current_link.get("endpoint").?.string);
+    try std.testing.expectEqualStrings("nullclaw/my-agent", current_link.get("service_name").?.string);
+    try std.testing.expect(current_link.get("auth_header").?.bool);
+    try std.testing.expect(current_link.get("source_header").?.bool);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.object.get("available_watches").?.array.items.len);
+}
+
+test "dispatch routes POST integration action for nullclaw links nullwatch" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "observer-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "my-agent", .{ .version = "1.0.0" });
+
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "observer-a", "{\"host\":\"0.0.0.0\",\"port\":7712,\"api_token\":\"watch-token\"}");
+    try writeTestInstanceConfig(
+        allocator,
+        mctx.paths,
+        "nullclaw",
+        "my-agent",
+        "{\"diagnostics\":{\"backend\":\"jsonl\",\"log_tool_calls\":true,\"otel\":{\"service_name\":\"nullclaw\",\"headers\":{\"Authorization\":\"Bearer old\"}}}}",
+    );
+
+    const resp = dispatch(
+        allocator,
+        &s,
+        &mctx.manager,
+        &mctx.mutex,
+        mctx.paths,
+        "POST",
+        "/api/instances/nullclaw/my-agent/integration",
+        "{\"watch_instance\":\"observer-a\"}",
+    ).?;
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const config_path = try mctx.paths.instanceConfig(allocator, "nullclaw", "my-agent");
+    defer allocator.free(config_path);
+    const config_bytes = try std.fs.readFileAbsolute(allocator, config_path, 1024 * 1024);
+    defer allocator.free(config_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const diagnostics = parsed.value.object.get("diagnostics").?.object;
+    try std.testing.expectEqualStrings("otel", diagnostics.get("backend").?.string);
+    try std.testing.expect(diagnostics.get("log_tool_calls").?.bool);
+    const otel = diagnostics.get("otel").?.object;
+    try std.testing.expectEqualStrings("http://127.0.0.1:7712", otel.get("endpoint").?.string);
+    try std.testing.expectEqualStrings("nullclaw/my-agent", otel.get("service_name").?.string);
+    const headers = otel.get("headers").?.object;
+    try std.testing.expectEqualStrings("Bearer watch-token", headers.get("Authorization").?.string);
+    try std.testing.expectEqualStrings("nullclaw", headers.get("x-nullwatch-source").?.string);
+}
+
+test "dispatch routes GET integration action for nullwatch lists linked nullclaws" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "observer-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "linked-agent", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "plain-agent", .{ .version = "1.0.0" });
+
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "observer-a", "{\"port\":7711}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "linked-agent", "{\"diagnostics\":{\"backend\":\"otel\",\"otel\":{\"endpoint\":\"http://127.0.0.1:7711\",\"service_name\":\"nullclaw/linked-agent\"}}}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "plain-agent", "{\"diagnostics\":{\"backend\":\"jsonl\"}}");
+
+    const resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullwatch/observer-a/integration", "").?;
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp.body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("nullwatch", parsed.value.object.get("kind").?.string);
+    const claws = parsed.value.object.get("available_claws").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), claws.len);
+
+    var linked_found = false;
+    var plain_found = false;
+    for (claws) |claw| {
+        const obj = claw.object;
+        if (std.mem.eql(u8, obj.get("name").?.string, "linked-agent")) {
+            linked_found = obj.get("linked").?.bool;
+        }
+        if (std.mem.eql(u8, obj.get("name").?.string, "plain-agent")) {
+            plain_found = !obj.get("linked").?.bool;
+        }
+    }
+    try std.testing.expect(linked_found);
+    try std.testing.expect(plain_found);
+}
+
+test "dispatch routes POST integration action for nullwatch links selected nullclaw" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "observer-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "my-agent", .{ .version = "1.0.0" });
+
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "observer-a", "{\"port\":7713}");
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "my-agent", "{\"diagnostics\":{\"backend\":\"jsonl\"}}");
+
+    const resp = dispatch(
+        allocator,
+        &s,
+        &mctx.manager,
+        &mctx.mutex,
+        mctx.paths,
+        "POST",
+        "/api/instances/nullwatch/observer-a/integration",
+        "{\"claw_instance\":\"my-agent\"}",
+    ).?;
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const config_path = try mctx.paths.instanceConfig(allocator, "nullclaw", "my-agent");
+    defer allocator.free(config_path);
+    const config_bytes = try std.fs.readFileAbsolute(allocator, config_path, 1024 * 1024);
+    defer allocator.free(config_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const diagnostics = parsed.value.object.get("diagnostics").?.object;
+    try std.testing.expectEqualStrings("otel", diagnostics.get("backend").?.string);
+    const otel = diagnostics.get("otel").?.object;
+    try std.testing.expectEqualStrings("http://127.0.0.1:7713", otel.get("endpoint").?.string);
+    try std.testing.expectEqualStrings("nullclaw/my-agent", otel.get("service_name").?.string);
+}
+
 test "dispatch routes POST integration action for nullboiler" {
     const allocator = std.testing.allocator;
     var state_fixture = try test_helpers.TempPaths.init(allocator);
@@ -5201,7 +6694,7 @@ test "dispatch integration relink preserves advanced tracker config and custom w
             .pipeline_id = "pipe-old",
             .claim_roles = &.{"coder"},
             .execution = "subprocess",
-            .prompt_template = default_tracker_prompt_template,
+            .prompt_template = integration_mod.default_tracker_prompt_template,
             .on_success = .{
                 .transition_to = "complete",
             },

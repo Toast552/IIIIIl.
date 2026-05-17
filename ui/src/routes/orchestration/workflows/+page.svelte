@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
   import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
 
   let workflows = $state<any[]>([]);
   let loading = $state(true);
@@ -45,7 +46,10 @@
 <div class="page">
   <div class="header">
     <h1>Workflows</h1>
-    <a href={orchestrationUiRoutes.newWorkflow()} class="action-btn">+ New Workflow</a>
+    <div class="header-actions">
+      <BoilerInstanceSelector onChange={() => { loading = true; error = null; void loadWorkflows(); }} />
+      <a href={orchestrationUiRoutes.newWorkflow()} class="action-btn">+ New Workflow</a>
+    </div>
   </div>
 
   {#if error}
@@ -99,6 +103,11 @@
     margin-bottom: 2rem;
     padding-bottom: 1rem;
     border-bottom: 1px solid var(--border);
+  }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
   }
   h1 {
     font-size: 1.75rem;

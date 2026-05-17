@@ -57,6 +57,17 @@ fn versionsEqual(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, stripV(a), stripV(b));
 }
 
+fn normalizedLaunchModeForUpdate(component: []const u8, launch_mode: []const u8, known: registry.KnownComponent) []const u8 {
+    const normalized = registry.normalizeLaunchCommand(component, launch_mode);
+    if (!std.mem.eql(u8, known.default_launch_command, "gateway") and std.mem.eql(u8, normalized, "gateway")) {
+        return known.default_launch_command;
+    }
+    if (std.mem.eql(u8, component, "nullwatch") and std.mem.eql(u8, normalized, "nullwatch")) {
+        return known.default_launch_command;
+    }
+    return normalized;
+}
+
 fn fetchLatestTagForComponent(allocator: std.mem.Allocator, component: []const u8) ?[]u8 {
     if (builtin.is_test) return null;
 
@@ -197,7 +208,8 @@ pub fn handleApplyUpdateRuntime(
 
     const inst_dir = paths.instanceDir(allocator, component, name) catch return serverError();
     defer allocator.free(inst_dir);
-    var launch = launch_args_mod.resolve(allocator, entry.launch_mode, entry.verbose) catch return serverError();
+    const launch_mode = normalizedLaunchModeForUpdate(component, entry.launch_mode, known);
+    var launch = launch_args_mod.resolve(allocator, launch_mode, entry.verbose) catch return serverError();
     defer launch.deinit();
     const effective_port = launch.effectiveHealthPort(port);
 
@@ -253,7 +265,7 @@ pub fn handleApplyUpdateRuntime(
     const updated = s.updateInstance(component, name, .{
         .version = latest_tag,
         .auto_start = entry.auto_start,
-        .launch_mode = entry.launch_mode,
+        .launch_mode = launch_mode,
         .verbose = entry.verbose,
     }) catch return serverError();
     if (!updated) return notFound();
@@ -392,6 +404,13 @@ test "handleApplyUpdate returns success for existing instance" {
     try std.testing.expectEqualStrings("nullclaw", parsed.value.component);
     try std.testing.expectEqualStrings("my-agent", parsed.value.instance);
     try std.testing.expectEqualStrings("Update initiated", parsed.value.message);
+}
+
+test "normalizedLaunchModeForUpdate maps legacy nullwatch launch modes to serve" {
+    const known = registry.findKnownComponent("nullwatch").?;
+    try std.testing.expectEqualStrings("serve", normalizedLaunchModeForUpdate("nullwatch", "gateway", known));
+    try std.testing.expectEqualStrings("serve", normalizedLaunchModeForUpdate("nullwatch", "nullwatch", known));
+    try std.testing.expectEqualStrings("serve", normalizedLaunchModeForUpdate("nullwatch", "serve", known));
 }
 
 test "parseUpdatePath extracts component and name correctly" {

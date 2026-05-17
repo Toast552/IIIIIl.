@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const access = @import("../access.zig");
 const service_manager = @import("../service.zig");
+const helpers = @import("helpers.zig");
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
@@ -26,11 +27,15 @@ pub fn handleGetSettings(allocator: std.mem.Allocator, host: []const u8, port: u
 }
 
 /// PUT /api/settings — update hub settings. Echo the body back as acknowledgment.
-/// Caller owns the returned memory.
-pub fn handlePutSettings(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
+/// Caller owns the returned response body.
+pub fn handlePutSettings(allocator: std.mem.Allocator, body: []const u8) !helpers.ApiResponse {
     // Validate the body is parseable JSON
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{ .allocate = .alloc_always }) catch {
-        return try allocator.dupe(u8, "{\"error\":\"invalid JSON body\"}");
+        return .{
+            .status = "400 Bad Request",
+            .content_type = "application/json",
+            .body = try allocator.dupe(u8, "{\"error\":\"invalid JSON body\"}"),
+        };
     };
     defer parsed.deinit();
 
@@ -41,7 +46,11 @@ pub fn handlePutSettings(allocator: std.mem.Allocator, body: []const u8) ![]cons
     try buf.appendSlice(body);
     try buf.append('}');
 
-    return try buf.toOwnedSlice();
+    return .{
+        .status = "200 OK",
+        .content_type = "application/json",
+        .body = try buf.toOwnedSlice(),
+    };
 }
 
 /// POST /api/service/install — install and enable the user service.
@@ -255,21 +264,23 @@ test "handlePutSettings returns ok status" {
     const allocator = std.testing.allocator;
 
     const body = "{\"port\":19801,\"host\":\"0.0.0.0\"}";
-    const json = try handlePutSettings(allocator, body);
-    defer allocator.free(json);
+    const resp = try handlePutSettings(allocator, body);
+    defer allocator.free(resp.body);
 
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"ok\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"settings\":") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"port\":19801") != null);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"settings\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"port\":19801") != null);
 }
 
 test "handlePutSettings rejects invalid JSON" {
     const allocator = std.testing.allocator;
 
-    const json = try handlePutSettings(allocator, "not json");
-    defer allocator.free(json);
+    const resp = try handlePutSettings(allocator, "not json");
+    defer allocator.free(resp.body);
 
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"error\"") != null);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"error\"") != null);
 }
 
 test "handleServiceInstall returns platform info" {
