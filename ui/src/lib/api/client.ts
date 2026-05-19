@@ -30,6 +30,15 @@ type InstanceDeleteOptions = {
 type ObservabilityTarget = {
   watch?: string;
 };
+export type ImportInstanceRequest = {
+  path?: string;
+  name?: string;
+};
+export type StandaloneInfo = {
+  standalone: boolean;
+  standalone_path?: string;
+  already_imported?: boolean;
+};
 export type ApiRequestError = Error & {
   status?: number;
   body?: any;
@@ -247,8 +256,13 @@ export const api = {
 
   serviceStatus: () => request<any>('/service/status'),
 
-  importInstance: (component: string) =>
-    request<any>(`/instances/${component}/import`, { method: 'POST' }),
+  importInstance: (component: string, data?: ImportInstanceRequest) =>
+    request<any>(`/instances/${component}/import`, {
+      method: 'POST',
+      body: data ? JSON.stringify(data) : undefined,
+    }),
+  getStandalone: (component: string) =>
+    request<StandaloneInfo>(`/instances/${component}/standalone`),
 
   getUiModules: () => request<{ modules: Record<string, string> }>('/ui-modules'),
   getAvailableUiModules: () => request<{ name: string; repo: string; component: string }[]>('/ui-modules/available'),

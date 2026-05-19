@@ -1,6 +1,4 @@
 <script lang="ts">
-  import { api } from "$lib/api/client";
-
   let {
     name = "",
     displayName = "",
@@ -10,26 +8,15 @@
     installed = false,
     standalone = false,
     instanceCount = 0,
+    importLabel = "Import",
+    onImportExisting = (_component: string) => {},
   } = $props();
-  let importing = $state(false);
-  let imported = $state(false);
   let comingSoon = $derived(!installable && !installed && !standalone);
 
-  async function handleImport(e: MouseEvent) {
+  function handleImport(e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    importing = true;
-    try {
-      await api.importInstance(name);
-      imported = true;
-      standalone = false;
-      installed = true;
-      instanceCount = 1;
-    } catch (err) {
-      console.error("Import failed:", err);
-    } finally {
-      importing = false;
-    }
+    onImportExisting(name);
   }
 </script>
 
@@ -52,11 +39,9 @@
       {#if alpha}
         <span class="alpha-badge">&lt;Alpha&gt;</span>
       {/if}
-      {#if imported}
-        <span class="installed-badge">Imported</span>
-      {:else if standalone}
-        <button class="import-btn" onclick={handleImport} disabled={importing}>
-          {importing ? "Importing..." : "Import"}
+      {#if standalone}
+        <button class="import-btn" onclick={handleImport}>
+          {importLabel}
         </button>
       {:else if installed}
         <span class="installed-badge"

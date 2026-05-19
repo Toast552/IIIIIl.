@@ -3912,13 +3912,219 @@ fn resolveImportBinaryVersion(allocator: std.mem.Allocator, paths: paths_mod.Pat
     return downloadLatestBinaryVersion(allocator, paths, component);
 }
 
+const ImportRequest = struct {
+    path: []const u8 = "",
+    name: []const u8 = "",
+};
+
+const ParsedImportConfig = struct {
+    instance_name: ?[]const u8 = null,
+};
+
+fn duplicateImportRequest(parsed: ImportRequest, allocator: std.mem.Allocator) !ImportRequest {
+    return .{
+        .path = try allocator.dupe(u8, parsed.path),
+        .name = try allocator.dupe(u8, parsed.name),
+    };
+}
+
+fn deinitImportRequest(allocator: std.mem.Allocator, req: ImportRequest) void {
+    allocator.free(req.path);
+    allocator.free(req.name);
+}
+
+fn loadImportRequest(allocator: std.mem.Allocator, body: []const u8) !ImportRequest {
+    if (std.mem.trim(u8, body, &std.ascii.whitespace).len == 0) {
+        return .{
+            .path = try allocator.dupe(u8, ""),
+            .name = try allocator.dupe(u8, ""),
+        };
+    }
+
+    const parsed = try std.json.parseFromSlice(ImportRequest, allocator, body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    return duplicateImportRequest(parsed.value, allocator);
+}
+
+fn resolveDefaultImportSourceDir(allocator: std.mem.Allocator, home: []const u8, component: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/.{s}", .{ home, component });
+}
+
+fn resolveImportSourceDir(allocator: std.mem.Allocator, home: []const u8, component: []const u8, req: ImportRequest) ![]u8 {
+    if (req.path.len > 0) return allocator.dupe(u8, req.path);
+    return resolveDefaultImportSourceDir(allocator, home, component);
+}
+
+fn validateImportSourceDir(allocator: std.mem.Allocator, source_dir: []const u8) ?[]const u8 {
+    std_compat.fs.accessAbsolute(source_dir, .{}) catch return "{\"error\":\"path does not exist\"}";
+
+    const config_path = std.fs.path.join(allocator, &.{ source_dir, "config.json" }) catch return "{\"error\":\"config.json not found at path\"}";
+    defer allocator.free(config_path);
+
+    std_compat.fs.accessAbsolute(config_path, .{}) catch return "{\"error\":\"config.json not found at path\"}";
+    return null;
+}
+
+fn readImportConfig(allocator: std.mem.Allocator, source_dir: []const u8) !ParsedImportConfig {
+    const config_path = try std.fs.path.join(allocator, &.{ source_dir, "config.json" });
+    defer allocator.free(config_path);
+
+    const bytes = try std_compat.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024);
+    defer allocator.free(bytes);
+
+    const parsed = try std.json.parseFromSlice(ParsedImportConfig, allocator, bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    return .{
+        .instance_name = if (parsed.value.instance_name) |name|
+            try allocator.dupe(u8, name)
+        else
+            null,
+    };
+}
+
+fn deinitParsedImportConfig(allocator: std.mem.Allocator, cfg: ParsedImportConfig) void {
+    if (cfg.instance_name) |name| allocator.free(name);
+}
+
+fn isFilesystemSafeImportName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    if (std.mem.indexOfScalar(u8, name, 0) != null) return false;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
+    if (std.mem.indexOfScalar(u8, name, '\\') != null) return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    return true;
+}
+
+fn nextLocalImportName(allocator: std.mem.Allocator, s: *state_mod.State, component: []const u8) ![]u8 {
+    const names = try s.instanceNames(component);
+    defer if (names) |owned_names| s.allocator.free(owned_names);
+
+    var next_number: usize = 1;
+    if (names) |owned_names| {
+        for (owned_names) |existing_name| {
+            if (!std.mem.startsWith(u8, existing_name, "Local Import #")) continue;
+            const suffix = existing_name["Local Import #".len..];
+            const n = std.fmt.parseUnsigned(usize, suffix, 10) catch continue;
+            if (n >= next_number) next_number = n + 1;
+        }
+    }
+
+    return std.fmt.allocPrint(allocator, "Local Import #{d}", .{next_number});
+}
+
+fn resolveImportInstanceName(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    component: []const u8,
+    req: ImportRequest,
+    cfg: ParsedImportConfig,
+) ![]u8 {
+    if (req.name.len > 0) return allocator.dupe(u8, req.name);
+    if (cfg.instance_name) |name| return allocator.dupe(u8, name);
+    return nextLocalImportName(allocator, s, component);
+}
+
+fn invalidImportNameResponse(allocator: std.mem.Allocator, name: []const u8) ApiResponse {
+    const body = std.fmt.allocPrint(allocator, "{{\"error\":\"invalid or duplicate instance name: {s}\"}}", .{name}) catch return helpers.serverError();
+    return badRequest(body);
+}
+
+fn buildImportResponse(allocator: std.mem.Allocator, instance_name: []const u8, source_dir: []const u8) ![]u8 {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+
+    try buf.appendSlice("{\"status\":\"imported\",\"instance\":\"");
+    try appendEscaped(&buf, instance_name);
+    try buf.appendSlice("\",\"path\":\"");
+    try appendEscaped(&buf, source_dir);
+    try buf.appendSlice("\"}");
+    return buf.toOwnedSlice();
+}
+
+fn hasStandaloneInstallAtPath(allocator: std.mem.Allocator, source_dir: []const u8) bool {
+    return validateImportSourceDir(allocator, source_dir) == null;
+}
+
+fn isStandaloneImported(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    standalone_dir: []const u8,
+) bool {
+    const real_standalone_dir = std_compat.fs.realpathAlloc(allocator, standalone_dir) catch return false;
+    defer allocator.free(real_standalone_dir);
+
+    const names = s.instanceNames(component) catch return false;
+    defer if (names) |owned_names| s.allocator.free(owned_names);
+
+    if (names) |owned_names| {
+        for (owned_names) |name| {
+            const inst_dir = paths.instanceDir(allocator, component, name) catch continue;
+            defer allocator.free(inst_dir);
+
+            const real_inst_dir = std_compat.fs.realpathAlloc(allocator, inst_dir) catch continue;
+            defer allocator.free(real_inst_dir);
+            if (std.mem.eql(u8, real_inst_dir, real_standalone_dir)) return true;
+        }
+    }
+
+    return false;
+}
+
+fn buildStandaloneResponse(
+    allocator: std.mem.Allocator,
+    standalone_dir: ?[]const u8,
+    already_imported: bool,
+) ![]u8 {
+    if (standalone_dir == null) return allocator.dupe(u8, "{\"standalone\":false}");
+
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    try buf.appendSlice("{\"standalone\":true,\"standalone_path\":\"");
+    try appendEscaped(&buf, standalone_dir.?);
+    try buf.appendSlice("\",\"already_imported\":");
+    try buf.appendSlice(if (already_imported) "true" else "false");
+    try buf.appendSlice("}");
+    return buf.toOwnedSlice();
+}
+
+pub fn handleStandalone(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8) ApiResponse {
+    const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch blk: {
+        if (builtin.os.tag == .windows) {
+            break :blk std_compat.process.getEnvVarOwned(allocator, "USERPROFILE") catch return helpers.serverError();
+        }
+        return helpers.serverError();
+    };
+    defer allocator.free(home);
+
+    const standalone_dir = resolveDefaultImportSourceDir(allocator, home, component) catch return helpers.serverError();
+    defer allocator.free(standalone_dir);
+
+    if (!hasStandaloneInstallAtPath(allocator, standalone_dir)) {
+        const body = buildStandaloneResponse(allocator, null, false) catch return helpers.serverError();
+        return jsonOk(body);
+    }
+
+    const already_imported = isStandaloneImported(allocator, s, paths, component, standalone_dir);
+    const body = buildStandaloneResponse(allocator, standalone_dir, already_imported) catch return helpers.serverError();
+    return jsonOk(body);
+}
+
 /// POST /api/instances/{component}/import — import a standalone installation.
 /// Copies config and data from ~/.{component}/ into the nullhub instance directory.
 /// A runnable binary is staged during import so the managed instance can start.
-pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8) ApiResponse {
-    if (s.getInstance(component, "default") != null) {
-        return conflict("{\"error\":\"default instance already exists\"}");
-    }
+pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8, body: []const u8) ApiResponse {
+    const req = loadImportRequest(allocator, body) catch return badRequest("{\"error\":\"invalid JSON body\"}");
+    defer deinitImportRequest(allocator, req);
 
     const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch blk: {
         if (builtin.os.tag == .windows) {
@@ -3928,16 +4134,32 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
     };
     defer allocator.free(home);
 
-    // 1. Verify standalone dir exists
-    const dot_dir = std.fmt.allocPrint(allocator, "{s}/.{s}", .{ home, component }) catch return helpers.serverError();
-    defer allocator.free(dot_dir);
-    std_compat.fs.accessAbsolute(dot_dir, .{}) catch return notFound();
+    const source_dir = resolveImportSourceDir(allocator, home, component, req) catch return helpers.serverError();
+    defer allocator.free(source_dir);
+
+    if (validateImportSourceDir(allocator, source_dir)) |error_body| {
+        const is_default_path = req.path.len == 0;
+        if (is_default_path and std.mem.eql(u8, error_body, "{\"error\":\"path does not exist\"}")) {
+            return notFound();
+        }
+        return badRequest(error_body);
+    }
+
+    const parsed_config = readImportConfig(allocator, source_dir) catch return badRequest("{\"error\":\"config.json is not valid JSON\"}");
+    defer deinitParsedImportConfig(allocator, parsed_config);
+
+    const instance_name = resolveImportInstanceName(allocator, s, component, req, parsed_config) catch return helpers.serverError();
+    defer allocator.free(instance_name);
+
+    if (!isFilesystemSafeImportName(instance_name) or s.getInstance(component, instance_name) != null) {
+        return invalidImportNameResponse(allocator, instance_name);
+    }
 
     // 2. Create instance directory structure
-    const inst_dir = paths.instanceDir(allocator, component, "default") catch return helpers.serverError();
+    const inst_dir = paths.instanceDir(allocator, component, instance_name) catch return helpers.serverError();
     defer allocator.free(inst_dir);
     if (std_compat.fs.accessAbsolute(inst_dir, .{})) |_| {
-        return conflict("{\"error\":\"default instance directory already exists\"}");
+        return invalidImportNameResponse(allocator, instance_name);
     } else |err| switch (err) {
         error.FileNotFound => {},
         else => return helpers.serverError(),
@@ -3958,10 +4180,10 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
     // 4. Symlink the entire standalone dir as the instance dir
     //    ~/.nullclaw → ~/.nullhub/instances/nullclaw/default
     //    This preserves all data in place (config, auth, workspace, state, logs)
-    std_compat.fs.symLinkAbsolute(dot_dir, inst_dir, .{ .is_directory = true }) catch return helpers.serverError();
+    std_compat.fs.symLinkAbsolute(source_dir, inst_dir, .{ .is_directory = true }) catch return helpers.serverError();
 
     // 5. Register in state
-    s.addInstance(component, "default", .{
+    s.addInstance(component, instance_name, .{
         .version = version,
         .auto_start = false,
         .launch_mode = defaultLaunchModeForComponent(component),
@@ -3971,12 +4193,13 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
         return helpers.serverError();
     };
     s.save() catch {
-        _ = s.removeInstance(component, "default");
+        _ = s.removeInstance(component, instance_name);
         std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
         return helpers.serverError();
     };
 
-    return jsonOk("{\"status\":\"imported\",\"instance\":\"default\"}");
+    const response_body = buildImportResponse(allocator, instance_name, source_dir) catch return helpers.serverError();
+    return jsonOk(response_body);
 }
 
 /// PATCH /api/instances/{component}/{name} — update settings (auto_start).
@@ -4720,7 +4943,11 @@ pub fn dispatch(
 
     // POST /api/instances/{component}/import — import standalone installation
     if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, parsed.name, "import")) {
-        return handleImport(allocator, s, paths, parsed.component);
+        return handleImport(allocator, s, paths, parsed.component, body);
+    }
+
+    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, parsed.name, "standalone")) {
+        return handleStandalone(allocator, s, paths, parsed.component);
     }
 
     // No action — CRUD on the instance itself.
@@ -4821,6 +5048,439 @@ fn writeTestInstanceConfig(
     defer file.close();
     try file.writeAll(json);
     try file.writeAll("\n");
+}
+
+fn writeAbsoluteFile(path: []const u8, contents: []const u8) !void {
+    const file = try std_compat.fs.createFileAbsolute(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(contents);
+}
+
+fn setTestHomeEnv(home: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (std.c.setenv("HOME", home.ptr, 1) != 0) return error.Unexpected;
+}
+
+fn restoreTestHomeEnv(previous_home: ?[]const u8) void {
+    if (comptime builtin.os.tag == .windows) return;
+    if (previous_home) |home| {
+        _ = std.c.setenv("HOME", home.ptr, 1);
+    } else {
+        _ = std.c.unsetenv("HOME");
+    }
+}
+
+fn withTestHome(
+    allocator: std.mem.Allocator,
+    home: []const u8,
+    comptime callback: *const fn (std.mem.Allocator) anyerror!void,
+) !void {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+
+    try setTestHomeEnv(home);
+    try callback(allocator);
+}
+
+fn readAbsoluteSymlinkTarget(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var buf: [std_compat.fs.max_path_bytes]u8 = undefined;
+    const len = try std.Io.Dir.readLinkAbsolute(std_compat.io(), path, &buf);
+    return allocator.dupe(u8, buf[0..len]);
+}
+
+fn parseImportResponse(allocator: std.mem.Allocator, body: []const u8) !struct {
+    status: []const u8,
+    instance: []const u8,
+    path: []const u8,
+} {
+    const parsed = try std.json.parseFromSlice(struct {
+        status: []const u8,
+        instance: []const u8,
+        path: []const u8,
+    }, allocator, body, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    return parsed.value;
+}
+
+fn parseStandaloneResponse(allocator: std.mem.Allocator, body: []const u8) !struct {
+    standalone: bool,
+    standalone_path: ?[]const u8 = null,
+    already_imported: ?bool = null,
+} {
+    const parsed = try std.json.parseFromSlice(struct {
+        standalone: bool,
+        standalone_path: ?[]const u8 = null,
+        already_imported: ?bool = null,
+    }, allocator, body, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    return parsed.value;
+}
+
+fn createStandaloneImportSource(
+    allocator: std.mem.Allocator,
+    fixture: test_helpers.TempPaths,
+    relative_dir: []const u8,
+    config_json: []const u8,
+) ![]const u8 {
+    const source_dir = try fixture.path(allocator, relative_dir);
+    errdefer allocator.free(source_dir);
+    try ensurePath(source_dir);
+
+    const config_path = try std.fs.path.join(allocator, &.{ source_dir, "config.json" });
+    defer allocator.free(config_path);
+    try writeAbsoluteFile(config_path, config_json);
+    return source_dir;
+}
+
+test "handleImport with custom path imports and registers instance" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "custom-nullclaw", "{\"instance_name\":\"config-name\",\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\",\"name\":\"review-bot\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    const parsed = try parseImportResponse(allocator, resp.body);
+    try std.testing.expectEqualStrings("imported", parsed.status);
+    try std.testing.expectEqualStrings("review-bot", parsed.instance);
+    try std.testing.expectEqualStrings(source_dir, parsed.path);
+
+    const entry = s.getInstance("nullclaw", "review-bot").?;
+    try std.testing.expectEqualStrings(local_binary.dev_local_version, entry.version);
+    try std.testing.expect(!entry.auto_start);
+
+    const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "review-bot");
+    defer allocator.free(inst_dir);
+    const link_target = try readAbsoluteSymlinkTarget(allocator, inst_dir);
+    defer allocator.free(link_target);
+    try std.testing.expectEqualStrings(source_dir, link_target);
+}
+
+test "handleImport without body imports default path as default" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const home_dir = try state_fixture.path(allocator, "home");
+    defer allocator.free(home_dir);
+    try ensurePath(home_dir);
+    const dot_dir = try std.fs.path.join(allocator, &.{ home_dir, ".nullclaw" });
+    defer allocator.free(dot_dir);
+    try ensurePath(dot_dir);
+    const config_path = try std.fs.path.join(allocator, &.{ dot_dir, "config.json" });
+    defer allocator.free(config_path);
+    try writeAbsoluteFile(config_path, "{\"gateway\":{\"port\":3000}}\n");
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+    try setTestHomeEnv(home_dir);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", "");
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    const parsed = try parseImportResponse(allocator, resp.body);
+    try std.testing.expectEqualStrings("default", parsed.instance);
+    try std.testing.expectEqualStrings(dot_dir, parsed.path);
+    try std.testing.expect(s.getInstance("nullclaw", "default") != null);
+}
+
+test "handleImport reads instance_name from config when name omitted" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "config-named", "{\"instance_name\":\"from-config\",\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    const parsed = try parseImportResponse(allocator, resp.body);
+    try std.testing.expectEqualStrings("from-config", parsed.instance);
+    try std.testing.expect(s.getInstance("nullclaw", "from-config") != null);
+}
+
+test "handleImport auto generates local import name when config lacks one" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Local Import #1", .{ .version = "1.0.0" });
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "generated-name", "{\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    const parsed = try parseImportResponse(allocator, resp.body);
+    try std.testing.expectEqualStrings("Local Import #2", parsed.instance);
+    try std.testing.expect(s.getInstance("nullclaw", "Local Import #2") != null);
+}
+
+test "handleImport returns error for missing path" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const missing_dir = try state_fixture.path(allocator, "missing-dir");
+    defer allocator.free(missing_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{missing_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"path does not exist\"}", resp.body);
+}
+
+test "handleImport returns error for missing config json at path" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try state_fixture.path(allocator, "no-config");
+    defer allocator.free(source_dir);
+    try ensurePath(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"config.json not found at path\"}", resp.body);
+}
+
+test "handleImport returns error for invalid config json" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "invalid-config", "{not-json}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"config.json is not valid JSON\"}", resp.body);
+}
+
+test "handleImport returns error for duplicate instance name" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "review-bot", .{ .version = "1.0.0" });
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "duplicate-name", "{\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\",\"name\":\"review-bot\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"invalid or duplicate instance name: review-bot\"}", resp.body);
+}
+
+test "handleImport returns error for invalid instance name" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "invalid-name", "{\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\",\"name\":\"../bad\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"invalid or duplicate instance name: ../bad\"}", resp.body);
+}
+
+test "handleStandalone returns standalone false when default install is missing" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const home_dir = try state_fixture.path(allocator, "home-missing");
+    defer allocator.free(home_dir);
+    try ensurePath(home_dir);
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+    try setTestHomeEnv(home_dir);
+
+    const resp = handleStandalone(allocator, &s, mctx.paths, "nullclaw");
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const parsed = try parseStandaloneResponse(allocator, resp.body);
+    try std.testing.expect(!parsed.standalone);
+    try std.testing.expect(parsed.standalone_path == null);
+    try std.testing.expect(parsed.already_imported == null);
+}
+
+test "handleStandalone returns default path when install exists and is not imported" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const home_dir = try state_fixture.path(allocator, "home-standalone");
+    defer allocator.free(home_dir);
+    try ensurePath(home_dir);
+    const dot_dir = try std.fs.path.join(allocator, &.{ home_dir, ".nullclaw" });
+    defer allocator.free(dot_dir);
+    try ensurePath(dot_dir);
+    const config_path = try std.fs.path.join(allocator, &.{ dot_dir, "config.json" });
+    defer allocator.free(config_path);
+    try writeAbsoluteFile(config_path, "{\"gateway\":{\"port\":3000}}\n");
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+    try setTestHomeEnv(home_dir);
+
+    const resp = handleStandalone(allocator, &s, mctx.paths, "nullclaw");
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const parsed = try parseStandaloneResponse(allocator, resp.body);
+    try std.testing.expect(parsed.standalone);
+    try std.testing.expectEqualStrings(dot_dir, parsed.standalone_path.?);
+    try std.testing.expectEqual(@as(?bool, false), parsed.already_imported);
+}
+
+test "handleStandalone returns already imported after default import" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const home_dir = try state_fixture.path(allocator, "home-imported");
+    defer allocator.free(home_dir);
+    try ensurePath(home_dir);
+    const dot_dir = try std.fs.path.join(allocator, &.{ home_dir, ".nullclaw" });
+    defer allocator.free(dot_dir);
+    try ensurePath(dot_dir);
+    const config_path = try std.fs.path.join(allocator, &.{ dot_dir, "config.json" });
+    defer allocator.free(config_path);
+    try writeAbsoluteFile(config_path, "{\"gateway\":{\"port\":3000}}\n");
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+    try setTestHomeEnv(home_dir);
+
+    const import_resp = handleImport(allocator, &s, mctx.paths, "nullclaw", "");
+    defer allocator.free(import_resp.body);
+    try std.testing.expectEqualStrings("200 OK", import_resp.status);
+
+    const standalone_resp = handleStandalone(allocator, &s, mctx.paths, "nullclaw");
+    defer allocator.free(standalone_resp.body);
+    try std.testing.expectEqualStrings("200 OK", standalone_resp.status);
+
+    const parsed = try parseStandaloneResponse(allocator, standalone_resp.body);
+    try std.testing.expect(parsed.standalone);
+    try std.testing.expectEqualStrings(dot_dir, parsed.standalone_path.?);
+    try std.testing.expectEqual(@as(?bool, true), parsed.already_imported);
 }
 
 fn writeTestTrackerWorkflow(
