@@ -37,7 +37,8 @@ pub fn isLocalBindHost(host: []const u8) bool {
         std.ascii.eqlIgnoreCase(host, "0.0.0.0") or
         std.ascii.eqlIgnoreCase(host, "::1") or
         std.ascii.eqlIgnoreCase(host, "[::1]") or
-        std.ascii.eqlIgnoreCase(host, "::");
+        std.ascii.eqlIgnoreCase(host, "::") or
+        std.ascii.eqlIgnoreCase(host, "[::]");
 }
 
 pub fn buildAccessUrls(allocator: std.mem.Allocator, host: []const u8, port: u16) !AccessUrls {
@@ -113,6 +114,24 @@ test "buildAccessUrls uses nullhub local chain for loopback binds" {
     try std.testing.expectEqualStrings("http://nullhub.localhost:19800", urls.canonical_url);
     try std.testing.expectEqualStrings("http://127.0.0.1:19800", urls.fallback_url);
     try std.testing.expectEqualStrings("http://127.0.0.1:19800", urls.direct_url);
+}
+
+test "isLocalBindHost covers loopback and unspecified bind aliases" {
+    inline for (&[_][]const u8{
+        "",
+        "127.0.0.1",
+        "LOCALHOST",
+        "0.0.0.0",
+        "::1",
+        "[::1]",
+        "::",
+        "[::]",
+    }) |host| {
+        try std.testing.expect(isLocalBindHost(host));
+    }
+
+    try std.testing.expect(!isLocalBindHost("192.168.1.50"));
+    try std.testing.expect(!isLocalBindHost("example.com"));
 }
 
 test "buildAccessUrls keeps direct host for non-local binds" {

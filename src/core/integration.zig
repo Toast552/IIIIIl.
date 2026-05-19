@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const access = @import("../access.zig");
 const paths_mod = @import("paths.zig");
 const state_mod = @import("state.zig");
 const test_helpers = @import("../test_helpers.zig");
@@ -469,9 +470,30 @@ pub fn extractLocalPort(url: []const u8) ?u16 {
     const port = uri.port orelse return null;
 
     return switch (host) {
-        .raw => |value| if (isLocalHost(value)) port else null,
-        else => null,
+        .raw, .percent_encoded => |value| if (value.len > 0 and access.isLocalBindHost(value)) port else null,
     };
+}
+
+test "extractLocalPort accepts Zig 0.16 percent encoded local hosts" {
+    const parsed = try std.Uri.parse("http://127.0.0.1:7700");
+    try std.testing.expectEqualStrings("127.0.0.1", parsed.host.?.percent_encoded);
+
+    inline for (&[_]struct {
+        url: []const u8,
+        port: ?u16,
+    }{
+        .{ .url = "http://127.0.0.1:7700", .port = 7700 },
+        .{ .url = "http://localhost:7701/path", .port = 7701 },
+        .{ .url = "http://LOCALHOST:7702", .port = 7702 },
+        .{ .url = "http://0.0.0.0:7703", .port = 7703 },
+        .{ .url = "http://[::1]:7704", .port = 7704 },
+        .{ .url = "http://[::]:7705", .port = 7705 },
+        .{ .url = "http://example.com:7706", .port = null },
+        .{ .url = "http://127.0.0.1", .port = null },
+        .{ .url = "not a url", .port = null },
+    }) |case| {
+        try std.testing.expectEqual(case.port, extractLocalPort(case.url));
+    }
 }
 
 fn parseNullClawTelemetryLink(allocator: std.mem.Allocator, config: std.json.Value) !NullClawTelemetryLink {
@@ -532,13 +554,6 @@ fn normalizedConnectHost(host: []const u8) []const u8 {
         return "127.0.0.1";
     }
     return host;
-}
-
-fn isLocalHost(host: []const u8) bool {
-    return std.mem.eql(u8, host, "127.0.0.1") or
-        std.mem.eql(u8, host, "localhost") or
-        std.mem.eql(u8, host, "0.0.0.0") or
-        std.mem.eql(u8, host, "::1");
 }
 
 fn jsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
