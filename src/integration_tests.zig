@@ -50,6 +50,7 @@ const IntegrationServer = struct {
         cleanup_home_dir = false;
         errdefer server.deinit();
 
+        server.env_map = try std_compat.process.getEnvMap(allocator);
         try seedFn(&server);
 
         const port = try reservePort();
@@ -60,7 +61,6 @@ const IntegrationServer = struct {
         const exe_path = try std_compat.process.getEnvVarOwned(allocator, "NULLHUB_INTEGRATION_BIN");
         defer allocator.free(exe_path);
 
-        server.env_map = try std_compat.process.getEnvMap(allocator);
         try server.env_map.?.put("HOME", home_dir);
 
         const argv = try allocator.dupe([]const u8, &.{ exe_path, "serve", "--port", port_text, "--no-open" });
@@ -236,6 +236,58 @@ fn writeSeedFile(server: *IntegrationServer, parts: []const []const u8, contents
     const file = try std_compat.fs.createFileAbsolute(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(contents);
+}
+
+fn prependChildPath(server: *IntegrationServer, dir: []const u8) !void {
+    if (server.env_map == null) return error.EnvironmentUnavailable;
+
+    const current = server.env_map.?.get("PATH") orelse "";
+    const next = if (current.len == 0)
+        try server.allocator.dupe(u8, dir)
+    else
+        try std.fmt.allocPrint(server.allocator, "{s}{c}{s}", .{ dir, std.fs.path.delimiter, current });
+    defer server.allocator.free(next);
+
+    try server.env_map.?.put("PATH", next);
+}
+
+fn seedFakeCurlReleases(server: *IntegrationServer) !void {
+    const bin_dir = try std.fs.path.join(server.allocator, &.{ server.temp_root, "fake-bin" });
+    defer server.allocator.free(bin_dir);
+    try std_compat.fs.makeDirAbsolute(bin_dir);
+
+    if (builtin.os.tag == .windows) {
+        const script =
+            \\@echo off
+            \\if "%1"=="--version" echo curl 8.0.0& exit /b 0
+            \\if "%1"=="-V" echo curl 8.0.0& exit /b 0
+            \\if "%1"=="-v" echo curl 8.0.0& exit /b 0
+            \\echo [{"tag_name":"v2026.4.1","prerelease":false},{"tag_name":"v2026.4.0-beta","prerelease":true}]
+        ;
+        try writeSeedFile(server, &.{ bin_dir, "curl.cmd" }, script);
+    } else {
+        const script =
+            \\#!/bin/sh
+            \\case "${1:-}" in
+            \\  --version|-V|-v)
+            \\    printf '%s\n' 'curl 8.0.0'
+            \\    exit 0
+            \\    ;;
+            \\esac
+            \\printf '%s\n' '[{"tag_name":"v2026.4.1","prerelease":false},{"tag_name":"v2026.4.0-beta","prerelease":true}]'
+        ;
+        try writeSeedFile(server, &.{ bin_dir, "curl" }, script);
+
+        const curl_path = try std.fs.path.join(server.allocator, &.{ bin_dir, "curl" });
+        defer server.allocator.free(curl_path);
+        if (comptime std_compat.fs.has_executable_bit) {
+            const file = try std_compat.fs.openFileAbsolute(curl_path, .{});
+            defer file.close();
+            try file.chmod(0o755);
+        }
+    }
+
+    try prependChildPath(server, bin_dir);
 }
 
 fn seedLaunchableGatewayInstance(server: *IntegrationServer, component: []const u8, name: []const u8, port: u16) !void {
@@ -600,6 +652,38 @@ test "integration harness covers service route contracts" {
         defer resp.deinit(std.testing.allocator);
         try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+}
+
+test "integration harness covers utility and versions routes" {
+    var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+        fn call(srv: *IntegrationServer) !void {
+            try seedFakeCurlReleases(srv);
+        }
+    }.call);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/free-port" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"port\":") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/wizard/nullclaw/versions" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"value\":\"v2026.4.1\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"label\":\"v2026.4.1\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "v2026.4.0-beta") == null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/wizard/missing-component/versions" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
     }
 }
 
