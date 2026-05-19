@@ -32,7 +32,7 @@ pub const ProviderProbeResult = struct {
 // ─── Path Parsing ────────────────────────────────────────────────────────────
 
 /// Extract the component name from a wizard API path.
-/// Matches `/api/wizard/{component}` or `/api/wizard/{component}/models`.
+/// Matches `/api/wizard/{component}` and supported wizard subroutes.
 /// Returns null if the path doesn't match the expected prefix or is empty.
 pub fn extractComponentName(target: []const u8) ?[]const u8 {
     const prefix = "/api/wizard/";
@@ -79,7 +79,7 @@ pub fn extractComponentName(target: []const u8) ?[]const u8 {
     return rest;
 }
 
-/// Check if a target path matches `/api/wizard/{component}` or `/api/wizard/{component}/models`.
+/// Check if a target path matches `/api/wizard/{component}` or a supported wizard subroute.
 pub fn isWizardPath(target: []const u8) bool {
     return extractComponentName(target) != null;
 }

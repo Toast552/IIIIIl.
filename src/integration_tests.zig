@@ -660,12 +660,32 @@ test "integration harness covers wizard failure contracts" {
 
     {
         const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw/models",
+            .method = .POST,
+            .body = "{\"provider\":\"\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "provider is required") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
             .path = "/api/wizard/missing-component/models",
             .method = .POST,
             .body = "{\"provider\":\"openrouter\"}",
         });
         defer resp.deinit(std.testing.allocator);
         try std.testing.expectEqual(std.http.Status.not_found, resp.status);
-        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found or models unavailable") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component/models?provider=openai",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found or models unavailable") != null);
     }
 }
