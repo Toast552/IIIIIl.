@@ -50,6 +50,7 @@ const IntegrationServer = struct {
         cleanup_home_dir = false;
         errdefer server.deinit();
 
+        server.env_map = try std_compat.process.getEnvMap(allocator);
         try seedFn(&server);
 
         const port = try reservePort();
@@ -60,7 +61,6 @@ const IntegrationServer = struct {
         const exe_path = try std_compat.process.getEnvVarOwned(allocator, "NULLHUB_INTEGRATION_BIN");
         defer allocator.free(exe_path);
 
-        server.env_map = try std_compat.process.getEnvMap(allocator);
         try server.env_map.?.put("HOME", home_dir);
 
         const argv = try allocator.dupe([]const u8, &.{ exe_path, "serve", "--port", port_text, "--no-open" });
@@ -219,6 +219,114 @@ fn seedManagedInstance(server: *IntegrationServer, component: []const u8, name: 
     try file.writeAll(state_json);
 }
 
+fn writeSeedFile(server: *IntegrationServer, parts: []const []const u8, contents: []const u8) !void {
+    const path = try std.fs.path.join(server.allocator, parts);
+    defer server.allocator.free(path);
+
+    if (parts.len < 2) return error.InvalidPath;
+    var root_dir = try std_compat.fs.openDirAbsolute(parts[0], .{});
+    defer root_dir.close();
+
+    if (parts.len > 2) {
+        const parent_rel = try std.fs.path.join(server.allocator, parts[1 .. parts.len - 1]);
+        defer server.allocator.free(parent_rel);
+        try root_dir.makePath(parent_rel);
+    }
+
+    const file = try std_compat.fs.createFileAbsolute(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(contents);
+}
+
+fn prependChildPath(server: *IntegrationServer, dir: []const u8) !void {
+    if (server.env_map == null) return error.EnvironmentUnavailable;
+
+    const current = server.env_map.?.get("PATH") orelse "";
+    const next = if (current.len == 0)
+        try server.allocator.dupe(u8, dir)
+    else
+        try std.fmt.allocPrint(server.allocator, "{s}{c}{s}", .{ dir, std.fs.path.delimiter, current });
+    defer server.allocator.free(next);
+
+    try server.env_map.?.put("PATH", next);
+}
+
+fn seedFakeCurlReleases(server: *IntegrationServer) !void {
+    const bin_dir = try std.fs.path.join(server.allocator, &.{ server.temp_root, "fake-bin" });
+    defer server.allocator.free(bin_dir);
+    try std_compat.fs.makeDirAbsolute(bin_dir);
+
+    if (builtin.os.tag == .windows) {
+        const script =
+            \\@echo off
+            \\if "%1"=="--version" echo curl 8.0.0& exit /b 0
+            \\if "%1"=="-V" echo curl 8.0.0& exit /b 0
+            \\if "%1"=="-v" echo curl 8.0.0& exit /b 0
+            \\echo [{"tag_name":"v2026.4.1","prerelease":false},{"tag_name":"v2026.4.0-beta","prerelease":true}]
+        ;
+        try writeSeedFile(server, &.{ bin_dir, "curl.cmd" }, script);
+    } else {
+        const script =
+            \\#!/bin/sh
+            \\case "${1:-}" in
+            \\  --version|-V|-v)
+            \\    printf '%s\n' 'curl 8.0.0'
+            \\    exit 0
+            \\    ;;
+            \\esac
+            \\printf '%s\n' '[{"tag_name":"v2026.4.1","prerelease":false},{"tag_name":"v2026.4.0-beta","prerelease":true}]'
+        ;
+        try writeSeedFile(server, &.{ bin_dir, "curl" }, script);
+
+        const curl_path = try std.fs.path.join(server.allocator, &.{ bin_dir, "curl" });
+        defer server.allocator.free(curl_path);
+        if (comptime std_compat.fs.has_executable_bit) {
+            const file = try std_compat.fs.openFileAbsolute(curl_path, .{});
+            defer file.close();
+            try file.chmod(0o755);
+        }
+    }
+
+    try prependChildPath(server, bin_dir);
+}
+
+fn seedLaunchableGatewayInstance(server: *IntegrationServer, component: []const u8, name: []const u8, port: u16) !void {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    try seedManagedInstance(server, component, name);
+
+    const root = try server.nullhubRoot();
+    defer server.allocator.free(root);
+
+    const config_json = try std.fmt.allocPrint(server.allocator, "{{\"gateway\":{{\"port\":{d}}}}}", .{port});
+    defer server.allocator.free(config_json);
+    try writeSeedFile(server, &.{ root, "instances", component, name, "config.json" }, config_json);
+
+    const binary_name = try std.fmt.allocPrint(server.allocator, "{s}-{s}", .{ component, "1.0.0" });
+    defer server.allocator.free(binary_name);
+    const script =
+        \\#!/bin/sh
+        \\set -eu
+        \\if [ "${1:-}" = "--export-manifest" ]; then
+        \\  printf '%s\n' '{"schema_version":1,"name":"nullboiler","display_name":"NullBoiler","description":"test fixture","icon":"boiler","repo":"nullclaw/nullboiler","platforms":{},"launch":{"command":"gateway","args":[]},"health":{"endpoint":"/health","port_from_config":"gateway.port","interval_ms":15000},"ports":[{"name":"gateway","config_key":"gateway.port","default":3000,"protocol":"http"}],"wizard":{"steps":[]},"depends_on":[],"connects_to":[]}'
+        \\  exit 0
+        \\fi
+        \\if [ "${1:-}" = "gateway" ]; then
+        \\  exec python3 -c 'import signal,sys,time; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); signal.signal(signal.SIGINT, lambda *_: sys.exit(0)); time.sleep(60)'
+        \\fi
+        \\exit 64
+    ;
+    try writeSeedFile(server, &.{ root, "bin", binary_name }, script);
+
+    const binary_path = try std.fs.path.join(server.allocator, &.{ root, "bin", binary_name });
+    defer server.allocator.free(binary_path);
+    if (comptime std_compat.fs.has_executable_bit) {
+        const file = try std_compat.fs.openFileAbsolute(binary_path, .{});
+        defer file.close();
+        try file.chmod(0o755);
+    }
+}
+
 test "integration harness serves health and core api routes" {
     var server = try IntegrationServer.start(std.testing.allocator);
     defer server.deinit();
@@ -308,6 +416,209 @@ test "integration harness covers settings and config round-trips" {
     }
 }
 
+test "integration harness covers settings and config route contracts" {
+    var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+        fn call(srv: *IntegrationServer) !void {
+            try seedManagedInstance(srv, "nullboiler", "demo");
+        }
+    }.call);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/settings", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/instances/nullboiler/demo/config",
+            .method = .PATCH,
+            .body = "{\"gateway\":{\"port\":43124},\"provider\":\"patched\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"saved\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/config?path=gateway.port" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"value\":43124") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/config", .method = .DELETE });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+}
+
+test "integration harness covers settings and config failure paths" {
+    var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+        fn call(srv: *IntegrationServer) !void {
+            try seedManagedInstance(srv, "nullboiler", "demo");
+        }
+    }.call);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/settings",
+            .method = .PUT,
+            .body = "not json",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/instances/nullboiler/demo/config",
+            .method = .PUT,
+            .body = "{\"gateway\":{\"port\":43123},\"provider\":\"openrouter\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/config?path=missing.path" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "config path not found") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/instances/nullboiler/demo/config",
+            .method = .PUT,
+            .body = "not json",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/config?path=gateway.port" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"value\":43123") != null);
+    }
+}
+
+test "integration harness covers instance lifecycle endpoints" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+        fn call(srv: *IntegrationServer) !void {
+            try seedLaunchableGatewayInstance(srv, "nullboiler", "demo", 43123);
+        }
+    }.call);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"stopped\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pid\":") == null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/start", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"started\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"starting\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pid\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"port\":43123") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/restart", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"started\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"starting\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pid\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"port\":43123") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/stop", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"stopped\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"stopped\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pid\":") == null);
+    }
+}
+
+test "integration harness covers lifecycle error paths" {
+    {
+        var server = try IntegrationServer.start(std.testing.allocator);
+        defer server.deinit();
+
+        const start_resp = try server.fetch(.{ .path = "/api/instances/nullboiler/missing/start", .method = .POST });
+        defer start_resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, start_resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "not found") != null);
+
+        const stop_resp = try server.fetch(.{ .path = "/api/instances/nullboiler/missing/stop", .method = .POST });
+        defer stop_resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, stop_resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, stop_resp.body, "not found") != null);
+
+        const restart_resp = try server.fetch(.{ .path = "/api/instances/nullboiler/missing/restart", .method = .POST });
+        defer restart_resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, restart_resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, restart_resp.body, "not found") != null);
+    }
+
+    {
+        var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+            fn call(srv: *IntegrationServer) !void {
+                try seedManagedInstance(srv, "nullboiler", "demo");
+            }
+        }.call);
+        defer server.deinit();
+
+        const start_resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/start", .method = .POST });
+        defer start_resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.internal_server_error, start_resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "internal error") != null);
+
+        const restart_resp = try server.fetch(.{ .path = "/api/instances/nullboiler/demo/restart", .method = .POST });
+        defer restart_resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.internal_server_error, restart_resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, restart_resp.body, "internal error") != null);
+    }
+}
+
 test "integration harness covers orchestration proxy not configured" {
     var server = try IntegrationServer.start(std.testing.allocator);
     defer server.deinit();
@@ -316,4 +627,175 @@ test "integration harness covers orchestration proxy not configured" {
     defer resp.deinit(std.testing.allocator);
     try std.testing.expectEqual(std.http.Status.service_unavailable, resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "NullBoiler not configured") != null);
+}
+
+test "integration harness covers service route contracts" {
+    var server = try IntegrationServer.start(std.testing.allocator);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/service/install" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/service/uninstall" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/service/status", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.method_not_allowed, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "method not allowed") != null);
+    }
+}
+
+test "integration harness covers utility and versions routes" {
+    var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+        fn call(srv: *IntegrationServer) !void {
+            try seedFakeCurlReleases(srv);
+        }
+    }.call);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/free-port" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"port\":") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/wizard/nullclaw/versions" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"value\":\"v2026.4.1\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"label\":\"v2026.4.1\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "v2026.4.0-beta") == null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/wizard/missing-component/versions" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
+    }
+}
+
+test "integration harness covers wizard failure contracts" {
+    var server = try IntegrationServer.start(std.testing.allocator);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw",
+            .method = .POST,
+            .body = "{",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component",
+            .method = .POST,
+            .body = "{\"instance_name\":\"demo\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw/validate-providers",
+            .method = .POST,
+            .body = "{",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component/validate-providers",
+            .method = .POST,
+            .body = "{\"providers\":[]}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw/validate-channels",
+            .method = .POST,
+            .body = "{",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component/validate-channels",
+            .method = .POST,
+            .body = "{\"channels\":{}}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw/models",
+            .method = .POST,
+            .body = "{",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/nullclaw/models",
+            .method = .POST,
+            .body = "{\"provider\":\"\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "provider is required") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component/models",
+            .method = .POST,
+            .body = "{\"provider\":\"openrouter\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found or models unavailable") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/wizard/missing-component/models?provider=openai",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "component not found or models unavailable") != null);
+    }
 }
