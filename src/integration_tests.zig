@@ -327,6 +327,28 @@ fn seedLaunchableGatewayInstance(server: *IntegrationServer, component: []const 
     }
 }
 
+fn seedInstalledBinaryVersion(server: *IntegrationServer, component: []const u8, version: []const u8) !void {
+    const root = try server.nullhubRoot();
+    defer server.allocator.free(root);
+    try std_compat.fs.cwd().makePath(root);
+
+    const binary_name = try std.fmt.allocPrint(server.allocator, "{s}-{s}", .{ component, version });
+    defer server.allocator.free(binary_name);
+    const script =
+        \\#!/bin/sh
+        \\exit 0
+    ;
+    try writeSeedFile(server, &.{ root, "bin", binary_name }, script);
+
+    const binary_path = try std.fs.path.join(server.allocator, &.{ root, "bin", binary_name });
+    defer server.allocator.free(binary_path);
+    if (comptime std_compat.fs.has_executable_bit) {
+        const file = try std_compat.fs.openFileAbsolute(binary_path, .{});
+        defer file.close();
+        try file.chmod(0o755);
+    }
+}
+
 fn seedStandaloneInstall(server: *IntegrationServer, component: []const u8, config_json: []const u8) ![]const u8 {
     const dir_name = try std.fmt.allocPrint(server.allocator, ".{s}", .{component});
     defer server.allocator.free(dir_name);
@@ -640,6 +662,7 @@ test "integration harness covers standalone detection and import flow" {
         fn call(srv: *IntegrationServer) !void {
             const standalone_dir = try seedStandaloneInstall(srv, "nullclaw", "{\"instance_name\":\"existing-bot\",\"gateway\":{\"port\":3000}}\n");
             srv.allocator.free(standalone_dir);
+            try seedInstalledBinaryVersion(srv, "nullclaw", "1.0.0");
         }
     }.call);
     defer server.deinit();
