@@ -2,12 +2,36 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
-  import { orchestrationUiRoutes } from "$lib/orchestration/routes";
+  import { orchestrationUiRoutes, routePath } from "$lib/orchestration/routes";
+  import {
+    BOILER_INSTANCE_CHANGE_EVENT,
+    TICKETS_INSTANCE_CHANGE_EVENT,
+  } from "$lib/orchestration/backendSelection";
 
   let instances = $state<Record<string, any>>({});
   let installedComponents = $state<Record<string, any>>({});
   let currentPath = $derived($page.url.pathname);
-  let showOrchestration = $derived(Boolean(installedComponents["nullboiler"]?.installed));
+  let showBoilerOrchestration = $derived(Boolean(installedComponents["nullboiler"]?.installed));
+  let showTicketsStore = $derived(Boolean(installedComponents["nulltickets"]?.installed));
+  let showOrchestration = $derived(showBoilerOrchestration || showTicketsStore);
+  let boilerSelectionVersion = $state(0);
+  let ticketsSelectionVersion = $state(0);
+  let orchestrationDashboardHref = $derived.by(() => {
+    boilerSelectionVersion;
+    return orchestrationUiRoutes.dashboard();
+  });
+  let orchestrationWorkflowsHref = $derived.by(() => {
+    boilerSelectionVersion;
+    return orchestrationUiRoutes.workflows();
+  });
+  let orchestrationRunsHref = $derived.by(() => {
+    boilerSelectionVersion;
+    return orchestrationUiRoutes.runs();
+  });
+  let orchestrationStoreHref = $derived.by(() => {
+    ticketsSelectionVersion;
+    return orchestrationUiRoutes.store();
+  });
 
   async function loadSidebarState() {
     const [statusResult, componentsResult] = await Promise.allSettled([
@@ -29,7 +53,19 @@
   onMount(() => {
     void loadSidebarState();
     const interval = setInterval(loadSidebarState, 5000);
-    return () => clearInterval(interval);
+    const refreshBoilerLinks = () => {
+      boilerSelectionVersion += 1;
+    };
+    const refreshTicketsLinks = () => {
+      ticketsSelectionVersion += 1;
+    };
+    globalThis.addEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
+    globalThis.addEventListener?.(TICKETS_INSTANCE_CHANGE_EVENT, refreshTicketsLinks);
+    return () => {
+      clearInterval(interval);
+      globalThis.removeEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
+      globalThis.removeEventListener?.(TICKETS_INSTANCE_CHANGE_EVENT, refreshTicketsLinks);
+    };
   });
 </script>
 
@@ -68,10 +104,14 @@
   {#if showOrchestration}
     <div class="nav-section">
       <h3>Orchestration</h3>
-      <a href={orchestrationUiRoutes.dashboard()} class:active={currentPath === orchestrationUiRoutes.dashboard()}>Dashboard</a>
-      <a href={orchestrationUiRoutes.workflows()} class:active={currentPath.startsWith(orchestrationUiRoutes.workflows())}>Workflows</a>
-      <a href={orchestrationUiRoutes.runs()} class:active={currentPath.startsWith(orchestrationUiRoutes.runs())}>Runs</a>
-      <a href={orchestrationUiRoutes.store()} class:active={currentPath.startsWith(orchestrationUiRoutes.store())}>Store</a>
+      {#if showBoilerOrchestration}
+        <a href={orchestrationDashboardHref} class:active={currentPath === routePath(orchestrationDashboardHref)}>Dashboard</a>
+        <a href={orchestrationWorkflowsHref} class:active={currentPath.startsWith(routePath(orchestrationWorkflowsHref))}>Workflows</a>
+        <a href={orchestrationRunsHref} class:active={currentPath.startsWith(routePath(orchestrationRunsHref))}>Runs</a>
+      {/if}
+      {#if showTicketsStore}
+        <a href={orchestrationStoreHref} class:active={currentPath.startsWith(routePath(orchestrationStoreHref))}>Store</a>
+      {/if}
     </div>
   {/if}
 
@@ -81,6 +121,10 @@
 
   <div class="nav-section">
     <a href="/channels" class:active={currentPath === "/channels"}>Channels</a>
+  </div>
+
+  <div class="nav-section">
+    <a href="/observability" class:active={currentPath.startsWith("/observability")}>Observability</a>
   </div>
 
   <div class="nav-bottom">

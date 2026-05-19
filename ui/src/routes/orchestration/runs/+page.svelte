@@ -2,30 +2,69 @@
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
   import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
 
   let runs = $state<any[]>([]);
   let workflows = $state<any[]>([]);
   let loading = $state(true);
+  let loadingMore = $state(false);
   let error = $state<string | null>(null);
 
   let filterStatus = $state('');
   let filterWorkflow = $state('');
+  let runLimit = $state('50');
+  let hasMore = $state(false);
+  let nextOffset = $state<number | null>(null);
+  let runsQueryKey = $state('');
 
   const statuses = ['', 'running', 'pending', 'completed', 'failed', 'interrupted', 'cancelled'];
 
-  async function loadData() {
+  function boundedInt(raw: string, fallback: number, min: number, max: number): number {
+    const value = Number.parseInt(raw || String(fallback), 10);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function queryKey(): string {
+    return JSON.stringify({
+      status: filterStatus || '',
+      workflow: filterWorkflow || '',
+      limit: boundedInt(runLimit, 50, 1, 250),
+    });
+  }
+
+  async function loadData(append = false) {
+    if (append) loadingMore = true;
+    else loading = true;
     try {
-      const [r, w] = await Promise.all([
-        api.listRuns({ status: filterStatus || undefined, workflow_id: filterWorkflow || undefined }),
+      const key = queryKey();
+      const canAppend = append && runsQueryKey === key && nextOffset !== null;
+      const [page, w] = await Promise.all([
+        api.listRunsPage({
+          status: filterStatus || undefined,
+          workflow_id: filterWorkflow || undefined,
+          limit: boundedInt(runLimit, 50, 1, 250),
+          offset: canAppend ? nextOffset || 0 : 0,
+        }),
         api.listWorkflows(),
       ]);
-      runs = r || [];
+      const nextItems = page?.items || [];
+      if (canAppend) {
+        const seen = new Set(runs.map((run: any) => run.id));
+        runs = [...runs, ...nextItems.filter((run: any) => !seen.has(run.id))];
+      } else {
+        runs = nextItems;
+      }
+      runsQueryKey = key;
+      hasMore = Boolean(page?.hasMore && typeof page?.nextOffset === 'number');
+      nextOffset = hasMore ? page.nextOffset || 0 : null;
       workflows = w || [];
       error = null;
     } catch (e) {
       error = (e as Error).message;
     } finally {
-      loading = false;
+      if (append) loadingMore = false;
+      else loading = false;
     }
   }
 
@@ -33,6 +72,7 @@
     // Re-load when filters change (also runs on initial mount)
     filterStatus;
     filterWorkflow;
+    runLimit;
     void loadData();
   });
 
@@ -68,6 +108,7 @@
 <div class="page">
   <div class="header">
     <h1>Runs</h1>
+    <BoilerInstanceSelector onChange={() => { loading = true; error = null; void loadData(); }} />
   </div>
 
   {#if error}
@@ -91,6 +132,10 @@
           <option value={wf.id}>{wf.name || wf.id}</option>
         {/each}
       </select>
+    </div>
+    <div class="filter-group">
+      <label class="filter-label" for="limit-filter">Limit</label>
+      <input id="limit-filter" class="filter-input" bind:value={runLimit} inputmode="numeric" />
     </div>
   </div>
 
@@ -131,6 +176,13 @@
           </tbody>
         </table>
       </div>
+      {#if hasMore}
+        <div class="table-actions">
+          <button class="load-more" onclick={() => loadData(true)} disabled={loadingMore}>
+            {loadingMore ? 'Loading...' : 'Load More'}
+          </button>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -192,11 +244,47 @@
     border-color: var(--accent-dim);
     box-shadow: 0 0 4px var(--border-glow);
   }
+  .filter-input {
+    width: 6rem;
+    padding: 0.375rem 0.625rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    font-size: 0.8125rem;
+    font-family: var(--font-mono);
+    outline: none;
+  }
+  .filter-input:focus {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 4px var(--border-glow);
+  }
   .table-section {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 4px;
     padding: 1rem;
+  }
+  .table-actions {
+    display: flex;
+    justify-content: center;
+    padding-top: 1rem;
+  }
+  .load-more {
+    padding: 0.5rem 1rem;
+    background: var(--bg-surface);
+    color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    border-radius: 2px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    cursor: pointer;
+  }
+  .load-more:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .table-wrap {
     overflow-x: auto;

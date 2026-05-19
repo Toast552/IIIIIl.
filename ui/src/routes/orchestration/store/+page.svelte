@@ -1,5 +1,7 @@
 <script lang="ts">
   import { api } from '$lib/api/client';
+  import { getSelectedTicketsInstance } from '$lib/orchestration/backendSelection';
+  import TicketsInstanceSelector from '$lib/components/orchestration/TicketsInstanceSelector.svelte';
 
   let namespace = $state('');
   let browsedNamespace = $state('');
@@ -18,14 +20,28 @@
   let addSuccess = $state(false);
   let addLoading = $state(false);
 
-  async function browse() {
-    if (!namespace.trim()) return;
-    browsedNamespace = namespace.trim();
+  function ticketsTarget(): string | undefined {
+    return getSelectedTicketsInstance() || undefined;
+  }
+
+  function handleTicketsInstanceChange() {
+    error = null;
+    selectedEntry = null;
+    addError = null;
+    addSuccess = false;
+    if (browsedNamespace) void loadEntries(browsedNamespace);
+  }
+
+  async function loadEntries(targetNamespace: string) {
+    const trimmedNamespace = targetNamespace.trim();
+    if (!trimmedNamespace) return;
+    browsedNamespace = trimmedNamespace;
     loading = true;
     error = null;
     entries = [];
+    selectedEntry = null;
     try {
-      const result = await api.storeList(browsedNamespace);
+      const result = await api.storeList(browsedNamespace, ticketsTarget());
       entries = result || [];
     } catch (e) {
       error = (e as Error).message;
@@ -34,11 +50,19 @@
     }
   }
 
+  async function browse() {
+    await loadEntries(namespace);
+  }
+
+  function entryKey(entry: any): string {
+    return typeof entry === 'string' ? entry : String(entry?.key ?? entry);
+  }
+
   async function deleteEntry(key: string) {
     if (!confirm(`Delete key "${key}" from namespace "${browsedNamespace}"?`)) return;
     try {
-      await api.storeDelete(browsedNamespace, key);
-      entries = entries.filter((e) => e.key !== key);
+      await api.storeDelete(browsedNamespace, key, ticketsTarget());
+      entries = entries.filter((entry) => entryKey(entry) !== key);
       if (selectedEntry?.key === key) selectedEntry = null;
     } catch (e) {
       error = (e as Error).message;
@@ -46,13 +70,14 @@
   }
 
   async function viewEntry(entry: any) {
+    const key = entryKey(entry);
     try {
-      const full = await api.storeGet(browsedNamespace, entry.key);
+      const full = await api.storeGet(browsedNamespace, key, ticketsTarget());
       // nulltickets returns a StoreEntry {namespace, key, value, ...} — extract .value
-      selectedEntry = { key: entry.key, value: full?.value ?? full };
+      selectedEntry = { key, value: full?.value ?? full };
     } catch (e) {
       // fall back to inline value
-      selectedEntry = { key: entry.key, value: entry.value ?? entry };
+      selectedEntry = { key, value: entry.value ?? entry };
     }
   }
 
@@ -72,13 +97,13 @@
     }
     addLoading = true;
     try {
-      await api.storePut(addNamespace.trim(), addKey.trim(), parsed);
+      await api.storePut(addNamespace.trim(), addKey.trim(), parsed, ticketsTarget());
       addSuccess = true;
       addKey = '';
       addValue = '';
       // Refresh if we browsed the same namespace
       if (browsedNamespace === addNamespace.trim()) {
-        await browse();
+        await loadEntries(browsedNamespace);
       }
     } catch (e) {
       addError = (e as Error).message;
@@ -118,6 +143,9 @@
     <div class="left-panel">
       <div class="panel-section">
         <h2 class="panel-title">Browse Namespace</h2>
+        <div class="store-selector">
+          <TicketsInstanceSelector onChange={handleTicketsInstanceChange} />
+        </div>
         <div class="input-row">
           <input
             class="ns-input"
@@ -206,7 +234,7 @@
               <tbody>
                 {#each entries as entry}
                   <tr class="clickable" onclick={() => viewEntry(entry)}>
-                    <td class="mono">{entry.key ?? entry}</td>
+                    <td class="mono">{entryKey(entry)}</td>
                     <td class="mono value-preview">
                       {#if entry.value !== undefined}
                         {typeof entry.value === 'string'
@@ -219,7 +247,7 @@
                     <td class="actions-cell" onclick={(e) => e.stopPropagation()}>
                       <button
                         class="btn-danger-sm"
-                        onclick={() => deleteEntry(entry.key ?? entry)}
+                        onclick={() => deleteEntry(entryKey(entry))}
                       >Delete</button>
                     </td>
                   </tr>
@@ -300,6 +328,13 @@
   .input-row {
     display: flex;
     gap: 0.5rem;
+  }
+  .store-selector {
+    margin-bottom: 0.75rem;
+  }
+  .store-selector:empty {
+    display: none;
+    margin-bottom: 0;
   }
   .ns-input {
     flex: 1;
