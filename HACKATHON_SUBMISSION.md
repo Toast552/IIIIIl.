@@ -46,13 +46,15 @@ clear future path to real cross-service wiring.
 
 ## What Was Implemented
 
-- Added `src/api/mission_control.zig` with structured mission state, reset,
+- Added `src/core/mission_control.zig` with structured mission state, reset,
   launch, recover, deterministic phase progression, telemetry, graph nodes,
   graph edges, agent roles, failure details, and recovery details.
-- Added `src/api/mission_control/code_red.v1.json` as the versioned replay
+- Added `src/api/mission_control.zig` as the thin HTTP adapter for the local
+  mission state and command endpoints.
+- Added `src/core/mission_control/code_red.v1.json` as the versioned replay
   fixture for phase timing, graph, events, telemetry, and failure/recovery
   metadata.
-- Added `src/api/mission_control_replay.zig` to parse and validate replay
+- Added `src/core/mission_control_replay.zig` to parse and validate replay
   fixtures before serving mission state.
 - Added validated trace references in mission events so the demo can deep-link
   from Mission Control to `/observability?run_id=...` without requiring
@@ -90,14 +92,16 @@ clear future path to real cross-service wiring.
 
 ## Files Changed
 
-- `MISSION_CONTROL_PLAN.md`
+- `docs/plans/mission-control.md`
+- `src/core/mission_control.zig`
 - `src/api/mission_control.zig`
-- `src/api/mission_control_replay.zig`
-- `src/api/mission_control/code_red.v1.json`
+- `src/core/mission_control_replay.zig`
+- `src/core/mission_control/code_red.v1.json`
 - `src/api/meta.zig`
 - `src/root.zig`
 - `src/server.zig`
 - `ui/src/lib/api/client.ts`
+- `ui/src/lib/api/missionControl.ts`
 - `ui/src/lib/components/Sidebar.svelte`
 - `ui/src/routes/observability/+page.svelte`
 - `ui/src/routes/mission-control/+page.svelte`

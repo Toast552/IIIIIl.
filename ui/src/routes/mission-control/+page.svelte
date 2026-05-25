@@ -9,7 +9,7 @@
     MissionControlState,
     MissionControlTelemetry,
     MissionControlTraceRef,
-  } from '$lib/api/client';
+  } from '$lib/api/missionControl';
 
   type MissionAction = 'launch' | 'reset' | 'recover';
   const emptyControls: MissionControlControls = {
@@ -81,11 +81,57 @@
     },
   ];
 
+  type NullWatchRunSummary = {
+    run_id?: string;
+    span_count?: number;
+    eval_count?: number;
+    error_count?: number;
+    total_input_tokens?: number;
+    total_output_tokens?: number;
+    total_cost_usd?: number;
+    total_duration_ms?: number;
+    overall_verdict?: string;
+  };
+  type NullWatchSpan = {
+    operation?: string;
+    status?: string;
+    source?: string;
+    duration_ms?: number;
+    error_message?: string;
+    tool_name?: string;
+  };
+  type NullWatchEval = {
+    eval_key?: string;
+    verdict?: string;
+    score?: number;
+    scorer?: string;
+    dataset?: string;
+    notes?: string;
+  };
+  type TraceHydration = {
+    runId: string;
+    source: 'live' | 'replay';
+    summary: NullWatchRunSummary | null;
+    spans: NullWatchSpan[];
+    evals: NullWatchEval[];
+    error: string | null;
+    loadedAtMs: number;
+  };
+  type NullWatchOption = {
+    name: string;
+    status: string;
+  };
+
   let mission = $state<MissionControlState | null>(null);
   let loading = $state(true);
   let acting = $state<MissionAction | null>(null);
   let exporting = $state(false);
   let error = $state<string | null>(null);
+  let traceHydration = $state<Record<string, TraceHydration>>({});
+  let traceHydrating = $state(false);
+  let traceWatchName = $state<string | null>(null);
+  let traceHydrationRequest = 0;
+  let traceWatchCheckedAt = 0;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
 
@@ -97,6 +143,14 @@
   const controls = $derived(mission?.controls || emptyControls);
   const modeLabel = $derived((mission?.mode || 'deterministic_local_replay').replaceAll('_', ' '));
   const activePoll = $derived(mission?.status === 'running' || mission?.status === 'intervention_required');
+  const failedRunId = $derived(mission?.failure?.run_id || mission?.failed_run_id || '');
+  const recoveredRunId = $derived(mission?.recovery?.run_id || mission?.recovered_run_id || '');
+  const failedTrace = $derived(failedRunId ? traceHydration[failedRunId] || null : null);
+  const recoveredTrace = $derived(recoveredRunId ? traceHydration[recoveredRunId] || null : null);
+  const liveTraceAvailable = $derived(
+    failedTrace?.source === 'live' || recoveredTrace?.source === 'live',
+  );
+  const displayTelemetry = $derived(hydratedTelemetry(telemetry, [failedTrace, recoveredTrace]));
 
   function schedulePoll() {
     if (disposed) return;
@@ -106,7 +160,9 @@
 
   async function loadMission() {
     try {
-      mission = await api.getMissionControlState();
+      const nextMission = await api.getMissionControlState();
+      mission = nextMission;
+      void hydrateTracePanels(nextMission);
       error = null;
     } catch (e) {
       error = (e as Error).message;
@@ -123,9 +179,14 @@
     }
     acting = name;
     try {
-      if (name === 'launch') mission = await api.launchMissionControl();
-      if (name === 'reset') mission = await api.resetMissionControl();
-      if (name === 'recover') mission = await api.recoverMissionControl();
+      let nextMission: MissionControlState | null = null;
+      if (name === 'launch') nextMission = await api.launchMissionControl();
+      if (name === 'reset') nextMission = await api.resetMissionControl();
+      if (name === 'recover') nextMission = await api.recoverMissionControl();
+      if (nextMission) {
+        mission = nextMission;
+        void hydrateTracePanels(nextMission);
+      }
       error = null;
     } catch (e) {
       error = (e as Error).message;
@@ -165,6 +226,120 @@
     disposed = true;
     if (pollTimer) clearTimeout(pollTimer);
   });
+
+  async function hydrateTracePanels(snapshot: MissionControlState) {
+    const runIds = tracePanelRunIds(snapshot);
+    const requestId = ++traceHydrationRequest;
+    if (runIds.length === 0) {
+      traceHydration = {};
+      traceHydrating = false;
+      return;
+    }
+
+    traceHydrating = true;
+    const watch = await availableNullWatchName();
+    if (disposed || requestId !== traceHydrationRequest) return;
+    if (!watch) {
+      traceHydration = Object.fromEntries(
+        runIds.map((runId) => [runId, replayTraceHydration(runId, 'No running NullWatch instance.')]),
+      );
+      traceHydrating = false;
+      return;
+    }
+
+    const entries = await Promise.all(runIds.map((runId) => loadTraceHydration(runId, watch)));
+    if (disposed || requestId !== traceHydrationRequest) return;
+
+    traceHydration = Object.fromEntries(entries.map((entry) => [entry.runId, entry]));
+    traceHydrating = false;
+  }
+
+  async function availableNullWatchName(): Promise<string | null> {
+    const now = Date.now();
+    if (now - traceWatchCheckedAt < 5000) return traceWatchName;
+    traceWatchCheckedAt = now;
+
+    try {
+      const status = await api.getStatus();
+      traceWatchName = preferredTraceWatchName(status);
+    } catch {
+      traceWatchName = null;
+    }
+    return traceWatchName;
+  }
+
+  function preferredTraceWatchName(status: any): string | null {
+    const watches = extractNullWatchOptions(status);
+    const running = watches.find((watch) => watch.status === 'running');
+    if (running) return running.name;
+    const starting = watches.find((watch) => watch.status === 'starting' || watch.status === 'restarting');
+    return starting?.name || null;
+  }
+
+  function extractNullWatchOptions(status: any): NullWatchOption[] {
+    const instances = status?.instances?.nullwatch || {};
+    return Object.entries(instances).map(([name, info]: [string, any]) => ({
+      name,
+      status: info?.status || 'stopped',
+    }));
+  }
+
+  async function loadTraceHydration(runId: string, watch: string): Promise<TraceHydration> {
+    try {
+      const listed = await api.getObservabilityRuns({ run_id: runId, limit: 1, watch });
+      const found = Array.isArray(listed?.items) && listed.items.some((item: any) => item?.run_id === runId);
+      if (!found) return replayTraceHydration(runId, 'NullWatch has not reported this replay run.');
+
+      const detail = await api.getObservabilityRun(runId, { watch });
+      const summary = normalizeRunSummary(detail, runId);
+      const spans = Array.isArray(detail?.spans) ? detail.spans : [];
+      const evals = Array.isArray(detail?.evals) ? detail.evals : [];
+      const source = summary || spans.length > 0 || evals.length > 0 ? 'live' : 'replay';
+      return {
+        runId,
+        source,
+        summary,
+        spans,
+        evals,
+        error: null,
+        loadedAtMs: Date.now(),
+      };
+    } catch (e) {
+      return replayTraceHydration(runId, (e as Error).message);
+    }
+  }
+
+  function replayTraceHydration(runId: string, error: string | null): TraceHydration {
+    return {
+      runId,
+      source: 'replay',
+      summary: null,
+      spans: [],
+      evals: [],
+      error,
+      loadedAtMs: Date.now(),
+    };
+  }
+
+  function tracePanelRunIds(snapshot: MissionControlState): string[] {
+    const ids: string[] = [];
+    addRunId(ids, snapshot.failure?.run_id || snapshot.failed_run_id);
+    addRunId(ids, snapshot.recovery?.run_id || snapshot.recovered_run_id);
+    return ids;
+  }
+
+  function addRunId(ids: string[], runId: string | null | undefined) {
+    if (runId && !ids.includes(runId)) ids.push(runId);
+  }
+
+  function normalizeRunSummary(detail: any, runId: string): NullWatchRunSummary | null {
+    const summary = detail?.summary || detail?.run || null;
+    if (!summary || typeof summary !== 'object') return null;
+    return {
+      ...summary,
+      run_id: summary.run_id || runId,
+    };
+  }
 
   function statusClass(value: string | undefined): string {
     if (value === 'done' || value === 'completed' || value === 'pass') return 'done';
@@ -207,6 +382,10 @@
     return tokens ? tokens.toLocaleString() : '0';
   }
 
+  function formatScore(score: number | undefined | null): string {
+    return score == null ? '-' : score.toFixed(2);
+  }
+
   function observabilityHref(runId: string | null | undefined): string {
     return runId ? `/observability?run_id=${encodeURIComponent(runId)}` : '/observability';
   }
@@ -221,7 +400,108 @@
     return `nullhub-${scenario}-${phase}-replay.json`;
   }
 
+  function spanCount(trace: TraceHydration | null): number {
+    return trace?.summary?.span_count ?? trace?.spans.length ?? 0;
+  }
+
+  function evalCount(trace: TraceHydration | null): number {
+    return trace?.summary?.eval_count ?? trace?.evals.length ?? 0;
+  }
+
+  function errorCount(trace: TraceHydration | null): number {
+    if (!trace) return 0;
+    return trace.summary?.error_count ?? trace.spans.filter((span) => span.status === 'error' || span.error_message).length;
+  }
+
+  function tokenCount(trace: TraceHydration | null): number {
+    if (!trace?.summary) return 0;
+    return (trace.summary.total_input_tokens || 0) + (trace.summary.total_output_tokens || 0);
+  }
+
+  function traceCost(trace: TraceHydration | null): number {
+    return trace?.summary?.total_cost_usd || 0;
+  }
+
+  function traceVerdict(trace: TraceHydration | null): string | null {
+    if (!trace || trace.source !== 'live') return null;
+    if (trace.summary?.overall_verdict) return trace.summary.overall_verdict;
+    const failedEval = trace.evals.find((evaluation) => evaluation.verdict === 'fail');
+    if (failedEval) return 'fail';
+    const passedEval = trace.evals.find((evaluation) => evaluation.verdict === 'pass');
+    if (passedEval) return 'pass';
+    return 'live';
+  }
+
+  function traceSuffix(trace: TraceHydration | null): string {
+    return trace?.source === 'live' ? ` · ${spanCount(trace)} spans · ${evalCount(trace)} evals` : '';
+  }
+
+  function traceSourceLabel(trace: TraceHydration | null, runId: string | null | undefined): string {
+    if (!runId) return 'Pending';
+    if (trace?.source === 'live') return 'Live NullWatch';
+    if (traceHydrating) return 'Checking NullWatch';
+    return 'Replay refs';
+  }
+
+  function traceSourceSummary(): string {
+    if (liveTraceAvailable) return 'Live NullWatch';
+    if (traceHydrating && (failedRunId || recoveredRunId)) return 'Checking NullWatch';
+    return 'Replay refs';
+  }
+
+  function tracePanelNote(): string {
+    if (liveTraceAvailable) return 'Hydrated run detail';
+    if (traceHydrating && (failedRunId || recoveredRunId)) return 'Looking for live traces';
+    if (failedTrace?.error || recoveredTrace?.error) return 'Using embedded replay refs';
+    return 'Run panels pending';
+  }
+
+  function primaryErrorText(trace: TraceHydration | null): string {
+    if (!trace || trace.source !== 'live') return '';
+    const span = trace.spans.find((item) => item.status === 'error' || item.error_message);
+    if (!span) return '';
+    const operation = span.operation || span.tool_name || 'span';
+    const detail = span.error_message || span.status || 'error';
+    return `${operation}: ${detail}`;
+  }
+
+  function primaryEvalText(trace: TraceHydration | null, evalKey?: string): string {
+    if (!trace || trace.source !== 'live') return '';
+    const evaluation =
+      (evalKey ? trace.evals.find((item) => item.eval_key === evalKey) : null) ||
+      trace.evals.find((item) => item.verdict === 'fail') ||
+      trace.evals[0];
+    if (!evaluation) return '';
+    const key = evaluation.eval_key || 'eval';
+    const verdict = evaluation.verdict || 'unknown';
+    return `${key}: ${verdict} (${formatScore(evaluation.score)})`;
+  }
+
+  function traceFallbackText(trace: TraceHydration | null): string {
+    if (!trace || trace.source === 'live') return '';
+    return trace.error ? 'Live NullWatch detail unavailable for this run.' : 'Live NullWatch detail has not reported this run yet.';
+  }
+
+  function hydratedTelemetry(base: MissionControlTelemetry, traces: (TraceHydration | null)[]): MissionControlTelemetry {
+    const liveTraces = traces.filter((trace): trace is TraceHydration => trace?.source === 'live');
+    if (liveTraces.length === 0) return base;
+
+    const verdicts = liveTraces.map(traceVerdict).filter((value): value is string => Boolean(value));
+    return {
+      ...base,
+      runs: liveTraces.length,
+      spans: liveTraces.reduce((total, trace) => total + spanCount(trace), 0),
+      evals: liveTraces.reduce((total, trace) => total + evalCount(trace), 0),
+      errors: liveTraces.reduce((total, trace) => total + errorCount(trace), 0),
+      total_tokens: liveTraces.reduce((total, trace) => total + tokenCount(trace), 0),
+      total_cost_usd: liveTraces.reduce((total, trace) => total + traceCost(trace), 0),
+      verdict: verdicts.includes('fail') ? 'fail' : verdicts.includes('pass') ? 'pass' : base.verdict,
+    };
+  }
+
   function runVerdict(kind: 'failed' | 'recovered'): string {
+    const liveVerdict = traceVerdict(kind === 'failed' ? failedTrace : recoveredTrace);
+    if (liveVerdict && liveVerdict !== 'live') return liveVerdict;
     if (kind === 'failed') return mission?.failure ? 'fail' : 'pending';
     if (!mission?.recovery) return 'pending';
     return mission.status === 'completed' ? 'pass' : 'recovering';
@@ -353,29 +633,30 @@
       <section class="telemetry-panel">
         <div class="panel-heading">
           <h2>Telemetry</h2>
-          <span>{telemetry.verdict || '-'}</span>
+          <span>{displayTelemetry.verdict || '-'}</span>
         </div>
         <div class="metric-grid">
-          <div><span>Runs</span><strong>{telemetry.runs || 0}</strong></div>
-          <div><span>Spans</span><strong>{telemetry.spans || 0}</strong></div>
-          <div><span>Evals</span><strong>{telemetry.evals || 0}</strong></div>
-          <div><span>Errors</span><strong class:error={(telemetry.errors || 0) > 0}>{telemetry.errors || 0}</strong></div>
-          <div><span>Tokens</span><strong>{formatTokens(telemetry.total_tokens)}</strong></div>
-          <div><span>Cost</span><strong>{formatCost(telemetry.total_cost_usd)}</strong></div>
+          <div><span>Runs</span><strong>{displayTelemetry.runs || 0}</strong></div>
+          <div><span>Spans</span><strong>{displayTelemetry.spans || 0}</strong></div>
+          <div><span>Evals</span><strong>{displayTelemetry.evals || 0}</strong></div>
+          <div><span>Errors</span><strong class:error={(displayTelemetry.errors || 0) > 0}>{displayTelemetry.errors || 0}</strong></div>
+          <div><span>Tokens</span><strong>{formatTokens(displayTelemetry.total_tokens)}</strong></div>
+          <div><span>Cost</span><strong>{formatCost(displayTelemetry.total_cost_usd)}</strong></div>
         </div>
 
         <div class="trace-card">
           <div>
             <span>Traceability</span>
-            <strong>NullWatch-style refs</strong>
+            <strong>{traceSourceSummary()}</strong>
+            <em>{tracePanelNote()}</em>
           </div>
           {#if mission.failed_run_id || mission.failure}
-            <a href={observabilityHref(mission.failed_run_id || mission.failure?.run_id)}>Failed run</a>
+            <a href={observabilityHref(failedRunId)}>Failed run{traceSuffix(failedTrace)}</a>
           {:else}
             <span class="trace-placeholder">Failed pending</span>
           {/if}
           {#if mission.recovered_run_id || mission.recovery}
-            <a href={observabilityHref(mission.recovered_run_id || mission.recovery?.run_id)}>Recovered run</a>
+            <a href={observabilityHref(recoveredRunId)}>Recovered run{traceSuffix(recoveredTrace)}</a>
           {:else}
             <span class="trace-placeholder">Recovery pending</span>
           {/if}
@@ -388,6 +669,27 @@
             <p>{mission.failure.error_message}</p>
             <code>{mission.failure.checkpoint_id}</code>
             <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
+            <div class="trace-detail {failedTrace?.source || 'replay'}">
+              <div class="trace-detail-top">
+                <span>{traceSourceLabel(failedTrace, mission.failure.run_id)}</span>
+                <strong>{traceVerdict(failedTrace) || runVerdict('failed')}</strong>
+              </div>
+              {#if failedTrace?.source === 'live'}
+                <dl class="trace-stats">
+                  <div><dt>Spans</dt><dd>{spanCount(failedTrace)}</dd></div>
+                  <div><dt>Evals</dt><dd>{evalCount(failedTrace)}</dd></div>
+                  <div><dt>Errors</dt><dd>{errorCount(failedTrace)}</dd></div>
+                </dl>
+                {#if primaryErrorText(failedTrace)}
+                  <p class="trace-evidence">{primaryErrorText(failedTrace)}</p>
+                {/if}
+                {#if primaryEvalText(failedTrace, 'tool_success')}
+                  <p class="trace-evidence">{primaryEvalText(failedTrace, 'tool_success')}</p>
+                {/if}
+              {:else if traceFallbackText(failedTrace)}
+                <p class="trace-evidence">{traceFallbackText(failedTrace)}</p>
+              {/if}
+            </div>
           </div>
         {/if}
 
@@ -398,6 +700,27 @@
             <p>{mission.recovery.human_instruction}</p>
             <code>{mission.recovery.run_id}</code>
             <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
+            <div class="trace-detail {recoveredTrace?.source || 'replay'}">
+              <div class="trace-detail-top">
+                <span>{traceSourceLabel(recoveredTrace, mission.recovery.run_id)}</span>
+                <strong>{traceVerdict(recoveredTrace) || runVerdict('recovered')}</strong>
+              </div>
+              {#if recoveredTrace?.source === 'live'}
+                <dl class="trace-stats">
+                  <div><dt>Spans</dt><dd>{spanCount(recoveredTrace)}</dd></div>
+                  <div><dt>Evals</dt><dd>{evalCount(recoveredTrace)}</dd></div>
+                  <div><dt>Errors</dt><dd>{errorCount(recoveredTrace)}</dd></div>
+                </dl>
+                {#if primaryErrorText(recoveredTrace)}
+                  <p class="trace-evidence">{primaryErrorText(recoveredTrace)}</p>
+                {/if}
+                {#if primaryEvalText(recoveredTrace, 'tool_success')}
+                  <p class="trace-evidence">{primaryEvalText(recoveredTrace, 'tool_success')}</p>
+                {/if}
+              {:else if traceFallbackText(recoveredTrace)}
+                <p class="trace-evidence">{traceFallbackText(recoveredTrace)}</p>
+              {/if}
+            </div>
           </div>
         {/if}
       </section>
@@ -429,6 +752,9 @@
             </dl>
             {#if mission.failure}
               <p>{mission.failure.error_message}</p>
+              {#if failedTrace?.source === 'live'}
+                <p class="trace-evidence">{spanCount(failedTrace)} spans · {evalCount(failedTrace)} evals · {formatCost(traceCost(failedTrace))}</p>
+              {/if}
               <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
             {/if}
           </div>
@@ -452,6 +778,9 @@
             </dl>
             {#if mission.recovery}
               <p>{mission.recovery.status}</p>
+              {#if recoveredTrace?.source === 'live'}
+                <p class="trace-evidence">{spanCount(recoveredTrace)} spans · {evalCount(recoveredTrace)} evals · {formatCost(traceCost(recoveredTrace))}</p>
+              {/if}
               <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
             {:else}
               <p>Waiting for human checkpoint fork.</p>
@@ -908,6 +1237,72 @@
     gap: 0.75rem;
   }
 
+  .trace-card em {
+    display: block;
+    color: var(--fg-muted);
+    font-size: 0.72rem;
+    font-style: normal;
+  }
+
+  .trace-detail {
+    margin-top: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--bg-surface) 70%, transparent);
+    padding: 0.75rem;
+  }
+
+  .trace-detail.live {
+    border-color: var(--accent-dim);
+  }
+
+  .trace-detail-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .trace-detail-top strong {
+    margin-bottom: 0;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    overflow-wrap: anywhere;
+  }
+
+  .trace-stats {
+    margin: 0.75rem 0 0;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
+  }
+
+  .trace-stats dt,
+  .trace-stats dd {
+    margin: 0;
+  }
+
+  .trace-stats dt {
+    color: var(--fg-muted);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+  }
+
+  .trace-stats dd {
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+  }
+
+  .trace-evidence {
+    margin: 0.65rem 0 0;
+    color: var(--fg-muted);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+
   .failure-box strong,
   .recovery-box strong,
   .trace-card strong,
@@ -923,6 +1318,15 @@
     color: var(--fg-muted);
     font-size: 0.8125rem;
     margin-bottom: 0.65rem;
+  }
+
+  .failure-box p.trace-evidence,
+  .recovery-box p.trace-evidence,
+  .run-card p.trace-evidence {
+    margin: 0.65rem 0 0;
+    color: var(--fg-muted);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
   }
 
   code {

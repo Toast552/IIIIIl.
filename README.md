@@ -161,13 +161,17 @@ schema version, scenario id, deterministic replay mode, controls, graph,
 timeline, telemetry, NullWatch-style run/span/eval trace references, and
 structured conflict errors for invalid actions. The scenario lives in a
 versioned embedded replay fixture at
-`src/api/mission_control/code_red.v1.json`; `zig build test` validates fixture
+`src/core/mission_control/code_red.v1.json`; `zig build test` validates fixture
 schema, references, ordering, required phases, graph links, and telemetry phase
 coverage. Mission timeline trace links deep-link to `/observability?run_id=...`
 so a real NullWatch instance can attach detailed spans and evals without making
-the local demo depend on external infrastructure. `GET /api/mission-control/replay`
-exports the current snapshot, source fixture, and ecosystem mapping metadata as
-a portable JSON artifact for debugging and review.
+the local demo depend on external infrastructure. When a managed NullWatch
+instance is running, `/mission-control` also hydrates the failure and recovery
+trace panels from live run detail through the observability proxy, and falls
+back to embedded replay references when NullWatch is unavailable.
+`GET /api/mission-control/replay` exports the current snapshot, source fixture,
+and ecosystem mapping metadata as a portable JSON artifact for debugging and
+review.
 
 ### Mission Control Demo
 
@@ -286,10 +290,11 @@ src/
   api/                  # REST endpoints (components, instances, wizard, ...)
     orchestration.zig   # Reverse proxy to NullBoiler orchestration API
     observability.zig   # Reverse proxy to NullWatch tracing/eval API
-    mission_control.zig # Local deterministic agent mission demo API
+    mission_control.zig # HTTP adapter for local mission demo commands
+  core/                 # Manifest parser, state, platform, paths
+    mission_control.zig # Local deterministic agent mission domain model
     mission_control_replay.zig # Typed replay fixture parser and validator
     mission_control/    # Embedded Mission Control replay fixtures
-  core/                 # Manifest parser, state, platform, paths
   installer/            # Download, build, UI module fetching
   supervisor/           # Process spawn, health checks, manager
 ui/src/

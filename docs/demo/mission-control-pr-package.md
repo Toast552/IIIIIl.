@@ -21,14 +21,20 @@ What changed:
 
 - Added `/api/mission-control/*` for mission state, reset, launch, recovery,
   and replay export.
+- Added a Mission Control domain/state-machine layer in
+  `src/core/mission_control.zig` and kept `src/api/mission_control.zig` as the
+  HTTP adapter.
 - Added a versioned replay fixture at
-  `src/api/mission_control/code_red.v1.json`.
+  `src/core/mission_control/code_red.v1.json`.
 - Added replay fixture parsing and validation in
-  `src/api/mission_control_replay.zig`.
+  `src/core/mission_control_replay.zig`.
 - Added `/mission-control` UI with mission controls, role board, workflow
   graph, telemetry, timeline, trace links, story beats, and failed-vs-recovered
   comparison.
 - Added deep links from mission events to `/observability?run_id=...`.
+- Hydrates failure/recovery trace panels from a running NullWatch instance via
+  the existing observability proxy when live run detail is available, with
+  embedded replay refs as the fallback.
 - Added local smoke test, judge-mode demo driver, macOS video recorder,
   screenshots, README docs, and hackathon submission notes.
 
@@ -175,7 +181,6 @@ This PR intentionally does not:
 
 ## Future Work
 
-- Hydrate replay trace panels from a running NullWatch instance when available.
 - Connect real NullBoiler workflow run ids and checkpoint metadata.
 - Compare failed and recovered replay artifacts side by side.
 - Add durable mission replay storage.

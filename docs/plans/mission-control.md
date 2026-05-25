@@ -69,8 +69,8 @@ Day 1 - Harden the local Mission Control product slice.
 Day 2 - Make replay data maintainable.
 
 - Status: DONE
-- Moved scenario content into `src/api/mission_control/code_red.v1.json`.
-- Added `src/api/mission_control_replay.zig` as the typed replay contract.
+- Moved scenario content into `src/core/mission_control/code_red.v1.json`.
+- Added `src/core/mission_control_replay.zig` as the typed replay contract.
 - Added fixture validation tests for schema version, duplicate ids, graph
   references, telemetry references, ordering, required fields, and required
   phases.
@@ -80,6 +80,8 @@ Day 3 - Add observability affordances.
 - Status: DONE
 - Link mission run ids and events to NullWatch-style trace/eval concepts.
 - Add Flight Recorder deep links via `/observability?run_id=...`.
+- Hydrate failure/recovery trace panels from live NullWatch run detail when a
+  managed instance is running.
 - Keep the UI useful without NullWatch running.
 
 Day 4 - Strengthen demo automation.
@@ -120,7 +122,7 @@ Day 7 - Stabilize for submission.
 
 ## Stretch Scope
 
-- Drive real NullTickets/NullBoiler/NullWatch APIs when configured.
+- Drive real NullTickets/NullBoiler action APIs when configured.
 - Side-by-side replay comparison.
 - Animated graph edges and span waterfall.
 - Judge mode: one button to reset and replay the full cinematic demo.
