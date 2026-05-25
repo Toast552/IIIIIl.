@@ -3,6 +3,7 @@ const std_compat = @import("compat");
 const net_compat = @import("net_compat.zig");
 const auth = @import("auth.zig");
 const instances_api = @import("api/instances.zig");
+const proxy_api = @import("api/proxy.zig");
 const platform = @import("core/platform.zig");
 const components_api = @import("api/components.zig");
 const config_api = @import("api/config.zig");
@@ -35,7 +36,8 @@ const ui_assets = @import("ui_assets");
 const version = @import("version.zig");
 const test_helpers = @import("test_helpers.zig");
 
-const max_request_size: usize = 65_536;
+const max_request_size: usize = 25 * 1024 * 1024;
+const initial_request_buffer_size: usize = 64 * 1024;
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -459,7 +461,7 @@ pub const Server = struct {
     }
 
     fn handleConnection(self: *Server, conn: std_compat.net.Server.Connection, alloc: std.mem.Allocator) !void {
-        var req_buf: [max_request_size]u8 = undefined;
+        var req_buf: [initial_request_buffer_size]u8 = undefined;
         const n = net_compat.streamRead(conn.stream, &req_buf) catch return;
         if (n == 0) return;
         const raw = req_buf[0..n];
@@ -512,6 +514,44 @@ pub const Server = struct {
                     .body = "{\"error\":\"unauthorized\"}",
                 }, raw, self.host, self.port, extra_origins);
                 return;
+            }
+        }
+
+        if (instances_api.isGatewayProxyPath(target)) {
+            const prepared = blk: {
+                self.mutex.lock();
+                defer self.mutex.unlock();
+                break :blk instances_api.prepareGatewayProxy(alloc, self.state, self.manager, self.paths, method, target, body);
+            };
+            switch (prepared) {
+                .no_match => {},
+                .response => |response| {
+                    try sendResponse(conn.stream, .{ .status = response.status, .content_type = response.content_type, .body = response.body }, raw, self.host, self.port, extra_origins);
+                    return;
+                },
+                .upstream => |upstream| {
+                    defer upstream.deinit(alloc);
+                    const cors_headers = try buildCorsHeaders(alloc, raw, self.host, self.port, extra_origins);
+                    defer alloc.free(cors_headers);
+                    const base_url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{upstream.port});
+                    defer alloc.free(base_url);
+                    const proxy_options = proxy_api.ForwardOptions{
+                        .method = method,
+                        .base_url = base_url,
+                        .path = upstream.upstream_path,
+                        .body = upstream.body,
+                        .bearer_token = upstream.token,
+                        .accept = if (upstream.event_stream) "text/event-stream" else null,
+                        .unreachable_body = "{\"error\":\"nullclaw gateway unreachable\"}",
+                    };
+                    if (upstream.event_stream) {
+                        try proxy_api.forwardStream(alloc, proxy_options, conn.stream, cors_headers);
+                    } else {
+                        const proxied = proxy_api.forward(alloc, proxy_options);
+                        try sendResponse(conn.stream, .{ .status = proxied.status, .content_type = proxied.content_type, .body = proxied.body }, raw, self.host, self.port, extra_origins);
+                    }
+                    return;
+                },
             }
         }
 
@@ -1548,6 +1588,13 @@ fn appendCorsHeaders(writer: anytype, raw_request: []const u8, bind_host: []cons
     try writer.writeAll("Vary: Origin\r\n");
 }
 
+fn buildCorsHeaders(allocator: std.mem.Allocator, raw_request: []const u8, bind_host: []const u8, port: u16, extra_origins: []const []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try appendCorsHeaders(&out.writer, raw_request, bind_host, port, extra_origins);
+    return try out.toOwnedSlice();
+}
+
 fn allowedCorsOrigin(raw_request: []const u8, bind_host: []const u8, port: u16, extra_origins: []const []const u8) ?[]const u8 {
     const origin = extractHeader(raw_request, "Origin") orelse return null;
     if (!isAllowedCorsOrigin(origin, bind_host, port, extra_origins)) return null;
@@ -2562,6 +2609,11 @@ test "Server init sets fields" {
 
 test "contentType returns correct MIME type for .html" {
     try std.testing.expectEqualStrings("text/html", contentType("index.html"));
+}
+
+test "initial request buffer stays small while media body limit remains high" {
+    try std.testing.expect(initial_request_buffer_size <= 128 * 1024);
+    try std.testing.expect(max_request_size >= 25 * 1024 * 1024);
 }
 
 test "contentType returns correct MIME type for .js" {
