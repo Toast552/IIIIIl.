@@ -169,8 +169,12 @@ pub fn forwardStream(allocator: Allocator, opts: ForwardOptions, downstream: std
     const status = mapStatus(@intCast(@min(status_code, 999)));
     const content_type = extractHttpHeader(upstream_headers, "Content-Type") orelse
         if (status_code >= 200 and status_code < 300) (opts.accept orelse "application/octet-stream") else "application/json";
+    const upstream_chunked = if (extractHttpHeader(upstream_headers, "Transfer-Encoding")) |value|
+        headerValueContainsToken(value, "chunked")
+    else
+        false;
 
-    try writeStreamingResponseHeaders(downstream, status, content_type, cors_headers);
+    try writeStreamingResponseHeaders(downstream, status, content_type, cors_headers, upstream_chunked);
     if (header_len > body_start) {
         try net_compat.streamWriteAll(downstream, header_buf[body_start..header_len]);
     }
@@ -215,6 +219,15 @@ fn extractHttpHeader(headers: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
+fn headerValueContainsToken(value: []const u8, token: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, value, ',');
+    while (parts.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " \t");
+        if (std.ascii.eqlIgnoreCase(trimmed, token)) return true;
+    }
+    return false;
+}
+
 fn writeDirectResponse(stream: std_compat.net.Stream, status: []const u8, content_type: []const u8, body: []const u8, cors_headers: []const u8) !void {
     var buf: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
@@ -232,13 +245,16 @@ fn writeDirectResponse(stream: std_compat.net.Stream, status: []const u8, conten
     if (body.len > 0) try net_compat.streamWriteAll(stream, body);
 }
 
-fn writeStreamingResponseHeaders(stream: std_compat.net.Stream, status: []const u8, content_type: []const u8, cors_headers: []const u8) !void {
+fn writeStreamingResponseHeaders(stream: std_compat.net.Stream, status: []const u8, content_type: []const u8, cors_headers: []const u8, transfer_encoding_chunked: bool) !void {
     var buf: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try writer.print("HTTP/1.1 {s}\r\n", .{status});
     try writer.print("Content-Type: {s}\r\n", .{content_type});
     try writer.writeAll("Cache-Control: no-cache\r\n");
     try writer.writeAll("X-Accel-Buffering: no\r\n");
+    if (transfer_encoding_chunked) {
+        try writer.writeAll("Transfer-Encoding: chunked\r\n");
+    }
     try writer.writeAll(cors_headers);
     try writer.writeAll("Connection: close\r\n\r\n");
     try net_compat.streamWriteAll(stream, writer.buffered());
@@ -280,4 +296,10 @@ test "isPathInNamespace matches exact and slash-delimited paths" {
     try std.testing.expect(!isPathInNamespace("/api/observability?limit=1", "/api/observability"));
     try std.testing.expect(!isPathInNamespace("/api/observability-extra", "/api/observability"));
     try std.testing.expect(!isPathInNamespace("/api/orchestration", "/api/observability"));
+}
+
+test "headerValueContainsToken detects comma-separated transfer encodings" {
+    try std.testing.expect(headerValueContainsToken("gzip, chunked", "chunked"));
+    try std.testing.expect(headerValueContainsToken(" Chunked ", "chunked"));
+    try std.testing.expect(!headerValueContainsToken("gzip", "chunked"));
 }

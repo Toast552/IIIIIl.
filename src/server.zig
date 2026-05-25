@@ -493,7 +493,16 @@ pub const Server = struct {
         }
 
         // Read remaining body if Content-Length indicates more data
-        const body = readBody(raw, n, conn.stream, alloc) catch return;
+        const body = readBody(raw, n, conn.stream, alloc) catch |err| {
+            if (err == error.RequestTooLarge) {
+                try sendResponse(conn.stream, .{
+                    .status = "413 Payload Too Large",
+                    .content_type = "application/json",
+                    .body = "{\"error\":\"request body too large\"}",
+                }, raw, self.host, self.port, extra_origins);
+            }
+            return;
+        };
 
         // Handle OPTIONS preflight
         if (std.mem.eql(u8, method, "OPTIONS")) {
@@ -1496,8 +1505,8 @@ fn readBody(raw: []const u8, n: usize, stream: std_compat.net.Stream, alloc: std
                 return raw[body_start .. body_start + content_length];
             }
             // Need to read more data from the stream
+            if (requestBodyExceedsLimit(content_length)) return error.RequestTooLarge;
             const total_size = body_start + content_length;
-            if (total_size > max_request_size) return error.RequestTooLarge;
             const full_buf = try alloc.alloc(u8, total_size);
             @memcpy(full_buf[0..n], raw);
             var total_read = n;
@@ -1510,6 +1519,10 @@ fn readBody(raw: []const u8, n: usize, stream: std_compat.net.Stream, alloc: std
         }
     }
     return extractBody(raw);
+}
+
+fn requestBodyExceedsLimit(content_length: usize) bool {
+    return content_length > max_request_size;
 }
 
 fn sendResponse(stream: std_compat.net.Stream, response: Response, raw_request: []const u8, bind_host: []const u8, port: u16, extra_origins: []const []const u8) !void {
@@ -2614,6 +2627,8 @@ test "contentType returns correct MIME type for .html" {
 test "initial request buffer stays small while media body limit remains high" {
     try std.testing.expect(initial_request_buffer_size <= 128 * 1024);
     try std.testing.expect(max_request_size >= 25 * 1024 * 1024);
+    try std.testing.expect(!requestBodyExceedsLimit(max_request_size));
+    try std.testing.expect(requestBodyExceedsLimit(max_request_size + 1));
 }
 
 test "contentType returns correct MIME type for .js" {
