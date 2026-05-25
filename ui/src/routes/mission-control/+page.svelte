@@ -3,7 +3,6 @@
   import { api } from '$lib/api/client';
   import type {
     MissionControlEvent,
-    MissionControlGraphEdge,
     MissionControlControls,
     MissionControlPhase,
     MissionControlReplayArtifact,
@@ -96,9 +95,6 @@
   const events = $derived(mission?.events || []);
   const telemetry = $derived(mission?.telemetry || emptyTelemetry);
   const controls = $derived(mission?.controls || emptyControls);
-  const activeEdgeIndex = $derived(
-    Math.max(0, edges.findIndex((edge: MissionControlGraphEdge) => edge.status === 'active' || edge.status === 'error')),
-  );
   const modeLabel = $derived((mission?.mode || 'deterministic_local_replay').replaceAll('_', ' '));
   const activePoll = $derived(mission?.status === 'running' || mission?.status === 'intervention_required');
 
@@ -319,7 +315,7 @@
         <h2>Live Orchestration</h2>
         <span>{mission.progress}%</span>
       </div>
-      <div class="graph-row" style="--active-edge-index: {activeEdgeIndex}">
+      <div class="graph-row">
         {#each nodes as node, index}
           <div class="node-wrap">
             <div class="node {statusClass(node.status)}">

@@ -305,6 +305,7 @@ fn validateTelemetry(fixture: ReplayFixture) ValidationError!void {
 fn validateFailure(failure: FailureDef, fixture: ReplayFixture) ValidationError!void {
     try requirePhase(fixture, failure.visible_from_phase);
     try requireNonEmpty(failure.run_id);
+    try requireRun(fixture, failure.run_id);
     try requireNonEmpty(failure.checkpoint_id);
     try requireNonEmpty(failure.failed_step);
     try requireNode(fixture, failure.failed_step);
@@ -315,6 +316,7 @@ fn validateFailure(failure: FailureDef, fixture: ReplayFixture) ValidationError!
 fn validateRecovery(recovery: RecoveryDef, fixture: ReplayFixture) ValidationError!void {
     try requirePhase(fixture, recovery.visible_from_phase);
     try requireNonEmpty(recovery.run_id);
+    try requireRun(fixture, recovery.run_id);
     try requireNonEmpty(recovery.forked_from);
     try requireNonEmpty(recovery.human_instruction);
 }
@@ -400,6 +402,16 @@ test "validate rejects trace refs for unknown run ids" {
         },
     };
     const fixture = minimalFixture(test_phases[0..], test_nodes[0..], test_edges[0..], events[0..], test_telemetry[0..]);
+    try std.testing.expectError(error.UnknownReplayReference, validate(fixture));
+}
+
+test "validate rejects failure and recovery panels with unknown run ids" {
+    var fixture = minimalFixture(test_phases[0..], test_nodes[0..], test_edges[0..], test_events[0..], test_telemetry[0..]);
+    fixture.failure.run_id = "missing-failed-run";
+    try std.testing.expectError(error.UnknownReplayReference, validate(fixture));
+
+    fixture = minimalFixture(test_phases[0..], test_nodes[0..], test_edges[0..], test_events[0..], test_telemetry[0..]);
+    fixture.recovery.run_id = "missing-recovered-run";
     try std.testing.expectError(error.UnknownReplayReference, validate(fixture));
 }
 

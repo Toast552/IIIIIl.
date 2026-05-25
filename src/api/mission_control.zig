@@ -1,6 +1,7 @@
 const std = @import("std");
 const std_compat = @import("compat");
 const helpers = @import("helpers.zig");
+const query = @import("query.zig");
 const replay = @import("mission_control_replay.zig");
 
 const ApiResponse = helpers.ApiResponse;
@@ -154,12 +155,12 @@ var mission_mutex: std_compat.sync.Mutex = .{};
 var mission_runtime = RuntimeState{};
 
 pub fn isPath(target: []const u8) bool {
-    const path = stripQuery(target);
+    const path = query.stripTarget(target);
     return std.mem.eql(u8, path, prefix) or std.mem.startsWith(u8, path, prefix ++ "/");
 }
 
 pub fn handle(allocator: std.mem.Allocator, method: []const u8, target: []const u8) ApiResponse {
-    const path = stripQuery(target);
+    const path = query.stripTarget(target);
     if (!isPath(path)) return helpers.notFound();
 
     const is_state = std.mem.eql(u8, path, prefix ++ "/state");
@@ -241,11 +242,6 @@ fn missionNotRecoverable() ApiResponse {
         .content_type = "application/json",
         .body = "{\"error\":{\"code\":\"mission_not_recoverable\",\"message\":\"Mission can only be recovered after the validation failure phase.\"}}",
     };
-}
-
-fn stripQuery(target: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, target, '?')) |idx| return target[0..idx];
-    return target;
 }
 
 fn buildStateJson(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) ![]u8 {
