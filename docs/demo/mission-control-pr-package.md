@@ -47,11 +47,12 @@ for real service hydration.
 Validation performed:
 
 ```bash
-zig build test -Dembed-ui=false --summary all
+zig build test -Dembed-ui=false -Dbuild-ui=false --summary all
 npm --prefix ui run build
 zig build test --summary all
+zig build test-integration -Dembed-ui=false -Dbuild-ui=false --summary all
 NULLHUB_URL=http://127.0.0.1:19802 ./tests/test_mission_control_smoke.sh
-MISSION_CONTROL_OPEN_BROWSER=0 ./scripts/mission_control_demo.sh
+NULLHUB_URL=http://127.0.0.1:19802 MISSION_CONTROL_OPEN_BROWSER=0 ./scripts/mission_control_demo.sh
 git diff --check
 ```
 
@@ -130,17 +131,18 @@ exportable replay evidence.
 
 ## Latest Local Validation
 
-Last run: 2026-05-10
+Last run: 2026-05-25
 
 | Command | Result |
 | --- | --- |
 | `npm --prefix ui run build` | pass |
-| `zig build test -Dembed-ui=false --summary all` | pass |
+| `zig build test -Dembed-ui=false -Dbuild-ui=false --summary all` | pass |
 | `zig build test --summary all` | pass |
+| `zig build test-integration -Dembed-ui=false -Dbuild-ui=false --summary all` | pass |
 | `NULLHUB_URL=http://127.0.0.1:19802 ./tests/test_mission_control_smoke.sh` | pass |
-| `MISSION_CONTROL_OPEN_BROWSER=0 ./scripts/mission_control_demo.sh` | pass |
+| `NULLHUB_URL=http://127.0.0.1:19802 MISSION_CONTROL_OPEN_BROWSER=0 ./scripts/mission_control_demo.sh` | pass |
+| Browser check of `/mission-control` load, controls, overlay, and console errors | pass |
 | `git diff --check` | pass |
-| `./scripts/record_mission_control_demo.sh` | pass |
 
 ## Video Artifact
 
