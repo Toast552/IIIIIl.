@@ -1501,11 +1501,11 @@ fn readBody(raw: []const u8, n: usize, stream: std_compat.net.Stream, alloc: std
             const header_end_pos = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return "";
             const body_start = header_end_pos + 4;
             const body_received = n - body_start;
+            if (requestBodyExceedsLimit(content_length)) return error.RequestTooLarge;
             if (body_received >= content_length) {
                 return raw[body_start .. body_start + content_length];
             }
             // Need to read more data from the stream
-            if (requestBodyExceedsLimit(content_length)) return error.RequestTooLarge;
             const total_size = body_start + content_length;
             const full_buf = try alloc.alloc(u8, total_size);
             @memcpy(full_buf[0..n], raw);

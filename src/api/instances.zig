@@ -5046,11 +5046,13 @@ pub fn dispatch(
         }
         if (std.mem.eql(u8, action, "agent-stream")) {
             if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
-            return .{
-                .status = "501 Not Implemented",
-                .content_type = "application/json",
-                .body = "{\"error\":\"agent-stream requires the HTTP streaming proxy\"}",
+            const proxy_body = buildAgentStreamA2aBody(allocator, body) catch |err| switch (err) {
+                error.InvalidJson => return badRequest("{\"error\":\"invalid JSON body\"}"),
+                error.MissingMessage => return badRequest("{\"error\":\"message is required\"}"),
+                else => return helpers.serverError(),
             };
+            defer allocator.free(proxy_body);
+            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/a2a", proxy_body, true);
         }
         if (std.mem.eql(u8, action, "a2a")) {
             if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
@@ -8304,8 +8306,8 @@ test "dispatch routes agent invoke stream and sessions" {
         "/api/instances/nullclaw/my-agent/agent-stream",
         "{\"message\":\"hello\",\"session_key\":\"s-1\",\"provider\":\"openai\",\"model\":\"gpt-5\",\"temperature\":\"0.3\",\"agent\":\"helper\"}",
     ).?;
-    try std.testing.expectEqualStrings("501 Not Implemented", stream_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, stream_resp.body, "HTTP streaming proxy") != null);
+    try std.testing.expectEqualStrings("404 Not Found", stream_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, stream_resp.body, "config not found") != null);
 
     const list_resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/my-agent/agent-sessions", "").?;
     defer allocator.free(list_resp.body);
