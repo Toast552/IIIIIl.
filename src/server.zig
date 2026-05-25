@@ -17,6 +17,7 @@ const mdns_mod = @import("mdns.zig");
 const state_mod = @import("core/state.zig");
 const integration_mod = @import("core/integration.zig");
 const paths_mod = @import("core/paths.zig");
+const gateway_access = @import("core/gateway_access.zig");
 const manager_mod = @import("supervisor/manager.zig");
 const process_mod = @import("supervisor/process.zig");
 const runtime_state_mod = @import("supervisor/runtime_state.zig");
@@ -36,7 +37,7 @@ const ui_assets = @import("ui_assets");
 const version = @import("version.zig");
 const test_helpers = @import("test_helpers.zig");
 
-const max_request_size: usize = 25 * 1024 * 1024;
+const max_request_size: usize = 64 * 1024 * 1024;
 const initial_request_buffer_size: usize = 64 * 1024;
 
 pub const Server = struct {
@@ -2626,7 +2627,7 @@ test "contentType returns correct MIME type for .html" {
 
 test "initial request buffer stays small while media body limit remains high" {
     try std.testing.expect(initial_request_buffer_size <= 128 * 1024);
-    try std.testing.expect(max_request_size >= 25 * 1024 * 1024);
+    try std.testing.expect(max_request_size >= @as(usize, @intCast(gateway_access.min_body_size)));
     try std.testing.expect(!requestBodyExceedsLimit(max_request_size));
     try std.testing.expect(requestBodyExceedsLimit(max_request_size + 1));
 }

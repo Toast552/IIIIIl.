@@ -4,7 +4,7 @@ const paths_mod = @import("paths.zig");
 
 pub const token_prefix = "nullhub-local-";
 pub const token_file = ".nullhub-gateway-token";
-pub const min_body_size: i64 = 25 * 1024 * 1024;
+pub const min_body_size: i64 = 64 * 1024 * 1024;
 pub const min_timeout_secs: i64 = 120;
 
 pub fn generateToken(allocator: std.mem.Allocator) ![]u8 {
