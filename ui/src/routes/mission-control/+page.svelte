@@ -110,11 +110,9 @@
   };
   type TraceHydration = {
     runId: string;
-    source: 'live' | 'replay';
     summary: NullWatchRunSummary | null;
     spans: NullWatchSpan[];
     evals: NullWatchEval[];
-    error: string | null;
     loadedAtMs: number;
   };
   type NullWatchOption = {
@@ -147,9 +145,7 @@
   const recoveredRunId = $derived(mission?.recovery?.run_id || mission?.recovered_run_id || '');
   const failedTrace = $derived(failedRunId ? traceHydration[failedRunId] || null : null);
   const recoveredTrace = $derived(recoveredRunId ? traceHydration[recoveredRunId] || null : null);
-  const liveTraceAvailable = $derived(
-    failedTrace?.source === 'live' || recoveredTrace?.source === 'live',
-  );
+  const liveTraceAvailable = $derived(Boolean(failedTrace || recoveredTrace));
   const displayTelemetry = $derived(hydratedTelemetry(telemetry, [failedTrace, recoveredTrace]));
 
   function schedulePoll() {
@@ -240,9 +236,7 @@
     const watch = await availableNullWatchName();
     if (disposed || requestId !== traceHydrationRequest) return;
     if (!watch) {
-      traceHydration = Object.fromEntries(
-        runIds.map((runId) => [runId, replayTraceHydration(runId, 'No running NullWatch instance.')]),
-      );
+      traceHydration = {};
       traceHydrating = false;
       return;
     }
@@ -250,7 +244,9 @@
     const entries = await Promise.all(runIds.map((runId) => loadTraceHydration(runId, watch)));
     if (disposed || requestId !== traceHydrationRequest) return;
 
-    traceHydration = Object.fromEntries(entries.map((entry) => [entry.runId, entry]));
+    traceHydration = Object.fromEntries(
+      entries.filter((entry): entry is TraceHydration => Boolean(entry)).map((entry) => [entry.runId, entry]),
+    );
     traceHydrating = false;
   }
 
@@ -284,41 +280,27 @@
     }));
   }
 
-  async function loadTraceHydration(runId: string, watch: string): Promise<TraceHydration> {
+  async function loadTraceHydration(runId: string, watch: string): Promise<TraceHydration | null> {
     try {
       const listed = await api.getObservabilityRuns({ run_id: runId, limit: 1, watch });
       const found = Array.isArray(listed?.items) && listed.items.some((item: any) => item?.run_id === runId);
-      if (!found) return replayTraceHydration(runId, 'NullWatch has not reported this replay run.');
+      if (!found) return null;
 
       const detail = await api.getObservabilityRun(runId, { watch });
       const summary = normalizeRunSummary(detail, runId);
       const spans = Array.isArray(detail?.spans) ? detail.spans : [];
       const evals = Array.isArray(detail?.evals) ? detail.evals : [];
-      const source = summary || spans.length > 0 || evals.length > 0 ? 'live' : 'replay';
+      if (!summary && spans.length === 0 && evals.length === 0) return null;
       return {
         runId,
-        source,
         summary,
         spans,
         evals,
-        error: null,
         loadedAtMs: Date.now(),
       };
-    } catch (e) {
-      return replayTraceHydration(runId, (e as Error).message);
+    } catch {
+      return null;
     }
-  }
-
-  function replayTraceHydration(runId: string, error: string | null): TraceHydration {
-    return {
-      runId,
-      source: 'replay',
-      summary: null,
-      spans: [],
-      evals: [],
-      error,
-      loadedAtMs: Date.now(),
-    };
   }
 
   function tracePanelRunIds(snapshot: MissionControlState): string[] {
@@ -423,7 +405,7 @@
   }
 
   function traceVerdict(trace: TraceHydration | null): string | null {
-    if (!trace || trace.source !== 'live') return null;
+    if (!trace) return null;
     if (trace.summary?.overall_verdict) return trace.summary.overall_verdict;
     const failedEval = trace.evals.find((evaluation) => evaluation.verdict === 'fail');
     if (failedEval) return 'fail';
@@ -433,31 +415,31 @@
   }
 
   function traceSuffix(trace: TraceHydration | null): string {
-    return trace?.source === 'live' ? ` · ${spanCount(trace)} spans · ${evalCount(trace)} evals` : '';
+    return trace ? ` · ${spanCount(trace)} spans · ${evalCount(trace)} evals` : '';
   }
 
   function traceSourceLabel(trace: TraceHydration | null, runId: string | null | undefined): string {
     if (!runId) return 'Pending';
-    if (trace?.source === 'live') return 'Live NullWatch';
+    if (trace) return 'Live NullWatch';
     if (traceHydrating) return 'Checking NullWatch';
-    return 'Replay refs';
+    return 'Trace refs';
   }
 
   function traceSourceSummary(): string {
     if (liveTraceAvailable) return 'Live NullWatch';
     if (traceHydrating && (failedRunId || recoveredRunId)) return 'Checking NullWatch';
-    return 'Replay refs';
+    return 'Trace refs';
   }
 
   function tracePanelNote(): string {
     if (liveTraceAvailable) return 'Hydrated run detail';
     if (traceHydrating && (failedRunId || recoveredRunId)) return 'Looking for live traces';
-    if (failedTrace?.error || recoveredTrace?.error) return 'Using embedded replay refs';
+    if (failedRunId || recoveredRunId) return 'Linked run ids';
     return 'Run panels pending';
   }
 
   function primaryErrorText(trace: TraceHydration | null): string {
-    if (!trace || trace.source !== 'live') return '';
+    if (!trace) return '';
     const span = trace.spans.find((item) => item.status === 'error' || item.error_message);
     if (!span) return '';
     const operation = span.operation || span.tool_name || 'span';
@@ -466,7 +448,7 @@
   }
 
   function primaryEvalText(trace: TraceHydration | null, evalKey?: string): string {
-    if (!trace || trace.source !== 'live') return '';
+    if (!trace) return '';
     const evaluation =
       (evalKey ? trace.evals.find((item) => item.eval_key === evalKey) : null) ||
       trace.evals.find((item) => item.verdict === 'fail') ||
@@ -477,13 +459,8 @@
     return `${key}: ${verdict} (${formatScore(evaluation.score)})`;
   }
 
-  function traceFallbackText(trace: TraceHydration | null): string {
-    if (!trace || trace.source === 'live') return '';
-    return trace.error ? 'Live NullWatch detail unavailable for this run.' : 'Live NullWatch detail has not reported this run yet.';
-  }
-
   function hydratedTelemetry(base: MissionControlTelemetry, traces: (TraceHydration | null)[]): MissionControlTelemetry {
-    const liveTraces = traces.filter((trace): trace is TraceHydration => trace?.source === 'live');
+    const liveTraces = traces.filter((trace): trace is TraceHydration => Boolean(trace));
     if (liveTraces.length === 0) return base;
 
     const verdicts = liveTraces.map(traceVerdict).filter((value): value is string => Boolean(value));
@@ -669,12 +646,12 @@
             <p>{mission.failure.error_message}</p>
             <code>{mission.failure.checkpoint_id}</code>
             <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
-            <div class="trace-detail {failedTrace?.source || 'replay'}">
+            <div class="trace-detail {failedTrace ? 'live' : 'trace-ref'}">
               <div class="trace-detail-top">
                 <span>{traceSourceLabel(failedTrace, mission.failure.run_id)}</span>
                 <strong>{traceVerdict(failedTrace) || runVerdict('failed')}</strong>
               </div>
-              {#if failedTrace?.source === 'live'}
+              {#if failedTrace}
                 <dl class="trace-stats">
                   <div><dt>Spans</dt><dd>{spanCount(failedTrace)}</dd></div>
                   <div><dt>Evals</dt><dd>{evalCount(failedTrace)}</dd></div>
@@ -686,8 +663,6 @@
                 {#if primaryEvalText(failedTrace, 'tool_success')}
                   <p class="trace-evidence">{primaryEvalText(failedTrace, 'tool_success')}</p>
                 {/if}
-              {:else if traceFallbackText(failedTrace)}
-                <p class="trace-evidence">{traceFallbackText(failedTrace)}</p>
               {/if}
             </div>
           </div>
@@ -700,12 +675,12 @@
             <p>{mission.recovery.human_instruction}</p>
             <code>{mission.recovery.run_id}</code>
             <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
-            <div class="trace-detail {recoveredTrace?.source || 'replay'}">
+            <div class="trace-detail {recoveredTrace ? 'live' : 'trace-ref'}">
               <div class="trace-detail-top">
                 <span>{traceSourceLabel(recoveredTrace, mission.recovery.run_id)}</span>
                 <strong>{traceVerdict(recoveredTrace) || runVerdict('recovered')}</strong>
               </div>
-              {#if recoveredTrace?.source === 'live'}
+              {#if recoveredTrace}
                 <dl class="trace-stats">
                   <div><dt>Spans</dt><dd>{spanCount(recoveredTrace)}</dd></div>
                   <div><dt>Evals</dt><dd>{evalCount(recoveredTrace)}</dd></div>
@@ -717,8 +692,6 @@
                 {#if primaryEvalText(recoveredTrace, 'tool_success')}
                   <p class="trace-evidence">{primaryEvalText(recoveredTrace, 'tool_success')}</p>
                 {/if}
-              {:else if traceFallbackText(recoveredTrace)}
-                <p class="trace-evidence">{traceFallbackText(recoveredTrace)}</p>
               {/if}
             </div>
           </div>
@@ -752,7 +725,7 @@
             </dl>
             {#if mission.failure}
               <p>{mission.failure.error_message}</p>
-              {#if failedTrace?.source === 'live'}
+              {#if failedTrace}
                 <p class="trace-evidence">{spanCount(failedTrace)} spans · {evalCount(failedTrace)} evals · {formatCost(traceCost(failedTrace))}</p>
               {/if}
               <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
@@ -778,7 +751,7 @@
             </dl>
             {#if mission.recovery}
               <p>{mission.recovery.status}</p>
-              {#if recoveredTrace?.source === 'live'}
+              {#if recoveredTrace}
                 <p class="trace-evidence">{spanCount(recoveredTrace)} spans · {evalCount(recoveredTrace)} evals · {formatCost(traceCost(recoveredTrace))}</p>
               {/if}
               <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>

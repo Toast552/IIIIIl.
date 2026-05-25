@@ -167,8 +167,9 @@ coverage. Mission timeline trace links deep-link to `/observability?run_id=...`
 so a real NullWatch instance can attach detailed spans and evals without making
 the local demo depend on external infrastructure. When a managed NullWatch
 instance is running, `/mission-control` also hydrates the failure and recovery
-trace panels from live run detail through the observability proxy, and falls
-back to embedded replay references when NullWatch is unavailable.
+trace panels from live run detail through the observability proxy. Without a
+running NullWatch instance, the page keeps the mission trace links from the
+current replay snapshot.
 `GET /api/mission-control/replay` exports the current snapshot, source fixture,
 and ecosystem mapping metadata as a portable JSON artifact for debugging and
 review.

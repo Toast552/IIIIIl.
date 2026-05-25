@@ -82,7 +82,7 @@ Day 3 - Add observability affordances.
 - Add Flight Recorder deep links via `/observability?run_id=...`.
 - Hydrate failure/recovery trace panels from live NullWatch run detail when a
   managed instance is running.
-- Keep the UI useful without NullWatch running.
+- Keep mission trace links available without requiring NullWatch to be running.
 
 Day 4 - Strengthen demo automation.
 
@@ -380,13 +380,3 @@ flowchart LR
 - Visual polish can expand without limit. Keep one page and one scenario.
 - If backend state becomes complicated, switch to a static replay bundle with
   action-controlled phase transitions.
-
-## Fallback
-
-If Mission Control slips, ship a focused Time-Travel Debugger:
-
-- failed run
-- checkpoint
-- forked recovered run
-- state/span diff
-- screenshots and demo script

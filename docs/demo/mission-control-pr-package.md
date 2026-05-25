@@ -33,8 +33,7 @@ What changed:
   comparison.
 - Added deep links from mission events to `/observability?run_id=...`.
 - Hydrates failure/recovery trace panels from a running NullWatch instance via
-  the existing observability proxy when live run detail is available, with
-  embedded replay refs as the fallback.
+  the existing observability proxy when live run detail is available.
 - Added local smoke test, judge-mode demo driver, macOS video recorder,
   screenshots, README docs, and hackathon submission notes.
 
