@@ -307,6 +307,7 @@ ui/src/
     orchestration/      # GraphViewer, StateInspector, RunEventLog, InterruptPanel,
                         # CheckpointTimeline, WorkflowJsonEditor, NodeCard, SendProgressBar
   lib/api/              # Typed API client
+  lib/missionControl/   # Mission Control feature helpers
 tests/
   test_e2e.sh           # End-to-end test script
 scripts/

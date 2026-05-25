@@ -10,6 +10,12 @@
     MissionControlTelemetry,
     MissionControlTraceRef,
   } from '$lib/api/missionControl';
+  import {
+    findAvailableNullWatchName,
+    hydrateMissionTracePanels,
+    missionTracePanelRunIds,
+    type TraceHydration,
+  } from '$lib/missionControl/traceHydration';
 
   type MissionAction = 'launch' | 'reset' | 'recover';
   const emptyControls: MissionControlControls = {
@@ -80,45 +86,6 @@
       tone: 'success',
     },
   ];
-
-  type NullWatchRunSummary = {
-    run_id?: string;
-    span_count?: number;
-    eval_count?: number;
-    error_count?: number;
-    total_input_tokens?: number;
-    total_output_tokens?: number;
-    total_cost_usd?: number;
-    total_duration_ms?: number;
-    overall_verdict?: string;
-  };
-  type NullWatchSpan = {
-    operation?: string;
-    status?: string;
-    source?: string;
-    duration_ms?: number;
-    error_message?: string;
-    tool_name?: string;
-  };
-  type NullWatchEval = {
-    eval_key?: string;
-    verdict?: string;
-    score?: number;
-    scorer?: string;
-    dataset?: string;
-    notes?: string;
-  };
-  type TraceHydration = {
-    runId: string;
-    summary: NullWatchRunSummary | null;
-    spans: NullWatchSpan[];
-    evals: NullWatchEval[];
-    loadedAtMs: number;
-  };
-  type NullWatchOption = {
-    name: string;
-    status: string;
-  };
 
   let mission = $state<MissionControlState | null>(null);
   let loading = $state(true);
@@ -224,7 +191,7 @@
   });
 
   async function hydrateTracePanels(snapshot: MissionControlState) {
-    const runIds = tracePanelRunIds(snapshot);
+    const runIds = missionTracePanelRunIds(snapshot);
     const requestId = ++traceHydrationRequest;
     if (runIds.length === 0) {
       traceHydration = {};
@@ -235,18 +202,10 @@
     traceHydrating = true;
     const watch = await availableNullWatchName();
     if (disposed || requestId !== traceHydrationRequest) return;
-    if (!watch) {
-      traceHydration = {};
-      traceHydrating = false;
-      return;
-    }
-
-    const entries = await Promise.all(runIds.map((runId) => loadTraceHydration(runId, watch)));
+    const traces = await hydrateMissionTracePanels(api, snapshot, watch);
     if (disposed || requestId !== traceHydrationRequest) return;
 
-    traceHydration = Object.fromEntries(
-      entries.filter((entry): entry is TraceHydration => Boolean(entry)).map((entry) => [entry.runId, entry]),
-    );
+    traceHydration = traces;
     traceHydrating = false;
   }
 
@@ -255,72 +214,8 @@
     if (now - traceWatchCheckedAt < 5000) return traceWatchName;
     traceWatchCheckedAt = now;
 
-    try {
-      const status = await api.getStatus();
-      traceWatchName = preferredTraceWatchName(status);
-    } catch {
-      traceWatchName = null;
-    }
+    traceWatchName = await findAvailableNullWatchName(api);
     return traceWatchName;
-  }
-
-  function preferredTraceWatchName(status: any): string | null {
-    const watches = extractNullWatchOptions(status);
-    const running = watches.find((watch) => watch.status === 'running');
-    if (running) return running.name;
-    const starting = watches.find((watch) => watch.status === 'starting' || watch.status === 'restarting');
-    return starting?.name || null;
-  }
-
-  function extractNullWatchOptions(status: any): NullWatchOption[] {
-    const instances = status?.instances?.nullwatch || {};
-    return Object.entries(instances).map(([name, info]: [string, any]) => ({
-      name,
-      status: info?.status || 'stopped',
-    }));
-  }
-
-  async function loadTraceHydration(runId: string, watch: string): Promise<TraceHydration | null> {
-    try {
-      const listed = await api.getObservabilityRuns({ run_id: runId, limit: 1, watch });
-      const found = Array.isArray(listed?.items) && listed.items.some((item: any) => item?.run_id === runId);
-      if (!found) return null;
-
-      const detail = await api.getObservabilityRun(runId, { watch });
-      const summary = normalizeRunSummary(detail, runId);
-      const spans = Array.isArray(detail?.spans) ? detail.spans : [];
-      const evals = Array.isArray(detail?.evals) ? detail.evals : [];
-      if (!summary && spans.length === 0 && evals.length === 0) return null;
-      return {
-        runId,
-        summary,
-        spans,
-        evals,
-        loadedAtMs: Date.now(),
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  function tracePanelRunIds(snapshot: MissionControlState): string[] {
-    const ids: string[] = [];
-    addRunId(ids, snapshot.failure?.run_id || snapshot.failed_run_id);
-    addRunId(ids, snapshot.recovery?.run_id || snapshot.recovered_run_id);
-    return ids;
-  }
-
-  function addRunId(ids: string[], runId: string | null | undefined) {
-    if (runId && !ids.includes(runId)) ids.push(runId);
-  }
-
-  function normalizeRunSummary(detail: any, runId: string): NullWatchRunSummary | null {
-    const summary = detail?.summary || detail?.run || null;
-    if (!summary || typeof summary !== 'object') return null;
-    return {
-      ...summary,
-      run_id: summary.run_id || runId,
-    };
   }
 
   function statusClass(value: string | undefined): string {

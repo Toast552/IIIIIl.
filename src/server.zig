@@ -50,6 +50,7 @@ pub const Server = struct {
     paths: paths_mod.Paths,
     manager: *manager_mod.Manager,
     mutex: *std_compat.sync.Mutex,
+    mission_control: mission_control_api.RuntimeStore = .{},
     start_time: i64,
 
     pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16, manager: *manager_mod.Manager, mutex: *std_compat.sync.Mutex) !Server {
@@ -797,7 +798,7 @@ pub const Server = struct {
 
     fn route(self: *Server, allocator: std.mem.Allocator, method: []const u8, target: []const u8, body: []const u8) Response {
         if (mission_control_api.isPath(target)) {
-            const resp = mission_control_api.handle(allocator, method, target);
+            const resp = mission_control_api.handle(allocator, method, target, &self.mission_control);
             return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
         }
 

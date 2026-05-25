@@ -34,6 +34,8 @@ What changed:
 - Added deep links from mission events to `/observability?run_id=...`.
 - Hydrates failure/recovery trace panels from a running NullWatch instance via
   the existing observability proxy when live run detail is available.
+- Keeps mission runtime state scoped to the NullHub server instance and keeps
+  NullWatch hydration discovery outside the Svelte route component.
 - Added local smoke test, judge-mode demo driver, macOS video recorder,
   screenshots, README docs, and hackathon submission notes.
 

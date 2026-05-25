@@ -8,15 +8,17 @@ const ApiResponse = helpers.ApiResponse;
 
 const prefix = "/api/mission-control";
 
-var mission_mutex: std_compat.sync.Mutex = .{};
-var mission_runtime = mission.RuntimeState{};
+pub const RuntimeStore = struct {
+    mutex: std_compat.sync.Mutex = .{},
+    runtime: mission.RuntimeState = .{},
+};
 
 pub fn isPath(target: []const u8) bool {
     const path = query.stripTarget(target);
     return std.mem.eql(u8, path, prefix) or std.mem.startsWith(u8, path, prefix ++ "/");
 }
 
-pub fn handle(allocator: std.mem.Allocator, method: []const u8, target: []const u8) ApiResponse {
+pub fn handle(allocator: std.mem.Allocator, method: []const u8, target: []const u8, store: *RuntimeStore) ApiResponse {
     const path = query.stripTarget(target);
     if (!isPath(path)) return helpers.notFound();
 
@@ -33,40 +35,40 @@ pub fn handle(allocator: std.mem.Allocator, method: []const u8, target: []const 
         return helpers.methodNotAllowed();
     }
 
-    mission_mutex.lock();
-    defer mission_mutex.unlock();
+    store.mutex.lock();
+    defer store.mutex.unlock();
 
     const now_ms = std_compat.time.milliTimestamp();
 
-    if (is_state) return stateResponse(allocator, now_ms);
-    if (is_replay) return replayResponse(allocator, now_ms);
+    if (is_state) return stateResponse(allocator, store.runtime, now_ms);
+    if (is_replay) return replayResponse(allocator, store.runtime, now_ms);
 
     if (is_reset) {
-        mission.reset(&mission_runtime);
-        return stateResponse(allocator, now_ms);
+        mission.reset(&store.runtime);
+        return stateResponse(allocator, store.runtime, now_ms);
     }
 
     if (is_launch) {
-        if (!mission.launch(&mission_runtime, now_ms)) return missionAlreadyStarted();
-        return stateResponse(allocator, now_ms);
+        if (!mission.launch(&store.runtime, now_ms)) return missionAlreadyStarted();
+        return stateResponse(allocator, store.runtime, now_ms);
     }
 
     if (is_recover) {
-        const recovered = mission.recover(allocator, &mission_runtime, now_ms) catch return helpers.serverError();
+        const recovered = mission.recover(allocator, &store.runtime, now_ms) catch return helpers.serverError();
         if (!recovered) return missionNotRecoverable();
-        return stateResponse(allocator, now_ms);
+        return stateResponse(allocator, store.runtime, now_ms);
     }
 
     return helpers.notFound();
 }
 
-fn stateResponse(allocator: std.mem.Allocator, now_ms: i64) ApiResponse {
-    const body = mission.buildStateJson(allocator, mission_runtime, now_ms) catch return helpers.serverError();
+fn stateResponse(allocator: std.mem.Allocator, runtime: mission.RuntimeState, now_ms: i64) ApiResponse {
+    const body = mission.buildStateJson(allocator, runtime, now_ms) catch return helpers.serverError();
     return helpers.jsonOk(body);
 }
 
-fn replayResponse(allocator: std.mem.Allocator, now_ms: i64) ApiResponse {
-    const body = mission.buildReplayArtifactJson(allocator, mission_runtime, now_ms) catch return helpers.serverError();
+fn replayResponse(allocator: std.mem.Allocator, runtime: mission.RuntimeState, now_ms: i64) ApiResponse {
+    const body = mission.buildReplayArtifactJson(allocator, runtime, now_ms) catch return helpers.serverError();
     return helpers.jsonOk(body);
 }
 
@@ -95,62 +97,84 @@ test "isPath matches mission-control namespace" {
 }
 
 test "handle supports reset launch and recovery after failure" {
-    const reset = handle(std.testing.allocator, "POST", "/api/mission-control/reset");
+    var store = RuntimeStore{};
+    const reset = handle(std.testing.allocator, "POST", "/api/mission-control/reset", &store);
     defer std.testing.allocator.free(reset.body);
     try std.testing.expectEqualStrings("200 OK", reset.status);
 
-    const launched = handle(std.testing.allocator, "POST", "/api/mission-control/launch");
+    const launched = handle(std.testing.allocator, "POST", "/api/mission-control/launch", &store);
     defer std.testing.allocator.free(launched.body);
     try std.testing.expectEqualStrings("200 OK", launched.status);
     try std.testing.expect(std.mem.indexOf(u8, launched.body, "\"status\": \"running\"") != null);
 
-    mission_mutex.lock();
-    mission_runtime = .{
+    store.mutex.lock();
+    store.runtime = .{
         .launched = true,
         .started_at_ms = std_compat.time.milliTimestamp() - 10_000,
     };
-    mission_mutex.unlock();
+    store.mutex.unlock();
 
-    const recovered = handle(std.testing.allocator, "POST", "/api/mission-control/recover");
+    const recovered = handle(std.testing.allocator, "POST", "/api/mission-control/recover", &store);
     defer std.testing.allocator.free(recovered.body);
     try std.testing.expectEqualStrings("200 OK", recovered.status);
     try std.testing.expect(std.mem.indexOf(u8, recovered.body, "\"recovered_run_id\": \"run-demo-recovered-fork\"") != null);
 }
 
 test "handle rejects invalid mission transitions" {
-    const reset = handle(std.testing.allocator, "POST", "/api/mission-control/reset");
+    var store = RuntimeStore{};
+    const reset = handle(std.testing.allocator, "POST", "/api/mission-control/reset", &store);
     defer std.testing.allocator.free(reset.body);
     try std.testing.expectEqualStrings("200 OK", reset.status);
 
-    const early_recover = handle(std.testing.allocator, "POST", "/api/mission-control/recover");
+    const early_recover = handle(std.testing.allocator, "POST", "/api/mission-control/recover", &store);
     try std.testing.expectEqualStrings("409 Conflict", early_recover.status);
     try std.testing.expect(std.mem.indexOf(u8, early_recover.body, "mission_not_recoverable") != null);
 
-    const launched = handle(std.testing.allocator, "POST", "/api/mission-control/launch");
+    const launched = handle(std.testing.allocator, "POST", "/api/mission-control/launch", &store);
     defer std.testing.allocator.free(launched.body);
     try std.testing.expectEqualStrings("200 OK", launched.status);
 
-    const duplicate_launch = handle(std.testing.allocator, "POST", "/api/mission-control/launch");
+    const duplicate_launch = handle(std.testing.allocator, "POST", "/api/mission-control/launch", &store);
     try std.testing.expectEqualStrings("409 Conflict", duplicate_launch.status);
     try std.testing.expect(std.mem.indexOf(u8, duplicate_launch.body, "mission_already_started") != null);
 }
 
+test "handle keeps mission runtime scoped to the provided store" {
+    var first_store = RuntimeStore{};
+    var second_store = RuntimeStore{};
+
+    const launched = handle(std.testing.allocator, "POST", "/api/mission-control/launch", &first_store);
+    defer std.testing.allocator.free(launched.body);
+    try std.testing.expectEqualStrings("200 OK", launched.status);
+
+    const first_state = handle(std.testing.allocator, "GET", "/api/mission-control/state", &first_store);
+    defer std.testing.allocator.free(first_state.body);
+    try std.testing.expect(std.mem.indexOf(u8, first_state.body, "\"status\": \"running\"") != null);
+
+    const second_state = handle(std.testing.allocator, "GET", "/api/mission-control/state", &second_store);
+    defer std.testing.allocator.free(second_state.body);
+    try std.testing.expect(std.mem.indexOf(u8, second_state.body, "\"status\": \"idle\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_state.body, "\"can_launch\": true") != null);
+}
+
 test "handle returns clear status codes for unknown paths and methods" {
-    const unknown_get = handle(std.testing.allocator, "GET", "/api/mission-control/nope");
+    var store = RuntimeStore{};
+    const unknown_get = handle(std.testing.allocator, "GET", "/api/mission-control/nope", &store);
     try std.testing.expectEqualStrings("404 Not Found", unknown_get.status);
 
-    const wrong_method = handle(std.testing.allocator, "GET", "/api/mission-control/launch");
+    const wrong_method = handle(std.testing.allocator, "GET", "/api/mission-control/launch", &store);
     try std.testing.expectEqualStrings("405 Method Not Allowed", wrong_method.status);
 
-    const wrong_replay_method = handle(std.testing.allocator, "POST", "/api/mission-control/replay");
+    const wrong_replay_method = handle(std.testing.allocator, "POST", "/api/mission-control/replay", &store);
     try std.testing.expectEqualStrings("405 Method Not Allowed", wrong_replay_method.status);
 }
 
 test "handle returns replay artifact" {
-    const reset = handle(std.testing.allocator, "POST", "/api/mission-control/reset");
+    var store = RuntimeStore{};
+    const reset = handle(std.testing.allocator, "POST", "/api/mission-control/reset", &store);
     defer std.testing.allocator.free(reset.body);
 
-    const replay_resp = handle(std.testing.allocator, "GET", "/api/mission-control/replay");
+    const replay_resp = handle(std.testing.allocator, "GET", "/api/mission-control/replay", &store);
     defer std.testing.allocator.free(replay_resp.body);
 
     try std.testing.expectEqualStrings("200 OK", replay_resp.status);

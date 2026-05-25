@@ -59,6 +59,8 @@ clear future path to real cross-service wiring.
 - Added validated trace references in mission events so the demo can deep-link
   from Mission Control to `/observability?run_id=...` without requiring
   NullWatch to be running for the local replay.
+- Added live trace panel hydration from a running managed NullWatch instance,
+  keeping the discovery/hydration logic outside the Svelte route component.
 - Added explicit response metadata: `schema_version`, `mode`, `scenario_id`,
   `scenario_version`, and `generated_at_ms`.
 - Added `GET /api/mission-control/replay` to export the current snapshot,
@@ -102,6 +104,7 @@ clear future path to real cross-service wiring.
 - `src/server.zig`
 - `ui/src/lib/api/client.ts`
 - `ui/src/lib/api/missionControl.ts`
+- `ui/src/lib/missionControl/traceHydration.ts`
 - `ui/src/lib/components/Sidebar.svelte`
 - `ui/src/routes/observability/+page.svelte`
 - `ui/src/routes/mission-control/+page.svelte`
