@@ -17,6 +17,7 @@ const manifest_mod = @import("../core/manifest.zig");
 const managed_cli = @import("managed_cli.zig");
 const nullclaw_web_channel = @import("../core/nullclaw_web_channel.zig");
 const query_api = @import("query.zig");
+const proxy_api = @import("proxy.zig");
 const test_helpers = @import("../test_helpers.zig");
 const instance_runtime = @import("instance_runtime.zig");
 
@@ -26,6 +27,12 @@ const jsonOk = helpers.jsonOk;
 const notFound = helpers.notFound;
 const badRequest = helpers.badRequest;
 const methodNotAllowed = helpers.methodNotAllowed;
+const nullhub_gateway_token_prefix = "nullhub-local-";
+const nullhub_gateway_token_file = ".nullhub-gateway-token";
+const min_gateway_body_size: i64 = 25 * 1024 * 1024;
+const min_gateway_timeout_secs: i64 = 120;
+const gateway_ready_timeout_ms: i64 = 15_000;
+const gateway_ready_poll_ms: u64 = 100;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -882,6 +889,533 @@ fn writeJsonConfigValue(allocator: std.mem.Allocator, config_path: []const u8, v
     defer out.close();
     try out.writeAll(rendered);
     try out.writeAll("\n");
+}
+
+const GatewayAccess = struct {
+    token: []u8,
+    changed: bool,
+
+    fn deinit(self: GatewayAccess, allocator: std.mem.Allocator) void {
+        allocator.free(self.token);
+    }
+};
+
+pub const GatewayProxyUpstream = struct {
+    port: u16,
+    token: []u8,
+    upstream_path: []const u8,
+    body: []const u8,
+    body_owned: bool = false,
+    event_stream: bool,
+
+    pub fn deinit(self: GatewayProxyUpstream, allocator: std.mem.Allocator) void {
+        allocator.free(self.token);
+        if (self.body_owned) allocator.free(self.body);
+    }
+};
+
+pub const GatewayProxyPrepareResult = union(enum) {
+    no_match,
+    response: ApiResponse,
+    upstream: GatewayProxyUpstream,
+};
+
+fn ensureJsonObjectField(
+    allocator: std.mem.Allocator,
+    obj: *std.json.ObjectMap,
+    key: []const u8,
+    changed: *bool,
+) !*std.json.ObjectMap {
+    const gop = try obj.getOrPut(allocator, key);
+    if (!gop.found_existing or gop.value_ptr.* != .object) {
+        gop.value_ptr.* = .{ .object = .empty };
+        changed.* = true;
+    }
+    return &gop.value_ptr.object;
+}
+
+fn setBoolField(
+    allocator: std.mem.Allocator,
+    obj: *std.json.ObjectMap,
+    key: []const u8,
+    value: bool,
+    changed: *bool,
+) !void {
+    if (obj.get(key)) |existing| {
+        if (existing == .bool and existing.bool == value) return;
+    }
+    try obj.put(allocator, key, .{ .bool = value });
+    changed.* = true;
+}
+
+fn setIntegerAtLeast(
+    allocator: std.mem.Allocator,
+    obj: *std.json.ObjectMap,
+    key: []const u8,
+    minimum: i64,
+    changed: *bool,
+) !void {
+    if (obj.get(key)) |existing| {
+        if (existing == .integer and existing.integer >= minimum) return;
+    }
+    try obj.put(allocator, key, .{ .integer = minimum });
+    changed.* = true;
+}
+
+fn generateNullhubGatewayToken(allocator: std.mem.Allocator) ![]u8 {
+    var random_bytes: [24]u8 = undefined;
+    std_compat.crypto.random.bytes(&random_bytes);
+    const hex = "0123456789abcdef";
+    var token = try allocator.alloc(u8, nullhub_gateway_token_prefix.len + random_bytes.len * 2);
+    @memcpy(token[0..nullhub_gateway_token_prefix.len], nullhub_gateway_token_prefix);
+    for (random_bytes, 0..) |b, i| {
+        token[nullhub_gateway_token_prefix.len + i * 2] = hex[b >> 4];
+        token[nullhub_gateway_token_prefix.len + i * 2 + 1] = hex[b & 0x0f];
+    }
+    return token;
+}
+
+fn isNullhubGatewayToken(token: []const u8) bool {
+    return std.mem.startsWith(u8, token, nullhub_gateway_token_prefix);
+}
+
+fn gatewayTokenPath(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+) ![]u8 {
+    const instance_dir = try paths.instanceDir(allocator, component, name);
+    defer allocator.free(instance_dir);
+    return std.fs.path.join(allocator, &.{ instance_dir, nullhub_gateway_token_file });
+}
+
+fn readStoredGatewayToken(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+) !?[]u8 {
+    const token_path = try gatewayTokenPath(allocator, paths, component, name);
+    defer allocator.free(token_path);
+
+    const file = std_compat.fs.openFileAbsolute(token_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer file.close();
+
+    const contents = try file.readToEndAlloc(allocator, 16 * 1024);
+    errdefer allocator.free(contents);
+    const trimmed = std.mem.trim(u8, contents, " \t\r\n");
+    if (!isNullhubGatewayToken(trimmed)) {
+        allocator.free(contents);
+        return null;
+    }
+    if (trimmed.len == contents.len) return contents;
+    const token = try allocator.dupe(u8, trimmed);
+    allocator.free(contents);
+    return token;
+}
+
+fn writeStoredGatewayToken(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    token: []const u8,
+) !void {
+    const token_path = try gatewayTokenPath(allocator, paths, component, name);
+    defer allocator.free(token_path);
+
+    const file = try std_compat.fs.createFileAbsolute(token_path, .{ .truncate = true });
+    defer file.close();
+    restrictGatewayTokenFile(file);
+    try file.writeAll(token);
+    try file.writeAll("\n");
+}
+
+fn restrictGatewayTokenFile(file: anytype) void {
+    if (comptime std_compat.fs.has_executable_bit) file.chmod(0o600) catch {};
+}
+
+fn hashGatewayTokenAlloc(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(token, &digest, .{});
+    const hex = "0123456789abcdef";
+    var out = try allocator.alloc(u8, digest.len * 2);
+    for (digest, 0..) |b, i| {
+        out[i * 2] = hex[b >> 4];
+        out[i * 2 + 1] = hex[b & 0x0f];
+    }
+    return out;
+}
+
+fn ensureGatewayPairedToken(
+    allocator: std.mem.Allocator,
+    json_allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    gateway_obj: *std.json.ObjectMap,
+    changed: *bool,
+) ![]u8 {
+    const token = blk: {
+        if (try readStoredGatewayToken(allocator, paths, component, name)) |stored| {
+            break :blk stored;
+        }
+        const generated = try generateNullhubGatewayToken(allocator);
+        errdefer allocator.free(generated);
+        try writeStoredGatewayToken(allocator, paths, component, name, generated);
+        break :blk generated;
+    };
+    errdefer allocator.free(token);
+
+    const token_hash = try hashGatewayTokenAlloc(allocator, token);
+    defer allocator.free(token_hash);
+
+    if (gateway_obj.getPtr("paired_tokens")) |tokens_value| {
+        if (tokens_value.* == .array) {
+            var has_hash = false;
+            var has_plaintext_nullhub_token = false;
+            for (tokens_value.array.items) |item| {
+                if (item == .string and std.mem.eql(u8, item.string, token_hash)) {
+                    has_hash = true;
+                } else if (item == .string and isNullhubGatewayToken(item.string)) {
+                    has_plaintext_nullhub_token = true;
+                }
+            }
+
+            if (has_hash and !has_plaintext_nullhub_token) return token;
+
+            var tokens = std.json.Array.init(json_allocator);
+            var inserted_hash = false;
+            for (tokens_value.array.items) |item| {
+                if (item == .string and isNullhubGatewayToken(item.string)) continue;
+                if (item == .string and std.mem.eql(u8, item.string, token_hash)) {
+                    if (inserted_hash) continue;
+                    inserted_hash = true;
+                }
+                try tokens.append(item);
+            }
+            if (!inserted_hash) {
+                try tokens.append(.{ .string = try json_allocator.dupe(u8, token_hash) });
+            }
+            tokens_value.* = .{ .array = tokens };
+            changed.* = true;
+            return token;
+        }
+    }
+
+    var tokens = std.json.Array.init(json_allocator);
+    try tokens.append(.{ .string = try json_allocator.dupe(u8, token_hash) });
+    try gateway_obj.put(json_allocator, "paired_tokens", .{ .array = tokens });
+    changed.* = true;
+    return token;
+}
+
+fn ensureNullclawGatewayConfig(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+) !GatewayAccess {
+    if (!std.mem.eql(u8, component, "nullclaw")) return error.UnsupportedComponent;
+
+    const config_path = try paths.instanceConfig(allocator, component, name);
+    defer allocator.free(config_path);
+    const file = try std_compat.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const contents = try file.readToEndAlloc(allocator, 4 * 1024 * 1024);
+    defer allocator.free(contents);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidConfig;
+
+    const json_allocator = parsed.arena.allocator();
+    var changed = false;
+    const root = &parsed.value.object;
+    const gateway_obj = try ensureJsonObjectField(json_allocator, root, "gateway", &changed);
+    const a2a_obj = try ensureJsonObjectField(json_allocator, root, "a2a", &changed);
+
+    try setBoolField(json_allocator, gateway_obj, "require_pairing", true, &changed);
+    try setIntegerAtLeast(json_allocator, gateway_obj, "max_body_size_bytes", min_gateway_body_size, &changed);
+    try setIntegerAtLeast(json_allocator, gateway_obj, "request_timeout_secs", min_gateway_timeout_secs, &changed);
+    try setBoolField(json_allocator, a2a_obj, "enabled", true, &changed);
+    try setBoolField(json_allocator, a2a_obj, "multi_modal", true, &changed);
+
+    const token = try ensureGatewayPairedToken(allocator, json_allocator, paths, component, name, gateway_obj, &changed);
+    errdefer allocator.free(token);
+
+    if (changed) {
+        try writeJsonConfigValue(allocator, config_path, parsed.value);
+    }
+
+    return .{ .token = token, .changed = changed };
+}
+
+fn resolveGatewayPort(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    manager: *manager_mod.Manager,
+    component: []const u8,
+    name: []const u8,
+    entry: state_mod.InstanceEntry,
+) ?u16 {
+    const snapshot = instance_runtime.resolve(allocator, paths, manager, component, name, entry);
+    if (snapshot.port != 0) return snapshot.port;
+    return instance_runtime.readPortFromConfig(allocator, paths, component, name, "gateway.port");
+}
+
+fn isRuntimeRunning(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    manager: *manager_mod.Manager,
+    component: []const u8,
+    name: []const u8,
+    entry: state_mod.InstanceEntry,
+) bool {
+    const snapshot = instance_runtime.resolve(allocator, paths, manager, component, name, entry);
+    return snapshot.status == .running;
+}
+
+fn waitForRuntimeRunning(
+    allocator: std.mem.Allocator,
+    paths: paths_mod.Paths,
+    manager: *manager_mod.Manager,
+    component: []const u8,
+    name: []const u8,
+    entry: state_mod.InstanceEntry,
+) bool {
+    const deadline = std_compat.time.milliTimestamp() + gateway_ready_timeout_ms;
+    while (true) {
+        manager.tick();
+        const snapshot = instance_runtime.resolve(allocator, paths, manager, component, name, entry);
+        switch (snapshot.status) {
+            .running => return true,
+            .failed, .stopped => return false,
+            else => {},
+        }
+        if (std_compat.time.milliTimestamp() >= deadline) return false;
+        std_compat.thread.sleep(gateway_ready_poll_ms * std.time.ns_per_ms);
+    }
+}
+
+fn gatewayNotReady() ApiResponse {
+    return .{
+        .status = "503 Service Unavailable",
+        .content_type = "application/json",
+        .body = "{\"error\":\"nullclaw gateway is not ready\"}",
+    };
+}
+
+fn ensureInstanceRunning(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    manager: *manager_mod.Manager,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    entry: state_mod.InstanceEntry,
+    config_changed: bool,
+) ?ApiResponse {
+    if (config_changed and isRuntimeRunning(allocator, paths, manager, component, name, entry)) {
+        const restart_resp = handleRestart(allocator, s, manager, paths, component, name, "");
+        if (!std.mem.eql(u8, restart_resp.status, "200 OK")) return restart_resp;
+        if (!waitForRuntimeRunning(allocator, paths, manager, component, name, entry)) return gatewayNotReady();
+        return null;
+    }
+    if (!isRuntimeRunning(allocator, paths, manager, component, name, entry)) {
+        const start_resp = handleStart(allocator, s, manager, paths, component, name, "");
+        if (!std.mem.eql(u8, start_resp.status, "200 OK")) return start_resp;
+        if (!waitForRuntimeRunning(allocator, paths, manager, component, name, entry)) return gatewayNotReady();
+    }
+    return null;
+}
+
+fn isSuccessStatus(status: []const u8) bool {
+    return status.len >= 1 and status[0] == '2';
+}
+
+fn handleGatewayProxy(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    manager: *manager_mod.Manager,
+    paths: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    method: []const u8,
+    upstream_path: []const u8,
+    body: []const u8,
+    event_stream: bool,
+) ApiResponse {
+    if (!std.mem.eql(u8, component, "nullclaw")) {
+        return badRequest("{\"error\":\"gateway proxy routes are only supported for nullclaw instances\"}");
+    }
+    const entry = s.getInstance(component, name) orelse return notFound();
+    const access = ensureNullclawGatewayConfig(allocator, paths, component, name) catch |err| switch (err) {
+        error.UnsupportedComponent => return badRequest("{\"error\":\"unsupported component\"}"),
+        error.FileNotFound => return .{ .status = "404 Not Found", .content_type = "application/json", .body = "{\"error\":\"config not found\"}" },
+        else => return helpers.serverError(),
+    };
+    defer access.deinit(allocator);
+
+    if (ensureInstanceRunning(allocator, s, manager, paths, component, name, entry, access.changed)) |resp| return resp;
+
+    const port = resolveGatewayPort(allocator, paths, manager, component, name, entry) orelse
+        return .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = "{\"error\":\"gateway port unavailable\"}" };
+    const base_url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port}) catch return helpers.serverError();
+    defer allocator.free(base_url);
+
+    const proxied = proxy_api.forward(allocator, .{
+        .method = method,
+        .base_url = base_url,
+        .path = upstream_path,
+        .body = body,
+        .bearer_token = access.token,
+        .accept = if (event_stream) "text/event-stream" else null,
+        .unreachable_body = "{\"error\":\"nullclaw gateway unreachable\"}",
+    });
+    return .{
+        .status = proxied.status,
+        .content_type = if (event_stream and isSuccessStatus(proxied.status)) "text/event-stream" else proxied.content_type,
+        .body = proxied.body,
+    };
+}
+
+const GatewayProxyRoute = struct {
+    upstream_path: []const u8,
+    event_stream: bool,
+    body_mode: enum { raw, agent_stream_a2a },
+};
+
+fn gatewayProxyRouteForAction(action: []const u8) ?GatewayProxyRoute {
+    if (std.mem.eql(u8, action, "agent-stream")) return .{ .upstream_path = "/a2a", .event_stream = true, .body_mode = .agent_stream_a2a };
+    if (std.mem.eql(u8, action, "a2a")) return .{ .upstream_path = "/a2a", .event_stream = false, .body_mode = .raw };
+    if (std.mem.eql(u8, action, "a2a-stream")) return .{ .upstream_path = "/a2a", .event_stream = true, .body_mode = .raw };
+    if (std.mem.eql(u8, action, "transcribe")) return .{ .upstream_path = "/media/transcribe", .event_stream = false, .body_mode = .raw };
+    return null;
+}
+
+fn buildAgentStreamA2aBody(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
+    const parsed = std.json.parseFromSlice(struct {
+        message: ?[]const u8 = null,
+        session_key: ?[]const u8 = null,
+        context_id: ?[]const u8 = null,
+        request_id: ?[]const u8 = null,
+        message_id: ?[]const u8 = null,
+    }, allocator, body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch return error.InvalidJson;
+    defer parsed.deinit();
+
+    const message = parsed.value.message orelse return error.MissingMessage;
+    if (message.len == 0) return error.MissingMessage;
+
+    const now = std_compat.time.milliTimestamp();
+    const request_id = parsed.value.request_id orelse "";
+    const message_id = parsed.value.message_id orelse "";
+    const context_id = parsed.value.context_id orelse (parsed.value.session_key orelse "");
+
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+
+    try buf.appendSlice("{\"jsonrpc\":\"2.0\",\"id\":\"");
+    if (request_id.len > 0) {
+        try appendEscaped(&buf, request_id);
+    } else {
+        const generated = try std.fmt.allocPrint(allocator, "nullhub-agent-stream-{d}", .{now});
+        defer allocator.free(generated);
+        try buf.appendSlice(generated);
+    }
+    try buf.appendSlice("\",\"method\":\"message/stream\",\"params\":{\"message\":{\"kind\":\"message\",\"role\":\"user\",\"messageId\":\"");
+    if (message_id.len > 0) {
+        try appendEscaped(&buf, message_id);
+    } else {
+        const generated = try std.fmt.allocPrint(allocator, "msg-nullhub-{d}", .{now});
+        defer allocator.free(generated);
+        try buf.appendSlice(generated);
+    }
+    try buf.appendSlice("\"");
+    if (context_id.len > 0) {
+        try buf.appendSlice(",\"contextId\":\"");
+        try appendEscaped(&buf, context_id);
+        try buf.appendSlice("\"");
+    }
+    try buf.appendSlice(",\"parts\":[{\"kind\":\"text\",\"text\":\"");
+    try appendEscaped(&buf, message);
+    try buf.appendSlice("\"}]},\"configuration\":{\"acceptedOutputModes\":[\"text/plain\"]}}}");
+
+    return try buf.toOwnedSlice();
+}
+
+pub fn isGatewayProxyPath(target: []const u8) bool {
+    const parsed = parsePath(target) orelse return false;
+    const action = parsed.action orelse return false;
+    return gatewayProxyRouteForAction(action) != null;
+}
+
+pub fn prepareGatewayProxy(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    manager: *manager_mod.Manager,
+    paths: paths_mod.Paths,
+    method: []const u8,
+    target: []const u8,
+    body: []const u8,
+) GatewayProxyPrepareResult {
+    const parsed = parsePath(target) orelse return .no_match;
+    const action = parsed.action orelse return .no_match;
+    const route = gatewayProxyRouteForAction(action) orelse return .no_match;
+    if (!std.mem.eql(u8, method, "POST")) return .{ .response = methodNotAllowed() };
+    if (!std.mem.eql(u8, parsed.component, "nullclaw")) {
+        return .{ .response = badRequest("{\"error\":\"gateway proxy routes are only supported for nullclaw instances\"}") };
+    }
+
+    const proxy_body = switch (route.body_mode) {
+        .raw => body,
+        .agent_stream_a2a => buildAgentStreamA2aBody(allocator, body) catch |err| switch (err) {
+            error.InvalidJson => return .{ .response = badRequest("{\"error\":\"invalid JSON body\"}") },
+            error.MissingMessage => return .{ .response = badRequest("{\"error\":\"message is required\"}") },
+            else => return .{ .response = helpers.serverError() },
+        },
+    };
+    const proxy_body_owned = route.body_mode == .agent_stream_a2a;
+    var proxy_body_transferred = false;
+    defer if (proxy_body_owned and !proxy_body_transferred) allocator.free(proxy_body);
+
+    const entry = s.getInstance(parsed.component, parsed.name) orelse return .{ .response = notFound() };
+    const access = ensureNullclawGatewayConfig(allocator, paths, parsed.component, parsed.name) catch |err| switch (err) {
+        error.UnsupportedComponent => return .{ .response = badRequest("{\"error\":\"unsupported component\"}") },
+        error.FileNotFound => return .{ .response = .{ .status = "404 Not Found", .content_type = "application/json", .body = "{\"error\":\"config not found\"}" } },
+        else => return .{ .response = helpers.serverError() },
+    };
+    errdefer access.deinit(allocator);
+
+    if (ensureInstanceRunning(allocator, s, manager, paths, parsed.component, parsed.name, entry, access.changed)) |resp| {
+        access.deinit(allocator);
+        return .{ .response = resp };
+    }
+
+    const port = resolveGatewayPort(allocator, paths, manager, parsed.component, parsed.name, entry) orelse {
+        access.deinit(allocator);
+        return .{ .response = .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = "{\"error\":\"gateway port unavailable\"}" } };
+    };
+
+    proxy_body_transferred = true;
+    return .{ .upstream = .{
+        .port = port,
+        .token = access.token,
+        .upstream_path = route.upstream_path,
+        .body = proxy_body,
+        .body_owned = proxy_body_owned,
+        .event_stream = route.event_stream,
+    } };
 }
 
 const ProviderHealthConfig = struct {
@@ -4670,8 +5204,20 @@ pub fn dispatch(
             return .{
                 .status = "501 Not Implemented",
                 .content_type = "application/json",
-                .body = "{\"error\":\"streaming agent sessions are not supported; use POST /agent\"}",
+                .body = "{\"error\":\"agent-stream requires the HTTP streaming proxy\"}",
             };
+        }
+        if (std.mem.eql(u8, action, "a2a")) {
+            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
+            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/a2a", body, false);
+        }
+        if (std.mem.eql(u8, action, "a2a-stream")) {
+            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
+            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/a2a", body, true);
+        }
+        if (std.mem.eql(u8, action, "transcribe")) {
+            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
+            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/media/transcribe", body, false);
         }
         if (std.mem.eql(u8, action, "agent-sessions")) {
             return handleAgentSessions(allocator, s, paths, parsed.component, parsed.name, method, target);
@@ -4821,6 +5367,78 @@ fn writeTestInstanceConfig(
     defer file.close();
     try file.writeAll(json);
     try file.writeAll("\n");
+}
+
+test "ensureNullclawGatewayConfig patches generic gateway capabilities" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    try writeTestInstanceConfig(
+        allocator,
+        fixture.paths,
+        "nullclaw",
+        "hat",
+        "{\"gateway\":{\"port\":43123,\"max_body_size_bytes\":1024},\"a2a\":{\"enabled\":false},\"memory\":{\"profile\":\"minimal_none\",\"backend\":\"none\",\"auto_save\":false}}",
+    );
+
+    const access = try ensureNullclawGatewayConfig(allocator, fixture.paths, "nullclaw", "hat");
+    defer access.deinit(allocator);
+    try std.testing.expect(std.mem.startsWith(u8, access.token, nullhub_gateway_token_prefix));
+    try std.testing.expect(access.changed);
+
+    const config_path = try fixture.paths.instanceConfig(allocator, "nullclaw", "hat");
+    defer allocator.free(config_path);
+    const file = try std_compat.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const bytes = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+
+    const gateway = parsed.value.object.get("gateway").?.object;
+    const a2a = parsed.value.object.get("a2a").?.object;
+    try std.testing.expect(gateway.get("require_pairing").?.bool);
+    try std.testing.expect(gateway.get("max_body_size_bytes").?.integer >= min_gateway_body_size);
+    try std.testing.expect(gateway.get("request_timeout_secs").?.integer >= min_gateway_timeout_secs);
+    try std.testing.expect(a2a.get("enabled").?.bool);
+    try std.testing.expect(a2a.get("multi_modal").?.bool);
+
+    const expected_hash = try hashGatewayTokenAlloc(allocator, access.token);
+    defer allocator.free(expected_hash);
+    const paired_tokens = gateway.get("paired_tokens").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), paired_tokens.len);
+    try std.testing.expectEqualStrings(expected_hash, paired_tokens[0].string);
+    try std.testing.expect(!isNullhubGatewayToken(paired_tokens[0].string));
+
+    const token_path = try gatewayTokenPath(allocator, fixture.paths, "nullclaw", "hat");
+    defer allocator.free(token_path);
+    const token_file = try std_compat.fs.openFileAbsolute(token_path, .{});
+    defer token_file.close();
+    const stored_token_bytes = try token_file.readToEndAlloc(allocator, 16 * 1024);
+    defer allocator.free(stored_token_bytes);
+    try std.testing.expectEqualStrings(access.token, std.mem.trim(u8, stored_token_bytes, " \t\r\n"));
+
+    const access2 = try ensureNullclawGatewayConfig(allocator, fixture.paths, "nullclaw", "hat");
+    defer access2.deinit(allocator);
+    try std.testing.expectEqualStrings(access.token, access2.token);
+    try std.testing.expect(!access2.changed);
+}
+
+test "buildAgentStreamA2aBody translates managed agent request to A2A message stream" {
+    const allocator = std.testing.allocator;
+    const body = try buildAgentStreamA2aBody(
+        allocator,
+        "{\"message\":\"hello \\\"world\\\"\",\"session_key\":\"interview-1\",\"request_id\":\"req-1\",\"message_id\":\"msg-1\",\"provider\":\"ignored\"}",
+    );
+    defer allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"method\":\"message/stream\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"id\":\"req-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"messageId\":\"msg-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"contextId\":\"interview-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"text\":\"hello \\\\\"world\\\\\"\"") != null);
+    try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/agent-stream"));
 }
 
 fn writeTestTrackerWorkflow(
@@ -7831,8 +8449,18 @@ test "dispatch routes agent invoke stream and sessions" {
     try std.testing.expectEqualStrings("200 OK", invoke_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, invoke_resp.body, "\"response\":\"world\"") != null);
 
-    const stream_resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "POST", "/api/instances/nullclaw/my-agent/agent-stream", "").?;
+    const stream_resp = dispatch(
+        allocator,
+        &s,
+        &mctx.manager,
+        &mctx.mutex,
+        mctx.paths,
+        "POST",
+        "/api/instances/nullclaw/my-agent/agent-stream",
+        "{\"message\":\"hello\",\"session_key\":\"s-1\",\"provider\":\"openai\",\"model\":\"gpt-5\",\"temperature\":\"0.3\",\"agent\":\"helper\"}",
+    ).?;
     try std.testing.expectEqualStrings("501 Not Implemented", stream_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, stream_resp.body, "HTTP streaming proxy") != null);
 
     const list_resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/my-agent/agent-sessions", "").?;
     defer allocator.free(list_resp.body);
