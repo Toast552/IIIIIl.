@@ -2,36 +2,45 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
-  import { orchestrationUiRoutes, routePath } from "$lib/orchestration/routes";
+  import { nullboilerUiRoutes } from "$lib/nullboiler/routes";
+  import { nullticketsUiRoutes } from "$lib/nulltickets/routes";
+  import { routePath } from "$lib/nullstack/path";
   import {
     BOILER_INSTANCE_CHANGE_EVENT,
     TICKETS_INSTANCE_CHANGE_EVENT,
-  } from "$lib/orchestration/backendSelection";
+  } from "$lib/nullstack/backendSelection";
 
   let instances = $state<Record<string, any>>({});
   let installedComponents = $state<Record<string, any>>({});
   let currentPath = $derived($page.url.pathname);
-  let showBoilerOrchestration = $derived(Boolean(installedComponents["nullboiler"]?.installed));
-  let showTicketsStore = $derived(Boolean(installedComponents["nulltickets"]?.installed));
-  let showOrchestration = $derived(showBoilerOrchestration || showTicketsStore);
+  let showNullBoiler = $derived(Boolean(installedComponents["nullboiler"]?.installed));
+  let showNullTickets = $derived(Boolean(installedComponents["nulltickets"]?.installed));
+  let showNullWatch = $derived(Boolean(installedComponents["nullwatch"]?.installed));
   let boilerSelectionVersion = $state(0);
   let ticketsSelectionVersion = $state(0);
-  let orchestrationDashboardHref = $derived.by(() => {
+  let nullclawHref = $derived.by(() => componentEntryHref("nullclaw"));
+  let nullboilerDashboardHref = $derived.by(() => {
     boilerSelectionVersion;
-    return orchestrationUiRoutes.dashboard();
+    return showNullBoiler ? nullboilerUiRoutes.dashboard() : "/install/nullboiler";
   });
-  let orchestrationWorkflowsHref = $derived.by(() => {
+  let nullboilerWorkflowsHref = $derived.by(() => {
     boilerSelectionVersion;
-    return orchestrationUiRoutes.workflows();
+    return nullboilerUiRoutes.workflows();
   });
-  let orchestrationRunsHref = $derived.by(() => {
+  let nullboilerRunsHref = $derived.by(() => {
     boilerSelectionVersion;
-    return orchestrationUiRoutes.runs();
+    return nullboilerUiRoutes.runs();
   });
-  let orchestrationStoreHref = $derived.by(() => {
+  let nullticketsHref = $derived.by(() => {
     ticketsSelectionVersion;
-    return orchestrationUiRoutes.store();
+    return showNullTickets ? nullticketsUiRoutes.store() : "/install/nulltickets";
   });
+  let nullwatchHref = $derived(showNullWatch ? "/nullwatch" : "/install/nullwatch");
+
+  function componentEntryHref(component: string): string {
+    const names = Object.keys(instances[component] || {}).sort();
+    return names[0] ? `/instances/${component}/${encodeURIComponent(names[0])}` : `/install/${component}`;
+  }
 
   async function loadSidebarState() {
     const [statusResult, componentsResult] = await Promise.allSettled([
@@ -83,6 +92,18 @@
   </div>
 
   <div class="nav-section">
+    <h3>Stack</h3>
+    <a href={nullclawHref} class:active={currentPath.startsWith("/instances/nullclaw/") || currentPath === "/install/nullclaw"}>NullClaw</a>
+    <a href={nullboilerDashboardHref} class:active={currentPath.startsWith("/nullboiler") || currentPath === "/install/nullboiler"}>NullBoiler</a>
+    {#if showNullBoiler}
+      <a href={nullboilerWorkflowsHref} class:active={currentPath.startsWith(routePath(nullboilerWorkflowsHref))}>Workflows</a>
+      <a href={nullboilerRunsHref} class:active={currentPath.startsWith(routePath(nullboilerRunsHref))}>Runs</a>
+    {/if}
+    <a href={nullticketsHref} class:active={currentPath.startsWith("/nulltickets") || currentPath === "/install/nulltickets"}>NullTickets</a>
+    <a href={nullwatchHref} class:active={currentPath.startsWith("/nullwatch") || currentPath === "/install/nullwatch"}>NullWatch</a>
+  </div>
+
+  <div class="nav-section">
     <h3>Instances</h3>
     {#each Object.entries(instances) as [component, items]}
       <div class="component-group">
@@ -101,20 +122,6 @@
     {/each}
   </div>
 
-  {#if showOrchestration}
-    <div class="nav-section">
-      <h3>Orchestration</h3>
-      {#if showBoilerOrchestration}
-        <a href={orchestrationDashboardHref} class:active={currentPath === routePath(orchestrationDashboardHref)}>Dashboard</a>
-        <a href={orchestrationWorkflowsHref} class:active={currentPath.startsWith(routePath(orchestrationWorkflowsHref))}>Workflows</a>
-        <a href={orchestrationRunsHref} class:active={currentPath.startsWith(routePath(orchestrationRunsHref))}>Runs</a>
-      {/if}
-      {#if showTicketsStore}
-        <a href={orchestrationStoreHref} class:active={currentPath.startsWith(routePath(orchestrationStoreHref))}>Store</a>
-      {/if}
-    </div>
-  {/if}
-
   <div class="nav-section">
     <a href="/providers" class:active={currentPath === "/providers"}>Providers</a>
   </div>
@@ -124,7 +131,7 @@
   </div>
 
   <div class="nav-section">
-    <a href="/observability" class:active={currentPath.startsWith("/observability")}>Observability</a>
+    <a href="/mission-control" class:active={currentPath.startsWith("/mission-control")}>Mission Control</a>
   </div>
 
   <div class="nav-bottom">

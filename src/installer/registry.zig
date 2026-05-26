@@ -56,7 +56,7 @@ pub const known_components = [_]KnownComponent{
     .{
         .name = "nullwatch",
         .display_name = "NullWatch",
-        .description = "Headless observability, tracing, evals, and run intelligence for lightweight agent infrastructure.",
+        .description = "Headless tracing, evals, and run intelligence for lightweight agent infrastructure.",
         .repo = "nullclaw/nullwatch",
         .default_launch_command = "serve",
         .default_port = 7710,
@@ -71,19 +71,6 @@ pub fn findKnownComponent(name: []const u8) ?KnownComponent {
         }
     }
     return null;
-}
-
-/// NullBoiler and NullTickets expose long-lived API services as the default
-/// process. Their manifests historically named the binary as the launch
-/// command; NullHub stores the service mode as `server` so process supervision
-/// can use HTTP health checks without passing a component-name argument.
-pub fn normalizeLaunchCommand(component: []const u8, command: []const u8) []const u8 {
-    if ((std.mem.eql(u8, component, "nullboiler") or std.mem.eql(u8, component, "nulltickets")) and
-        (std.mem.eql(u8, command, component) or std.mem.eql(u8, command, "serve")))
-    {
-        return "server";
-    }
-    return command;
 }
 
 // ─── URL builders ────────────────────────────────────────────────────────────
@@ -276,12 +263,6 @@ test "findKnownComponent returns nullwatch" {
 
 test "findKnownComponent returns null for unknown" {
     try std.testing.expect(findKnownComponent("nonexistent") == null);
-}
-
-test "normalizeLaunchCommand maps service component binary names to server mode" {
-    try std.testing.expectEqualStrings("server", normalizeLaunchCommand("nullboiler", "nullboiler"));
-    try std.testing.expectEqualStrings("server", normalizeLaunchCommand("nulltickets", "nulltickets"));
-    try std.testing.expectEqualStrings("gateway", normalizeLaunchCommand("nullclaw", "gateway"));
 }
 
 test "buildReleasesUrl" {

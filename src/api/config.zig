@@ -125,6 +125,16 @@ pub fn handlePatch(allocator: std.mem.Allocator, p: paths_mod.Paths, component: 
 }
 
 fn writeConfig(allocator: std.mem.Allocator, p: paths_mod.Paths, component: []const u8, name: []const u8, body: []const u8) ApiResponse {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch return .{
+        .status = "400 Bad Request",
+        .content_type = "application/json",
+        .body = "{\"error\":\"invalid JSON body\"}",
+    };
+    defer parsed.deinit();
+
     const config_path = p.instanceConfig(allocator, component, name) catch return .{
         .status = "500 Internal Server Error",
         .content_type = "application/json",

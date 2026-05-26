@@ -127,9 +127,9 @@ fn createUiAssetsModule(b: *std.Build, embed_ui: bool) *std.Build.Module {
 fn ensureUiBuildReady(b: *std.Build) void {
     if (pathExists("ui/build")) return;
     if (!pathExists("ui/node_modules")) {
-        runCommandOrPanic(b.allocator, &.{ npmCommand(), "--prefix", "ui", "ci", "--no-audit", "--no-fund" });
+        runCommandOrPanic(b, &.{ npmCommand(), "--prefix", "ui", "ci", "--no-audit", "--no-fund" });
     }
-    runCommandOrPanic(b.allocator, &.{ npmCommand(), "--prefix", "ui", "run", "build" });
+    runCommandOrPanic(b, &.{ npmCommand(), "--prefix", "ui", "run", "build" });
 }
 
 fn ensureUiBuildExists() void {
@@ -138,22 +138,23 @@ fn ensureUiBuildExists() void {
     }
 }
 
-fn runCommandOrPanic(allocator: std.mem.Allocator, argv: []const []const u8) void {
-    _ = allocator;
-    const run_allocator = std.heap.page_allocator;
-    const result = std_compat.process.Child.run(.{
-        .allocator = run_allocator,
-        .argv = argv,
-    }) catch |err| std.debug.panic("failed to run {s}: {s}", .{ argv[0], @errorName(err) });
-    defer run_allocator.free(result.stdout);
-    defer run_allocator.free(result.stderr);
+fn runCommandOrPanic(b: *std.Build, argv: []const []const u8) void {
+    const io = b.graph.io;
 
-    switch (result.term) {
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .environ_map = &b.graph.environ_map,
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .create_no_window = true,
+    }) catch |err| std.debug.panic("failed to spawn {s}: {s}", .{ argv[0], @errorName(err) });
+
+    const term = child.wait(io) catch |err| std.debug.panic("failed to wait {s}: {s}", .{ argv[0], @errorName(err) });
+
+    switch (term) {
         .exited => |code| {
-            if (code == 0) return;
-            if (result.stdout.len > 0) std.debug.print("{s}", .{result.stdout});
-            if (result.stderr.len > 0) std.debug.print("{s}", .{result.stderr});
-            std.debug.panic("command failed with exit code {d}: {s}", .{ code, argv[0] });
+            if (code != 0) std.debug.panic("command failed with exit code {d}: {s}", .{ code, argv[0] });
         },
         else => std.debug.panic("command did not exit cleanly: {s}", .{argv[0]}),
     }

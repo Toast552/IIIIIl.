@@ -12,17 +12,14 @@
   import NullBoilerPanel from "$lib/components/NullBoilerPanel.svelte";
   import NullTicketsPanel from "$lib/components/NullTicketsPanel.svelte";
   import { api, type ApiRequestError } from "$lib/api/client";
-  import {
-    orchestrationUiRoutes,
-    withBoilerInstance,
-    withTicketsInstance,
-  } from "$lib/orchestration/routes";
+  import { nullboilerUiRoutes, withBoilerInstance } from "$lib/nullboiler/routes";
+  import { nullticketsUiRoutes, withTicketsInstance } from "$lib/nulltickets/routes";
   import {
     getSelectedBoilerInstance,
     getSelectedTicketsInstance,
     setSelectedBoilerInstance,
     setSelectedTicketsInstance,
-  } from "$lib/orchestration/backendSelection";
+  } from "$lib/nullstack/backendSelection";
 
   let component = $derived($page.params.component);
   let name = $derived($page.params.name);
@@ -630,7 +627,7 @@
   async function openTicketsStore() {
     if (component !== "nulltickets") return;
     setSelectedTicketsInstance(name);
-    await goto(withTicketsInstance(orchestrationUiRoutes.store(), name));
+    await goto(withTicketsInstance(nullticketsUiRoutes.store(), name));
   }
 
   async function createTicketTask() {
@@ -1048,7 +1045,7 @@
       <button class="btn" onclick={stop} disabled={loading}>Stop</button>
       <button class="btn" onclick={restart} disabled={loading}>Restart</button>
       {#if component === "nullwatch"}
-        <a class="btn" href={`/observability?watch=${encodeURIComponent(name)}`}>Observability</a>
+        <a class="btn" href={`/nullwatch?watch=${encodeURIComponent(name)}`}>NullWatch</a>
       {/if}
       <button class="btn danger" onclick={remove} disabled={loading}
         >Delete</button
@@ -1285,8 +1282,8 @@
                   {#if linkedWatch}
                     <a
                       class="btn integration-btn"
-                      href={`/observability?watch=${encodeURIComponent(linkedWatch.name)}`}
-                      >Open Observability</a
+                      href={`/nullwatch?watch=${encodeURIComponent(linkedWatch.name)}`}
+                      >Open NullWatch</a
                     >
                   {/if}
                 </div>
@@ -1339,8 +1336,8 @@
                   </button>
                   <a
                     class="btn integration-btn"
-                    href={`/observability?watch=${encodeURIComponent(name)}`}
-                    >Open Observability</a
+                    href={`/nullwatch?watch=${encodeURIComponent(name)}`}
+                    >Open NullWatch</a
                   >
                 </div>
               {:else}
@@ -1447,13 +1444,13 @@
               <div class="integration-actions">
                 <button
                   class="btn integration-btn"
-                  onclick={() => openBoilerRoute(orchestrationUiRoutes.workflows())}
+                  onclick={() => openBoilerRoute(nullboilerUiRoutes.workflows())}
                 >
                   Workflows
                 </button>
                 <button
                   class="btn integration-btn"
-                  onclick={() => openBoilerRoute(orchestrationUiRoutes.runs())}
+                  onclick={() => openBoilerRoute(nullboilerUiRoutes.runs())}
                 >
                   Runs
                 </button>

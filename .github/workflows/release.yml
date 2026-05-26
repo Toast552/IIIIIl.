@@ -18,6 +18,7 @@ jobs:
     with:
       binary_name: nullhub
       artifact_prefix: nullhub
+      zig_version: "0.16.0"
       node_version: "22"
       node_cache_dependency_path: ui/package-lock.json
       targets_json: >-
@@ -27,8 +28,8 @@ jobs:
           {"os":"ubuntu-latest","target":"linux-riscv64","zig_target":"riscv64-linux-musl","zig_cpu":"","ext":""},
           {"os":"macos-latest","target":"macos-aarch64","zig_target":"aarch64-macos","zig_cpu":"","ext":""},
           {"os":"macos-latest","target":"macos-x86_64","zig_target":"x86_64-macos","zig_cpu":"","ext":""},
-          {"os":"windows-latest","target":"windows-x86_64","zig_target":"x86_64-windows","zig_cpu":"","ext":".exe"},
-          {"os":"windows-latest","target":"windows-aarch64","zig_target":"aarch64-windows","zig_cpu":"","ext":".exe"}
+          {"os":"windows-2025-vs2026","target":"windows-x86_64","zig_target":"x86_64-windows","zig_cpu":"","ext":".exe"},
+          {"os":"windows-2025-vs2026","target":"windows-aarch64","zig_target":"aarch64-windows","zig_cpu":"","ext":".exe"}
         ]
       pre_build_command: |
         if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then

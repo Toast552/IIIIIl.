@@ -1,6 +1,7 @@
-import { createOrchestrationApi } from '$lib/api/orchestration';
-import { createNullTicketsApi } from '$lib/api/nulltickets';
-import { encodePathSegment } from '$lib/orchestration/routes';
+import { createNullBoilerApi } from '$lib/api/nullboiler';
+import { createMissionControlApi } from '$lib/api/missionControl';
+import { createNullTicketsApi, createNullTicketsStoreApi } from '$lib/api/nulltickets';
+import { encodePathSegment } from '$lib/nullstack/path';
 
 const BASE = '/api';
 
@@ -15,6 +16,31 @@ function withQuery(path: string, params: Record<string, string | number | boolea
 }
 
 export { encodePathSegment };
+export type {
+  MissionControlAgent,
+  MissionControlComponentMapping,
+  MissionControlControls,
+  MissionControlEvent,
+  MissionControlFailure,
+  MissionControlGraphEdge,
+  MissionControlGraphNode,
+  MissionControlNullWatchMapping,
+  MissionControlPhase,
+  MissionControlRecovery,
+  MissionControlReplayArtifact,
+  MissionControlReplayList,
+  MissionControlReplayRecord,
+  MissionControlReplaySaveResult,
+  MissionControlState,
+  MissionControlStatus,
+  MissionControlTelemetry,
+  MissionControlTraceRef,
+  MissionControlWorkflowEvidence,
+  MissionControlWorkflowEvidenceCheckpoint,
+  MissionControlWorkflowEvidenceRun,
+  MissionControlWorkflowEvidenceStatus,
+  MissionControlWorkflowMapping,
+} from '$lib/api/missionControl';
 
 export type LogSource = 'instance' | 'nullhub';
 export type ReportOption = { value: string; label: string };
@@ -27,7 +53,7 @@ type InstanceStartOptions = {
 type InstanceDeleteOptions = {
   force?: boolean;
 };
-type ObservabilityTarget = {
+type NullWatchTarget = {
   watch?: string;
 };
 export type ApiRequestError = Error & {
@@ -58,6 +84,75 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   if (!text) return undefined as T;
   return JSON.parse(text);
 }
+
+export const nullTicketsApi = createNullTicketsApi((c, n, payload) =>
+  request<any>(`/instances/${c}/${n}/tickets`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
+);
+
+export const nullTicketsStoreApi = createNullTicketsStoreApi(request, withQuery);
+
+export const nullWatchApi = {
+  getNullWatchHealth: (params?: NullWatchTarget) =>
+    request<any>(withQuery('/nullwatch/health', { nullhub_watch: params?.watch })),
+  getNullWatchSummary: (params?: NullWatchTarget) =>
+    request<any>(withQuery('/nullwatch/v1/summary', { nullhub_watch: params?.watch })),
+  getNullWatchRuns: (params?: NullWatchTarget & { run_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; verdict?: string; dataset?: string; limit?: number }) =>
+    request<any>(
+      withQuery('/nullwatch/v1/runs', {
+        nullhub_watch: params?.watch,
+        run_id: params?.run_id,
+        source: params?.source,
+        operation: params?.operation,
+        status: params?.status,
+        model: params?.model,
+        tool_name: params?.tool_name,
+        verdict: params?.verdict,
+        dataset: params?.dataset,
+        limit: params?.limit,
+      }),
+    ),
+  getNullWatchRun: (runId: string, params?: NullWatchTarget) =>
+    request<any>(
+      withQuery(`/nullwatch/v1/runs/${encodeURIComponent(runId)}`, {
+        nullhub_watch: params?.watch,
+      }),
+    ),
+  getNullWatchSpans: (params?: NullWatchTarget & { run_id?: string; trace_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; task_id?: string; session_id?: string; agent_id?: string; limit?: number }) =>
+    request<any>(
+      withQuery('/nullwatch/v1/spans', {
+        nullhub_watch: params?.watch,
+        run_id: params?.run_id,
+        trace_id: params?.trace_id,
+        source: params?.source,
+        operation: params?.operation,
+        status: params?.status,
+        model: params?.model,
+        tool_name: params?.tool_name,
+        task_id: params?.task_id,
+        session_id: params?.session_id,
+        agent_id: params?.agent_id,
+        limit: params?.limit,
+      }),
+    ),
+  getNullWatchEvals: (params?: NullWatchTarget & { run_id?: string; verdict?: string; eval_key?: string; scorer?: string; dataset?: string; limit?: number }) =>
+    request<any>(
+      withQuery('/nullwatch/v1/evals', {
+        nullhub_watch: params?.watch,
+        run_id: params?.run_id,
+        verdict: params?.verdict,
+        eval_key: params?.eval_key,
+        scorer: params?.scorer,
+        dataset: params?.dataset,
+        limit: params?.limit,
+      }),
+    ),
+};
+
+export const missionControlApi = createMissionControlApi(request);
+export const nullBoilerApi = createNullBoilerApi(request, withQuery);
 
 export const api = {
   getStatus: () => request<any>('/status'),
@@ -156,12 +251,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-  ...createNullTicketsApi((c, n, payload) =>
-    request<any>(`/instances/${c}/${n}/tickets`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-  ),
+  ...nullTicketsApi,
+  ...nullTicketsStoreApi,
   putConfig: (c: string, n: string, config: any) =>
     request<any>(`/instances/${c}/${n}/config`, { method: 'PUT', body: JSON.stringify(config) }),
   getLogs: (c: string, n: string, lines = 100, source: LogSource = 'instance') =>
@@ -183,60 +274,9 @@ export const api = {
 
   refreshComponents: () => request<any>('/components/refresh', { method: 'POST' }),
 
-  getObservabilityHealth: (params?: ObservabilityTarget) =>
-    request<any>(withQuery('/observability/health', { nullhub_watch: params?.watch })),
-  getObservabilitySummary: (params?: ObservabilityTarget) =>
-    request<any>(withQuery('/observability/v1/summary', { nullhub_watch: params?.watch })),
-  getObservabilityRuns: (params?: ObservabilityTarget & { run_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; verdict?: string; dataset?: string; limit?: number }) =>
-    request<any>(
-      withQuery('/observability/v1/runs', {
-        nullhub_watch: params?.watch,
-        run_id: params?.run_id,
-        source: params?.source,
-        operation: params?.operation,
-        status: params?.status,
-        model: params?.model,
-        tool_name: params?.tool_name,
-        verdict: params?.verdict,
-        dataset: params?.dataset,
-        limit: params?.limit,
-      }),
-    ),
-  getObservabilityRun: (runId: string, params?: ObservabilityTarget) =>
-    request<any>(
-      withQuery(`/observability/v1/runs/${encodeURIComponent(runId)}`, {
-        nullhub_watch: params?.watch,
-      }),
-    ),
-  getObservabilitySpans: (params?: ObservabilityTarget & { run_id?: string; trace_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; task_id?: string; session_id?: string; agent_id?: string; limit?: number }) =>
-    request<any>(
-      withQuery('/observability/v1/spans', {
-        nullhub_watch: params?.watch,
-        run_id: params?.run_id,
-        trace_id: params?.trace_id,
-        source: params?.source,
-        operation: params?.operation,
-        status: params?.status,
-        model: params?.model,
-        tool_name: params?.tool_name,
-        task_id: params?.task_id,
-        session_id: params?.session_id,
-        agent_id: params?.agent_id,
-        limit: params?.limit,
-      }),
-    ),
-  getObservabilityEvals: (params?: ObservabilityTarget & { run_id?: string; verdict?: string; eval_key?: string; scorer?: string; dataset?: string; limit?: number }) =>
-    request<any>(
-      withQuery('/observability/v1/evals', {
-        nullhub_watch: params?.watch,
-        run_id: params?.run_id,
-        verdict: params?.verdict,
-        eval_key: params?.eval_key,
-        scorer: params?.scorer,
-        dataset: params?.dataset,
-        limit: params?.limit,
-      }),
-    ),
+  ...nullWatchApi,
+
+  ...missionControlApi,
 
   applyUpdate: (c: string, n: string) =>
     request<any>(`/instances/${c}/${n}/update`, { method: 'POST' }),
@@ -309,5 +349,5 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  ...createOrchestrationApi(request, withQuery),
+  ...nullBoilerApi,
 };

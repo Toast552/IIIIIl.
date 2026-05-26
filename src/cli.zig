@@ -83,10 +83,6 @@ pub const UninstallOptions = struct {
     remove_data: bool = false,
 };
 
-pub const AddSourceOptions = struct {
-    repo: []const u8,
-};
-
 pub const ReportRepo = report_schema.ReportRepo;
 pub const ReportType = report_schema.ReportType;
 
@@ -120,7 +116,6 @@ pub const Command = union(enum) {
     api: ApiOptions,
     service: ServiceCommand,
     uninstall: UninstallOptions,
-    add_source: AddSourceOptions,
     report: ReportOptions,
     help,
 };
@@ -199,9 +194,6 @@ pub fn parse(allocator: std.mem.Allocator, args: *ArgIterator) Command {
     }
     if (std.mem.eql(u8, cmd, "uninstall")) {
         return parseUninstall(args);
-    }
-    if (std.mem.eql(u8, cmd, "add-source")) {
-        return parseAddSource(args);
     }
     if (std.mem.eql(u8, cmd, "report")) {
         return parseReport(args);
@@ -454,12 +446,6 @@ fn parseUninstall(args: *ArgIterator) Command {
     return .{ .uninstall = opts };
 }
 
-fn parseAddSource(args: *ArgIterator) Command {
-    const repo = args.next() orelse return .help;
-    if (repo.len == 0 or repo[0] == '-') return .help;
-    return .{ .add_source = .{ .repo = repo } };
-}
-
 fn parseReport(args: *ArgIterator) Command {
     var opts = ReportOptions{};
     while (args.next()) |arg| {
@@ -518,7 +504,6 @@ pub fn printUsage() void {
         \\  api <METHOD> <PATH>       Call any local nullhub HTTP API route
         \\  uninstall <component/name> Remove an instance
         \\  service <install|uninstall|status>  Manage OS service
-        \\  add-source <repo-url>     Add custom component source
         \\  report                    Report a bug or feature request
         \\  version, -v, --version    Show version
         \\
