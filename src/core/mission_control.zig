@@ -8,38 +8,38 @@ pub const RuntimeState = struct {
     recovery_started_at_ms: i64 = 0,
 };
 
-const MissionControls = struct {
+pub const MissionControls = struct {
     can_launch: bool,
     can_recover: bool,
     can_reset: bool,
 };
 
-const Agent = struct {
+pub const Agent = struct {
     id: []const u8,
     role: []const u8,
     status: []const u8,
     current_step: []const u8,
 };
 
-const GraphNode = struct {
+pub const GraphNode = struct {
     id: []const u8,
     label: []const u8,
     kind: []const u8,
     status: []const u8,
 };
 
-const GraphEdge = struct {
+pub const GraphEdge = struct {
     from: []const u8,
     to: []const u8,
     status: []const u8,
 };
 
-const MissionGraph = struct {
+pub const MissionGraph = struct {
     nodes: []const GraphNode,
     edges: []const GraphEdge,
 };
 
-const MissionEvent = struct {
+pub const MissionEvent = struct {
     at_ms: i64,
     source: []const u8,
     level: []const u8,
@@ -49,7 +49,7 @@ const MissionEvent = struct {
     trace: ?replay.EventTraceDef,
 };
 
-const MissionTelemetry = struct {
+pub const MissionTelemetry = struct {
     runs: usize,
     spans: usize,
     evals: usize,
@@ -59,7 +59,7 @@ const MissionTelemetry = struct {
     verdict: []const u8,
 };
 
-const FailurePanel = struct {
+pub const FailurePanel = struct {
     run_id: []const u8,
     checkpoint_id: []const u8,
     failed_step: []const u8,
@@ -67,14 +67,14 @@ const FailurePanel = struct {
     suggested_intervention: []const u8,
 };
 
-const RecoveryPanel = struct {
+pub const RecoveryPanel = struct {
     run_id: []const u8,
     forked_from: []const u8,
     human_instruction: []const u8,
     status: []const u8,
 };
 
-const MissionSnapshot = struct {
+pub const MissionSnapshot = struct {
     schema_version: u8,
     mode: []const u8,
     scenario_id: []const u8,
@@ -99,13 +99,13 @@ const MissionSnapshot = struct {
     recovery: ?RecoveryPanel,
 };
 
-const ComponentMapping = struct {
+pub const ComponentMapping = struct {
     component: []const u8,
     role: []const u8,
     evidence: []const []const u8,
 };
 
-const WorkflowMapping = struct {
+pub const WorkflowMapping = struct {
     component: []const u8,
     role: []const u8,
     checkpoint_id: []const u8,
@@ -115,7 +115,7 @@ const WorkflowMapping = struct {
     evidence: []const []const u8,
 };
 
-const ObservabilityMapping = struct {
+pub const ObservabilityMapping = struct {
     component: []const u8,
     role: []const u8,
     failed_run_id: []const u8,
@@ -124,14 +124,14 @@ const ObservabilityMapping = struct {
     evidence: []const []const u8,
 };
 
-const ReplayArtifactMapping = struct {
+pub const ReplayArtifactMapping = struct {
     nulltickets: ComponentMapping,
     nullboiler: WorkflowMapping,
     nullclaw: ComponentMapping,
     nullwatch: ObservabilityMapping,
 };
 
-const ReplayArtifact = struct {
+pub const ReplayArtifact = struct {
     artifact_schema_version: u8,
     artifact_kind: []const u8,
     generated_at_ms: i64,
@@ -142,6 +142,34 @@ const ReplayArtifact = struct {
     snapshot: MissionSnapshot,
     replay_fixture: replay.ReplayFixture,
     ecosystem_mapping: ReplayArtifactMapping,
+};
+
+pub const SnapshotView = struct {
+    parsed: std.json.Parsed(replay.ReplayFixture),
+    agents: []Agent,
+    nodes: []GraphNode,
+    edges: []GraphEdge,
+    events: []MissionEvent,
+    snapshot: MissionSnapshot,
+
+    pub fn deinit(self: *SnapshotView, allocator: std.mem.Allocator) void {
+        allocator.free(self.events);
+        allocator.free(self.edges);
+        allocator.free(self.nodes);
+        allocator.free(self.agents);
+        self.parsed.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const ReplayArtifactView = struct {
+    snapshot_view: SnapshotView,
+    artifact: ReplayArtifact,
+
+    pub fn deinit(self: *ReplayArtifactView, allocator: std.mem.Allocator) void {
+        self.snapshot_view.deinit(allocator);
+        self.* = undefined;
+    }
 };
 
 pub fn reset(runtime: *RuntimeState) void {
@@ -161,69 +189,54 @@ pub fn launch(runtime: *RuntimeState, now_ms: i64) bool {
     return true;
 }
 
+pub fn parseReplay(allocator: std.mem.Allocator) !std.json.Parsed(replay.ReplayFixture) {
+    return replay.parseValidated(allocator);
+}
+
 pub fn canRecoverAt(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) !bool {
-    var parsed = try replay.parseValidated(allocator);
+    var parsed = try parseReplay(allocator);
     defer parsed.deinit();
 
-    const elapsed_ms = elapsedSince(runtime.started_at_ms, now_ms);
-    const recovery_elapsed_ms = elapsedSince(runtime.recovery_started_at_ms, now_ms);
-    const phase = currentPhase(parsed.value, runtime, elapsed_ms, recovery_elapsed_ms);
-    return canRecover(parsed.value, runtime, phase);
+    return canRecoverWithFixture(parsed.value, runtime, now_ms);
 }
 
 pub fn recover(allocator: std.mem.Allocator, runtime: *RuntimeState, now_ms: i64) !bool {
-    if (!try canRecoverAt(allocator, runtime.*, now_ms)) return false;
+    var parsed = try parseReplay(allocator);
+    defer parsed.deinit();
+
+    return recoverWithFixture(parsed.value, runtime, now_ms);
+}
+
+pub fn recoverWithFixture(fixture: replay.ReplayFixture, runtime: *RuntimeState, now_ms: i64) bool {
+    if (!canRecoverWithFixture(fixture, runtime.*, now_ms)) return false;
     runtime.recovered = true;
     runtime.recovery_started_at_ms = now_ms;
     return true;
 }
 
-pub fn buildStateJson(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) ![]u8 {
-    var parsed = try replay.parseValidated(allocator);
-    defer parsed.deinit();
-    const fixture = parsed.value;
-
+pub fn canRecoverWithFixture(fixture: replay.ReplayFixture, runtime: RuntimeState, now_ms: i64) bool {
     const elapsed_ms = elapsedSince(runtime.started_at_ms, now_ms);
     const recovery_elapsed_ms = elapsedSince(runtime.recovery_started_at_ms, now_ms);
     const phase = currentPhase(fixture, runtime, elapsed_ms, recovery_elapsed_ms);
-    const agents = try buildAgents(allocator, fixture, phase);
-    defer allocator.free(agents);
-    const nodes = try buildNodes(allocator, fixture, phase);
-    defer allocator.free(nodes);
-    const edges = try buildEdges(allocator, fixture, phase);
-    defer allocator.free(edges);
-    const events = try buildEvents(allocator, fixture, phase);
-    defer allocator.free(events);
-    const snapshot = buildSnapshot(
-        fixture,
-        runtime,
-        now_ms,
-        elapsed_ms,
-        phase,
-        agents,
-        nodes,
-        edges,
-        events,
-    );
-    return std.json.Stringify.valueAlloc(allocator, snapshot, .{ .whitespace = .indent_2 });
+    return canRecoverPhase(fixture, runtime, phase);
 }
 
-pub fn buildReplayArtifactJson(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) ![]u8 {
-    var parsed = try replay.parseValidated(allocator);
-    defer parsed.deinit();
+pub fn buildSnapshotView(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) !SnapshotView {
+    var parsed = try parseReplay(allocator);
+    errdefer parsed.deinit();
     const fixture = parsed.value;
 
     const elapsed_ms = elapsedSince(runtime.started_at_ms, now_ms);
     const recovery_elapsed_ms = elapsedSince(runtime.recovery_started_at_ms, now_ms);
     const phase = currentPhase(fixture, runtime, elapsed_ms, recovery_elapsed_ms);
     const agents = try buildAgents(allocator, fixture, phase);
-    defer allocator.free(agents);
+    errdefer allocator.free(agents);
     const nodes = try buildNodes(allocator, fixture, phase);
-    defer allocator.free(nodes);
+    errdefer allocator.free(nodes);
     const edges = try buildEdges(allocator, fixture, phase);
-    defer allocator.free(edges);
+    errdefer allocator.free(edges);
     const events = try buildEvents(allocator, fixture, phase);
-    defer allocator.free(events);
+    errdefer allocator.free(events);
     const snapshot = buildSnapshot(
         fixture,
         runtime,
@@ -235,6 +248,20 @@ pub fn buildReplayArtifactJson(allocator: std.mem.Allocator, runtime: RuntimeSta
         edges,
         events,
     );
+    return .{
+        .parsed = parsed,
+        .agents = agents,
+        .nodes = nodes,
+        .edges = edges,
+        .events = events,
+        .snapshot = snapshot,
+    };
+}
+
+pub fn buildReplayArtifactView(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) !ReplayArtifactView {
+    var snapshot_view = try buildSnapshotView(allocator, runtime, now_ms);
+    errdefer snapshot_view.deinit(allocator);
+    const fixture = snapshot_view.parsed.value;
     const artifact = ReplayArtifact{
         .artifact_schema_version = 1,
         .artifact_kind = "nullhub.mission_control.replay",
@@ -243,11 +270,14 @@ pub fn buildReplayArtifactJson(allocator: std.mem.Allocator, runtime: RuntimeSta
         .scenario_id = fixture.scenario_id,
         .scenario_version = fixture.scenario_version,
         .mode = fixture.mode,
-        .snapshot = snapshot,
+        .snapshot = snapshot_view.snapshot,
         .replay_fixture = fixture,
         .ecosystem_mapping = replayArtifactMapping(fixture),
     };
-    return std.json.Stringify.valueAlloc(allocator, artifact, .{ .whitespace = .indent_2 });
+    return .{
+        .snapshot_view = snapshot_view,
+        .artifact = artifact,
+    };
 }
 
 fn replayArtifactMapping(fixture: replay.ReplayFixture) ReplayArtifactMapping {
@@ -364,6 +394,10 @@ fn phaseForTrack(fixture: replay.ReplayFixture, track: []const u8, elapsed_ms: i
 }
 
 fn canRecover(fixture: replay.ReplayFixture, runtime: RuntimeState, phase: []const u8) bool {
+    return canRecoverPhase(fixture, runtime, phase);
+}
+
+fn canRecoverPhase(fixture: replay.ReplayFixture, runtime: RuntimeState, phase: []const u8) bool {
     return runtime.launched and !runtime.recovered and isAtOrAfter(fixture, phase, fixture.failure.visible_from_phase);
 }
 
@@ -500,8 +534,22 @@ fn isAtOrAfter(fixture: replay.ReplayFixture, phase: []const u8, threshold: []co
     return phaseRank(fixture, phase) >= phaseRank(fixture, threshold);
 }
 
-test "buildStateJson returns idle mission before launch" {
-    const json = try buildStateJson(std.testing.allocator, .{}, 1_000);
+fn snapshotJsonForTest(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) ![]u8 {
+    var view = try buildSnapshotView(allocator, runtime, now_ms);
+    defer view.deinit(allocator);
+
+    return std.json.Stringify.valueAlloc(allocator, view.snapshot, .{ .whitespace = .indent_2 });
+}
+
+fn replayArtifactJsonForTest(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) ![]u8 {
+    var view = try buildReplayArtifactView(allocator, runtime, now_ms);
+    defer view.deinit(allocator);
+
+    return std.json.Stringify.valueAlloc(allocator, view.artifact, .{ .whitespace = .indent_2 });
+}
+
+test "buildSnapshotView returns idle mission before launch" {
+    const json = try snapshotJsonForTest(std.testing.allocator, .{}, 1_000);
     defer std.testing.allocator.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\": 1") != null);
@@ -512,8 +560,8 @@ test "buildStateJson returns idle mission before launch" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"can_launch\": true") != null);
 }
 
-test "buildStateJson exposes failed mission and recover control" {
-    const json = try buildStateJson(std.testing.allocator, .{
+test "buildSnapshotView exposes failed mission and recover control" {
+    const json = try snapshotJsonForTest(std.testing.allocator, .{
         .launched = true,
         .started_at_ms = 1_000,
     }, 11_000);
@@ -527,8 +575,8 @@ test "buildStateJson exposes failed mission and recover control" {
     try std.testing.expect(std.mem.indexOf(u8, json, "zig build test exited with status 1") != null);
 }
 
-test "buildStateJson exposes recovered completed mission" {
-    const json = try buildStateJson(std.testing.allocator, .{
+test "buildSnapshotView exposes recovered completed mission" {
+    const json = try snapshotJsonForTest(std.testing.allocator, .{
         .launched = true,
         .started_at_ms = 1_000,
         .recovered = true,
@@ -542,8 +590,8 @@ test "buildStateJson exposes recovered completed mission" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"verdict\": \"pass\"") != null);
 }
 
-test "buildReplayArtifactJson exports fixture snapshot and ecosystem mapping" {
-    const json = try buildReplayArtifactJson(std.testing.allocator, .{
+test "buildReplayArtifactView exports fixture snapshot and ecosystem mapping" {
+    const json = try replayArtifactJsonForTest(std.testing.allocator, .{
         .launched = true,
         .started_at_ms = 1_000,
         .recovered = true,

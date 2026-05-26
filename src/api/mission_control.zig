@@ -35,40 +35,64 @@ pub fn handle(allocator: std.mem.Allocator, method: []const u8, target: []const 
         return helpers.methodNotAllowed();
     }
 
-    store.mutex.lock();
-    defer store.mutex.unlock();
-
     const now_ms = std_compat.time.milliTimestamp();
 
-    if (is_state) return stateResponse(allocator, store.runtime, now_ms);
-    if (is_replay) return replayResponse(allocator, store.runtime, now_ms);
+    if (is_state) return stateResponse(allocator, runtimeSnapshot(store), now_ms);
+    if (is_replay) return replayResponse(allocator, runtimeSnapshot(store), now_ms);
 
     if (is_reset) {
+        store.mutex.lock();
         mission.reset(&store.runtime);
-        return stateResponse(allocator, store.runtime, now_ms);
+        const runtime = store.runtime;
+        store.mutex.unlock();
+        return stateResponse(allocator, runtime, now_ms);
     }
 
     if (is_launch) {
-        if (!mission.launch(&store.runtime, now_ms)) return missionAlreadyStarted();
-        return stateResponse(allocator, store.runtime, now_ms);
+        store.mutex.lock();
+        const launched = mission.launch(&store.runtime, now_ms);
+        const runtime = store.runtime;
+        store.mutex.unlock();
+
+        if (!launched) return missionAlreadyStarted();
+        return stateResponse(allocator, runtime, now_ms);
     }
 
     if (is_recover) {
-        const recovered = mission.recover(allocator, &store.runtime, now_ms) catch return helpers.serverError();
+        var parsed = mission.parseReplay(allocator) catch return helpers.serverError();
+        defer parsed.deinit();
+
+        store.mutex.lock();
+        const recovered = mission.recoverWithFixture(parsed.value, &store.runtime, now_ms);
+        const runtime = store.runtime;
+        store.mutex.unlock();
+
         if (!recovered) return missionNotRecoverable();
-        return stateResponse(allocator, store.runtime, now_ms);
+        return stateResponse(allocator, runtime, now_ms);
     }
 
     return helpers.notFound();
 }
 
+fn runtimeSnapshot(store: *RuntimeStore) mission.RuntimeState {
+    store.mutex.lock();
+    defer store.mutex.unlock();
+    return store.runtime;
+}
+
 fn stateResponse(allocator: std.mem.Allocator, runtime: mission.RuntimeState, now_ms: i64) ApiResponse {
-    const body = mission.buildStateJson(allocator, runtime, now_ms) catch return helpers.serverError();
+    var view = mission.buildSnapshotView(allocator, runtime, now_ms) catch return helpers.serverError();
+    defer view.deinit(allocator);
+
+    const body = std.json.Stringify.valueAlloc(allocator, view.snapshot, .{ .whitespace = .indent_2 }) catch return helpers.serverError();
     return helpers.jsonOk(body);
 }
 
 fn replayResponse(allocator: std.mem.Allocator, runtime: mission.RuntimeState, now_ms: i64) ApiResponse {
-    const body = mission.buildReplayArtifactJson(allocator, runtime, now_ms) catch return helpers.serverError();
+    var view = mission.buildReplayArtifactView(allocator, runtime, now_ms) catch return helpers.serverError();
+    defer view.deinit(allocator);
+
+    const body = std.json.Stringify.valueAlloc(allocator, view.artifact, .{ .whitespace = .indent_2 }) catch return helpers.serverError();
     return helpers.jsonOk(body);
 }
 

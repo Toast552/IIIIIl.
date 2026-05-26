@@ -95,10 +95,13 @@
   let traceHydration = $state<Record<string, TraceHydration>>({});
   let traceHydrating = $state(false);
   let traceWatchName = $state<string | null>(null);
-  let traceHydrationRequest = 0;
+  let traceHydrationKey = '';
+  let traceHydrationInFlightKey = '';
+  let traceHydrationCheckedAt = 0;
   let traceWatchCheckedAt = 0;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
+  const traceHydrationRefreshMs = 5000;
 
   const nodes = $derived(mission?.graph?.nodes || []);
   const edges = $derived(mission?.graph?.edges || []);
@@ -125,7 +128,7 @@
     try {
       const nextMission = await api.getMissionControlState();
       mission = nextMission;
-      void hydrateTracePanels(nextMission);
+      queueTraceHydration(nextMission);
       error = null;
     } catch (e) {
       error = (e as Error).message;
@@ -148,7 +151,7 @@
       if (name === 'recover') nextMission = await api.recoverMissionControl();
       if (nextMission) {
         mission = nextMission;
-        void hydrateTracePanels(nextMission);
+        queueTraceHydration(nextMission);
       }
       error = null;
     } catch (e) {
@@ -190,23 +193,44 @@
     if (pollTimer) clearTimeout(pollTimer);
   });
 
-  async function hydrateTracePanels(snapshot: MissionControlState) {
+  function queueTraceHydration(snapshot: MissionControlState) {
+    void refreshTraceHydration(snapshot);
+  }
+
+  async function refreshTraceHydration(snapshot: MissionControlState) {
     const runIds = missionTracePanelRunIds(snapshot);
-    const requestId = ++traceHydrationRequest;
     if (runIds.length === 0) {
       traceHydration = {};
+      traceHydrationKey = '';
+      traceHydrationInFlightKey = '';
+      traceHydrationCheckedAt = Date.now();
       traceHydrating = false;
       return;
     }
 
-    traceHydrating = true;
     const watch = await runningNullWatchName();
-    if (disposed || requestId !== traceHydrationRequest) return;
-    const traces = await hydrateMissionTracePanels(api, snapshot, watch);
-    if (disposed || requestId !== traceHydrationRequest) return;
+    if (disposed) return;
 
-    traceHydration = traces;
-    traceHydrating = false;
+    const key = `${watch || 'none'}:${runIds.join('|')}`;
+    const now = Date.now();
+    if (traceHydrationInFlightKey === key) return;
+    if (traceHydrationKey === key && now - traceHydrationCheckedAt < traceHydrationRefreshMs) return;
+
+    traceHydrationInFlightKey = key;
+    traceHydrating = Boolean(watch);
+    try {
+      const traces = await hydrateMissionTracePanels(api, snapshot, watch);
+      if (disposed || traceHydrationInFlightKey !== key) return;
+
+      traceHydration = traces;
+      traceHydrationKey = key;
+      traceHydrationCheckedAt = Date.now();
+    } finally {
+      if (traceHydrationInFlightKey === key) {
+        traceHydrationInFlightKey = '';
+        traceHydrating = false;
+      }
+    }
   }
 
   async function runningNullWatchName(): Promise<string | null> {
@@ -637,8 +661,8 @@
               <p>{mission.failure.error_message}</p>
               {#if failedTrace}
                 <p class="trace-evidence">{spanCount(failedTrace)} spans · {evalCount(failedTrace)} evals · {formatCost(traceCost(failedTrace))}</p>
+                <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
               {/if}
-              <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
             {/if}
           </div>
 
@@ -663,8 +687,8 @@
               <p>{mission.recovery.status}</p>
               {#if recoveredTrace}
                 <p class="trace-evidence">{spanCount(recoveredTrace)} spans · {evalCount(recoveredTrace)} evals · {formatCost(traceCost(recoveredTrace))}</p>
+                <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
               {/if}
-              <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
             {:else}
               <p>Waiting for human checkpoint fork.</p>
             {/if}
