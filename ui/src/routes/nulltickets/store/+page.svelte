@@ -116,6 +116,13 @@
     if (e.key === 'Enter' && !e.shiftKey) browse();
   }
 
+  function handleEntryRowKeydown(e: KeyboardEvent, entry: any) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      void viewEntry(entry);
+    }
+  }
+
   function closeModal() {
     selectedEntry = null;
   }
@@ -233,7 +240,13 @@
               </thead>
               <tbody>
                 {#each entries as entry}
-                  <tr class="clickable" onclick={() => viewEntry(entry)}>
+                  <tr
+                    class="clickable"
+                    role="button"
+                    tabindex="0"
+                    onclick={() => viewEntry(entry)}
+                    onkeydown={(e) => handleEntryRowKeydown(e, entry)}
+                  >
                     <td class="mono">{entryKey(entry)}</td>
                     <td class="mono value-preview">
                       {#if entry.value !== undefined}
@@ -244,10 +257,10 @@
                         -
                       {/if}
                     </td>
-                    <td class="actions-cell" onclick={(e) => e.stopPropagation()}>
+                    <td class="actions-cell">
                       <button
                         class="btn-danger-sm"
-                        onclick={() => deleteEntry(entryKey(entry))}
+                        onclick={(e) => { e.stopPropagation(); void deleteEntry(entryKey(entry)); }}
                       >Delete</button>
                     </td>
                   </tr>
@@ -263,9 +276,9 @@
 
 <!-- Entry detail modal -->
 {#if selectedEntry}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="modal-backdrop" role="button" tabindex="-1" onclick={closeModal}>
-    <div class="modal" role="dialog" aria-label="Entry detail" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === 'Escape') closeModal(); }}>
+  <div class="modal-backdrop">
+    <button type="button" class="modal-backdrop-button" aria-label="Close dialog" onclick={closeModal}></button>
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Entry detail" tabindex="-1" onkeydown={(e) => { if (e.key === 'Escape') closeModal(); }}>
       <div class="modal-header">
         <span class="modal-title mono">{selectedEntry.key}</span>
         <button class="modal-close" onclick={closeModal} aria-label="Close">&#x2715;</button>
@@ -345,7 +358,6 @@
     border-radius: 2px;
     font-size: 0.8125rem;
     font-family: var(--font-mono);
-    outline: none;
     min-width: 0;
   }
   .ns-input:focus {
@@ -400,7 +412,6 @@
     border-radius: 2px;
     font-size: 0.8125rem;
     font-family: var(--font-mono);
-    outline: none;
     resize: vertical;
   }
   .form-input:focus,
@@ -493,6 +504,13 @@
   tr.clickable:hover td {
     background: var(--bg-hover);
   }
+  tr.clickable:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  tr.clickable:focus-visible td {
+    background: var(--bg-hover);
+  }
   .btn-danger-sm {
     padding: 0.25rem 0.5rem;
     background: color-mix(in srgb, var(--error) 10%, transparent);
@@ -543,14 +561,27 @@
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.65);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 100;
+  }
+  .modal-backdrop-button {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
     backdrop-filter: blur(2px);
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+  }
+  .modal-backdrop-button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -4px;
   }
   .modal {
+    position: relative;
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 4px;

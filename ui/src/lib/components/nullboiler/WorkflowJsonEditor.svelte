@@ -51,7 +51,6 @@
     font-size: 0.8125rem;
     line-height: 1.6;
     resize: vertical;
-    outline: none;
     transition: border-color 0.2s ease;
     tab-size: 2;
   }

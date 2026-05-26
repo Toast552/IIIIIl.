@@ -1682,7 +1682,6 @@
   .field select:focus,
   .field textarea:focus,
   .json-editor:focus {
-    outline: none;
     border-color: var(--accent);
   }
   .json-editor {

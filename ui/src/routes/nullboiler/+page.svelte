@@ -61,6 +61,17 @@
   function runHref(id: string): string {
     return nullboilerUiRoutes.run(id);
   }
+
+  function openRun(id: string) {
+    void goto(runHref(id));
+  }
+
+  function handleRunRowKeydown(e: KeyboardEvent, id: string) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openRun(id);
+    }
+  }
 </script>
 
 <div class="dashboard">
@@ -118,7 +129,13 @@
           </thead>
           <tbody>
             {#each runs.slice(0, 20) as run}
-              <tr onclick={() => goto(runHref(run.id))} class="clickable">
+              <tr
+                onclick={() => openRun(run.id)}
+                onkeydown={(e) => handleRunRowKeydown(e, run.id)}
+                class="clickable"
+                role="link"
+                tabindex="0"
+              >
                 <td class="mono">{(run.id || '').slice(0, 8)}</td>
                 <td>{run.workflow_name || run.workflow_id || '-'}</td>
                 <td>
@@ -259,6 +276,13 @@
     transition: background 0.15s ease;
   }
   tr.clickable:hover td {
+    background: var(--bg-hover);
+  }
+  tr.clickable:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  tr.clickable:focus-visible td {
     background: var(--bg-hover);
   }
   .status-badge {

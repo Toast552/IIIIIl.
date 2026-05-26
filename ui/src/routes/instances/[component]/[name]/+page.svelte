@@ -2137,7 +2137,6 @@
   .integration-field select:focus,
   .integration-field input:focus,
   .integration-field textarea:focus {
-    outline: none;
     border-color: var(--accent);
   }
   .integration-field textarea {
@@ -2179,7 +2178,6 @@
     font-size: 0.75rem;
   }
   .usage-window:focus {
-    outline: none;
     border-color: var(--accent);
   }
   .usage-table-wrap {

@@ -259,6 +259,7 @@ body.theme-8bit-lobster-light:not(.effects-disabled)::after {
 /* Base Inputs */
 input,
 button,
+select,
 textarea {
   font-family: inherit;
   font-size: 0.95em;
@@ -273,6 +274,7 @@ textarea {
 }
 
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible,
 button:focus-visible,
 a:focus-visible {
@@ -367,6 +369,7 @@ body.effects-disabled * {
 }
 
 body.effects-disabled input:focus,
+body.effects-disabled select:focus,
 body.effects-disabled textarea:focus,
 body.effects-disabled button:hover:not(:disabled) {
   box-shadow: none !important;

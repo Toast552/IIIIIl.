@@ -273,7 +273,6 @@
     font-size: 0.8125rem;
     line-height: 1.5;
     resize: vertical;
-    outline: none;
   }
   .override-editor:focus {
     border-color: var(--accent-dim);
