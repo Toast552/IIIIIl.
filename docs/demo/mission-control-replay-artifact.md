@@ -49,7 +49,7 @@ The exported JSON contains:
 - `events[source=nulltickets]`
 - `graph.nodes[kind=tracker]`
 
-`ecosystem_mapping.nullboiler` points to orchestration evidence:
+`ecosystem_mapping.nullboiler` points to NullBoiler workflow evidence:
 
 - phase timing and workflow graph edges
 - `workflow_evidence`
@@ -63,7 +63,7 @@ The exported JSON contains:
 - agent graph nodes
 - NullClaw-style event source entries
 
-`ecosystem_mapping.nullwatch` points to observability evidence:
+`ecosystem_mapping.nullwatch` points to NullWatch trace evidence:
 
 - failed and recovered run ids
 - `events[].trace`

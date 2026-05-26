@@ -1,7 +1,7 @@
-import { createOrchestrationApi } from '$lib/api/orchestration';
+import { createNullBoilerApi } from '$lib/api/nullboiler';
 import { createMissionControlApi } from '$lib/api/missionControl';
-import { createNullTicketsApi } from '$lib/api/nulltickets';
-import { encodePathSegment } from '$lib/orchestration/routes';
+import { createNullTicketsApi, createNullTicketsStoreApi } from '$lib/api/nulltickets';
+import { encodePathSegment } from '$lib/nullstack/routes';
 
 const BASE = '/api';
 
@@ -24,7 +24,7 @@ export type {
   MissionControlFailure,
   MissionControlGraphEdge,
   MissionControlGraphNode,
-  MissionControlObservabilityMapping,
+  MissionControlNullWatchMapping,
   MissionControlPhase,
   MissionControlRecovery,
   MissionControlReplayArtifact,
@@ -53,7 +53,7 @@ type InstanceStartOptions = {
 type InstanceDeleteOptions = {
   force?: boolean;
 };
-type ObservabilityTarget = {
+type NullWatchTarget = {
   watch?: string;
 };
 export type ApiRequestError = Error & {
@@ -188,6 +188,7 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   ),
+  ...createNullTicketsStoreApi(request, withQuery),
   putConfig: (c: string, n: string, config: any) =>
     request<any>(`/instances/${c}/${n}/config`, { method: 'PUT', body: JSON.stringify(config) }),
   getLogs: (c: string, n: string, lines = 100, source: LogSource = 'instance') =>
@@ -209,13 +210,13 @@ export const api = {
 
   refreshComponents: () => request<any>('/components/refresh', { method: 'POST' }),
 
-  getObservabilityHealth: (params?: ObservabilityTarget) =>
-    request<any>(withQuery('/observability/health', { nullhub_watch: params?.watch })),
-  getObservabilitySummary: (params?: ObservabilityTarget) =>
-    request<any>(withQuery('/observability/v1/summary', { nullhub_watch: params?.watch })),
-  getObservabilityRuns: (params?: ObservabilityTarget & { run_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; verdict?: string; dataset?: string; limit?: number }) =>
+  getNullWatchHealth: (params?: NullWatchTarget) =>
+    request<any>(withQuery('/nullwatch/health', { nullhub_watch: params?.watch })),
+  getNullWatchSummary: (params?: NullWatchTarget) =>
+    request<any>(withQuery('/nullwatch/v1/summary', { nullhub_watch: params?.watch })),
+  getNullWatchRuns: (params?: NullWatchTarget & { run_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; verdict?: string; dataset?: string; limit?: number }) =>
     request<any>(
-      withQuery('/observability/v1/runs', {
+      withQuery('/nullwatch/v1/runs', {
         nullhub_watch: params?.watch,
         run_id: params?.run_id,
         source: params?.source,
@@ -228,15 +229,15 @@ export const api = {
         limit: params?.limit,
       }),
     ),
-  getObservabilityRun: (runId: string, params?: ObservabilityTarget) =>
+  getNullWatchRun: (runId: string, params?: NullWatchTarget) =>
     request<any>(
-      withQuery(`/observability/v1/runs/${encodeURIComponent(runId)}`, {
+      withQuery(`/nullwatch/v1/runs/${encodeURIComponent(runId)}`, {
         nullhub_watch: params?.watch,
       }),
     ),
-  getObservabilitySpans: (params?: ObservabilityTarget & { run_id?: string; trace_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; task_id?: string; session_id?: string; agent_id?: string; limit?: number }) =>
+  getNullWatchSpans: (params?: NullWatchTarget & { run_id?: string; trace_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; task_id?: string; session_id?: string; agent_id?: string; limit?: number }) =>
     request<any>(
-      withQuery('/observability/v1/spans', {
+      withQuery('/nullwatch/v1/spans', {
         nullhub_watch: params?.watch,
         run_id: params?.run_id,
         trace_id: params?.trace_id,
@@ -251,9 +252,9 @@ export const api = {
         limit: params?.limit,
       }),
     ),
-  getObservabilityEvals: (params?: ObservabilityTarget & { run_id?: string; verdict?: string; eval_key?: string; scorer?: string; dataset?: string; limit?: number }) =>
+  getNullWatchEvals: (params?: NullWatchTarget & { run_id?: string; verdict?: string; eval_key?: string; scorer?: string; dataset?: string; limit?: number }) =>
     request<any>(
-      withQuery('/observability/v1/evals', {
+      withQuery('/nullwatch/v1/evals', {
         nullhub_watch: params?.watch,
         run_id: params?.run_id,
         verdict: params?.verdict,
@@ -337,5 +338,5 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  ...createOrchestrationApi(request, withQuery),
+  ...createNullBoilerApi(request, withQuery),
 };

@@ -1,5 +1,5 @@
-const SELECTED_BOILER_STORAGE_KEY = "nullhub.orchestration.boiler_instance";
-const SELECTED_TICKETS_STORAGE_KEY = "nullhub.orchestration.tickets_instance";
+const SELECTED_BOILER_STORAGE_KEY = "nullhub.nullboiler.instance";
+const SELECTED_TICKETS_STORAGE_KEY = "nullhub.nulltickets.instance";
 export const BOILER_INSTANCE_QUERY_PARAM = "boiler_instance";
 export const TICKETS_INSTANCE_QUERY_PARAM = "tickets_instance";
 export const BOILER_INSTANCE_CHANGE_EVENT = "nullhub:boiler-instance-change";

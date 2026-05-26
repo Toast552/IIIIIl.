@@ -1,9 +1,9 @@
 <script lang="ts">
-  import ManagedInstanceSelector from "./ManagedInstanceSelector.svelte";
+  import ManagedInstanceSelector from "../ManagedInstanceSelector.svelte";
   import {
     getSelectedBoilerInstance,
     setSelectedBoilerInstance,
-  } from "$lib/orchestration/backendSelection";
+  } from "$lib/nullstack/backendSelection";
 
   let {
     onChange = () => {},

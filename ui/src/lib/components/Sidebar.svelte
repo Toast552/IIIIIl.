@@ -2,11 +2,11 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
-  import { nullboilerUiRoutes, nullticketsUiRoutes, routePath } from "$lib/orchestration/routes";
+  import { nullboilerUiRoutes, nullticketsUiRoutes, routePath } from "$lib/nullstack/routes";
   import {
     BOILER_INSTANCE_CHANGE_EVENT,
     TICKETS_INSTANCE_CHANGE_EVENT,
-  } from "$lib/orchestration/backendSelection";
+  } from "$lib/nullstack/backendSelection";
 
   let instances = $state<Record<string, any>>({});
   let installedComponents = $state<Record<string, any>>({});

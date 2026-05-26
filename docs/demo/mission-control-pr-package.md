@@ -53,8 +53,8 @@ What changed:
 Why:
 
 NullHub already acts as the control plane for the nullclaw ecosystem, and the
-surrounding repositories already sketch out runtime, orchestration, task state,
-and observability. What was missing was a memorable local vertical slice that
+surrounding repositories already sketch out runtime, workflow execution, task state,
+and trace data. What was missing was a memorable local vertical slice that
 lets reviewers see those concepts working as one operator experience.
 
 This PR keeps the demo deterministic and honest: it does not mutate real
@@ -188,4 +188,4 @@ This PR intentionally does not:
 - require hosted infrastructure;
 - require NullTickets, NullBoiler, NullClaw, or NullWatch to be running;
 - mutate real task or workflow state;
-- replace the existing observability page.
+- replace the existing NullWatch page.

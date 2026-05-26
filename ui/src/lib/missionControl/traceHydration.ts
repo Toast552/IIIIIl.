@@ -1,18 +1,18 @@
 import type { MissionControlState } from '$lib/api/missionControl';
 
-type ObservabilityTarget = {
+type NullWatchTarget = {
   watch?: string;
 };
 
 type TraceHydrationApi = {
   getStatus: () => Promise<StatusPayload>;
-  getObservabilityRuns: (
-    params?: ObservabilityTarget & { run_id?: string; limit?: number },
-  ) => Promise<ObservabilityRunsPayload>;
-  getObservabilityRun: (
+  getNullWatchRuns: (
+    params?: NullWatchTarget & { run_id?: string; limit?: number },
+  ) => Promise<NullWatchRunsPayload>;
+  getNullWatchRun: (
     runId: string,
-    params?: ObservabilityTarget,
-  ) => Promise<ObservabilityRunDetail>;
+    params?: NullWatchTarget,
+  ) => Promise<NullWatchRunDetail>;
 };
 
 export type NullWatchRunSummary = {
@@ -50,7 +50,7 @@ export type TraceHydrationUnavailableReason =
   | 'no_running_nullwatch'
   | 'status_unavailable'
   | 'run_not_found'
-  | 'observability_unavailable'
+  | 'nullwatch_unavailable'
   | 'run_detail_unavailable'
   | 'empty_run_detail';
 
@@ -82,11 +82,11 @@ type StatusPayload = {
   };
 };
 
-type ObservabilityRunsPayload = {
+type NullWatchRunsPayload = {
   items?: Array<{ run_id?: string }>;
 };
 
-type ObservabilityRunDetail = {
+type NullWatchRunDetail = {
   summary?: NullWatchRunSummary;
   run?: NullWatchRunSummary;
   spans?: NullWatchSpan[];
@@ -156,18 +156,18 @@ async function loadTraceHydration(
   runId: string,
   watch: string,
 ): Promise<TraceHydration> {
-  let listed: ObservabilityRunsPayload;
+  let listed: NullWatchRunsPayload;
   try {
-    listed = await api.getObservabilityRuns({ run_id: runId, limit: 1, watch });
+    listed = await api.getNullWatchRuns({ run_id: runId, limit: 1, watch });
   } catch {
-    return unavailableTrace(runId, 'observability_unavailable');
+    return unavailableTrace(runId, 'nullwatch_unavailable');
   }
 
   const found = Array.isArray(listed?.items) && listed.items.some((item) => item?.run_id === runId);
   if (!found) return unavailableTrace(runId, 'run_not_found');
 
   try {
-    const detail = await api.getObservabilityRun(runId, { watch });
+    const detail = await api.getNullWatchRun(runId, { watch });
     const summary = normalizeRunSummary(detail, runId);
     const spans = Array.isArray(detail?.spans) ? detail.spans : [];
     const evals = Array.isArray(detail?.evals) ? detail.evals : [];
@@ -202,7 +202,7 @@ function unavailableTraceMessage(reason: TraceHydrationUnavailableReason): strin
   if (reason === 'no_running_nullwatch') return 'No running NullWatch instance';
   if (reason === 'status_unavailable') return 'NullHub status unavailable';
   if (reason === 'run_not_found') return 'No matching live run';
-  if (reason === 'observability_unavailable') return 'NullWatch run list unavailable';
+  if (reason === 'nullwatch_unavailable') return 'NullWatch run list unavailable';
   if (reason === 'run_detail_unavailable') return 'NullWatch run detail unavailable';
   return 'NullWatch returned no run detail';
 }
@@ -218,7 +218,7 @@ function addRunId(ids: string[], runId: string | null | undefined) {
   if (runId && !ids.includes(runId)) ids.push(runId);
 }
 
-function normalizeRunSummary(detail: ObservabilityRunDetail, runId: string): NullWatchRunSummary | null {
+function normalizeRunSummary(detail: NullWatchRunDetail, runId: string): NullWatchRunSummary | null {
   const summary = detail?.summary || detail?.run || null;
   if (!summary || typeof summary !== 'object') return null;
   return {

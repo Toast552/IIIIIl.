@@ -56,7 +56,7 @@ pub const known_components = [_]KnownComponent{
     .{
         .name = "nullwatch",
         .display_name = "NullWatch",
-        .description = "Headless observability, tracing, evals, and run intelligence for lightweight agent infrastructure.",
+        .description = "Headless tracing, evals, and run intelligence for lightweight agent infrastructure.",
         .repo = "nullclaw/nullwatch",
         .default_launch_command = "serve",
         .default_port = 7710,

@@ -47,10 +47,11 @@ export function withTicketsInstance(path: string, ticketsInstance?: string): str
 
 const nullboilerUiRoot = '/nullboiler';
 const nullticketsUiRoot = '/nulltickets';
-const apiRoot = '/orchestration';
+const nullboilerApiRoot = '/nullboiler';
+const nullticketsApiRoot = '/nulltickets';
 const workflowsBase = `${nullboilerUiRoot}/workflows`;
 const runsBase = `${nullboilerUiRoot}/runs`;
-const storeBase = `${apiRoot}/store`;
+const storeBase = `${nullticketsApiRoot}/store`;
 
 export const nullboilerUiRoutes = {
   dashboard: (options?: StackRouteOptions) => withBoilerInstance(nullboilerUiRoot, options?.boilerInstance),
@@ -66,28 +67,31 @@ export const nullticketsUiRoutes = {
   store: (options?: StackRouteOptions) => withTicketsInstance(`${nullticketsUiRoot}/store`, options?.ticketsInstance),
 };
 
-export const orchestrationApiPaths = {
-  workflows: () => `${apiRoot}/workflows`,
-  workflow: (id: string) => `${apiRoot}/workflows/${encodePathSegment(id)}`,
-  workflowValidate: (id: string) => `${apiRoot}/workflows/${encodePathSegment(id)}/validate`,
-  workflowRun: (id: string) => `${apiRoot}/workflows/${encodePathSegment(id)}/run`,
-  runs: () => `${apiRoot}/runs`,
-  run: (id: string) => `${apiRoot}/runs/${encodePathSegment(id)}`,
-  runCancel: (id: string) => `${apiRoot}/runs/${encodePathSegment(id)}/cancel`,
-  runRetry: (id: string) => `${apiRoot}/runs/${encodePathSegment(id)}/retry`,
-  runResume: (id: string) => `${apiRoot}/runs/${encodePathSegment(id)}/resume`,
-  runReplay: (id: string) => `${apiRoot}/runs/${encodePathSegment(id)}/replay`,
-  runState: (id: string) => `${apiRoot}/runs/${encodePathSegment(id)}/state`,
-  runsFork: () => `${apiRoot}/runs/fork`,
-  runCheckpoints: (runId: string) => `${apiRoot}/runs/${encodePathSegment(runId)}/checkpoints`,
-  runCheckpoint: (runId: string, checkpointId: string) => `${apiRoot}/runs/${encodePathSegment(runId)}/checkpoints/${encodePathSegment(checkpointId)}`,
-  runStream: (runId: string) => `${apiRoot}/runs/${encodePathSegment(runId)}/stream`,
-  trackerStatus: () => `${apiRoot}/tracker/status`,
-  trackerTasks: () => `${apiRoot}/tracker/tasks`,
-  trackerStats: () => `${apiRoot}/tracker/stats`,
-  trackerRefresh: () => `${apiRoot}/tracker/refresh`,
-  workers: () => `${apiRoot}/workers`,
-  worker: (id: string) => `${apiRoot}/workers/${encodePathSegment(id)}`,
+export const nullboilerApiPaths = {
+  workflows: () => `${nullboilerApiRoot}/workflows`,
+  workflow: (id: string) => `${nullboilerApiRoot}/workflows/${encodePathSegment(id)}`,
+  workflowValidate: (id: string) => `${nullboilerApiRoot}/workflows/${encodePathSegment(id)}/validate`,
+  workflowRun: (id: string) => `${nullboilerApiRoot}/workflows/${encodePathSegment(id)}/run`,
+  runs: () => `${nullboilerApiRoot}/runs`,
+  run: (id: string) => `${nullboilerApiRoot}/runs/${encodePathSegment(id)}`,
+  runCancel: (id: string) => `${nullboilerApiRoot}/runs/${encodePathSegment(id)}/cancel`,
+  runRetry: (id: string) => `${nullboilerApiRoot}/runs/${encodePathSegment(id)}/retry`,
+  runResume: (id: string) => `${nullboilerApiRoot}/runs/${encodePathSegment(id)}/resume`,
+  runReplay: (id: string) => `${nullboilerApiRoot}/runs/${encodePathSegment(id)}/replay`,
+  runState: (id: string) => `${nullboilerApiRoot}/runs/${encodePathSegment(id)}/state`,
+  runsFork: () => `${nullboilerApiRoot}/runs/fork`,
+  runCheckpoints: (runId: string) => `${nullboilerApiRoot}/runs/${encodePathSegment(runId)}/checkpoints`,
+  runCheckpoint: (runId: string, checkpointId: string) => `${nullboilerApiRoot}/runs/${encodePathSegment(runId)}/checkpoints/${encodePathSegment(checkpointId)}`,
+  runStream: (runId: string) => `${nullboilerApiRoot}/runs/${encodePathSegment(runId)}/stream`,
+  trackerStatus: () => `${nullboilerApiRoot}/tracker/status`,
+  trackerTasks: () => `${nullboilerApiRoot}/tracker/tasks`,
+  trackerStats: () => `${nullboilerApiRoot}/tracker/stats`,
+  trackerRefresh: () => `${nullboilerApiRoot}/tracker/refresh`,
+  workers: () => `${nullboilerApiRoot}/workers`,
+  worker: (id: string) => `${nullboilerApiRoot}/workers/${encodePathSegment(id)}`,
+};
+
+export const nullticketsApiPaths = {
   storeNamespace: (namespace: string) => `${storeBase}/${encodePathSegment(namespace)}`,
   storeEntry: (namespace: string, key: string) => `${storeBase}/${encodePathSegment(namespace)}/${encodePathSegment(key)}`,
 };

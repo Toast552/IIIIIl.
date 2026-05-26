@@ -27,7 +27,7 @@
       "starts_at_ms": 0,
       "status": "running",
       "progress": 8,
-      "headline": "Backlog item claimed and orchestration run started."
+      "headline": "Backlog item claimed and NullBoiler run started."
     },
     {
       "id": "research",

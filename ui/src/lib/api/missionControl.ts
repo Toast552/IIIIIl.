@@ -184,7 +184,7 @@ export type MissionControlWorkflowMapping = MissionControlComponentMapping & {
   recovered_run_id: string;
   human_instruction: string;
 };
-export type MissionControlObservabilityMapping = MissionControlComponentMapping & {
+export type MissionControlNullWatchMapping = MissionControlComponentMapping & {
   failed_run_id: string;
   recovered_run_id: string;
   trace_ref_source: string;
@@ -204,7 +204,7 @@ export type MissionControlReplayArtifact = {
     nulltickets: MissionControlComponentMapping;
     nullboiler: MissionControlWorkflowMapping;
     nullclaw: MissionControlComponentMapping;
-    nullwatch: MissionControlObservabilityMapping;
+    nullwatch: MissionControlNullWatchMapping;
   };
 };
 export type MissionControlReplayRecord = {

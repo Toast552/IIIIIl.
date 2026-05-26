@@ -225,7 +225,7 @@ test "handleList returns valid JSON with all known components" {
     try std.testing.expect(std.mem.indexOf(u8, json, "Autonomous AI agent runtime") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "DAG-based workflow orchestrator") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "Task and issue tracker") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "Headless observability") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "Headless tracing") != null);
 
     // Verify repo fields
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw/nullclaw\"") != null);

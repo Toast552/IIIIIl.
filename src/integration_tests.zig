@@ -619,11 +619,11 @@ test "integration harness covers lifecycle error paths" {
     }
 }
 
-test "integration harness covers orchestration proxy not configured" {
+test "integration harness covers NullBoiler proxy not configured" {
     var server = try IntegrationServer.start(std.testing.allocator);
     defer server.deinit();
 
-    const resp = try server.fetch(.{ .path = "/api/orchestration/runs" });
+    const resp = try server.fetch(.{ .path = "/api/nullboiler/runs" });
     defer resp.deinit(std.testing.allocator);
     try std.testing.expectEqual(std.http.Status.service_unavailable, resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "NullBoiler not configured") != null);

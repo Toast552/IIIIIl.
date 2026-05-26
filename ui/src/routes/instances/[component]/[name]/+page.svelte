@@ -17,13 +17,13 @@
     nullticketsUiRoutes,
     withBoilerInstance,
     withTicketsInstance,
-  } from "$lib/orchestration/routes";
+  } from "$lib/nullstack/routes";
   import {
     getSelectedBoilerInstance,
     getSelectedTicketsInstance,
     setSelectedBoilerInstance,
     setSelectedTicketsInstance,
-  } from "$lib/orchestration/backendSelection";
+  } from "$lib/nullstack/backendSelection";
 
   let component = $derived($page.params.component);
   let name = $derived($page.params.name);

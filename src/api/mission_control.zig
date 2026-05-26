@@ -227,7 +227,7 @@ test "isPath matches mission-control namespace" {
     try std.testing.expect(isPath("/api/mission-control/replay"));
     try std.testing.expect(isPath("/api/mission-control/reset"));
     try std.testing.expect(isPath("/api/mission-control/state?poll=1"));
-    try std.testing.expect(!isPath("/api/observability/v1/runs"));
+    try std.testing.expect(!isPath("/api/nullwatch/v1/runs"));
 }
 
 var test_workflow_resolver_state: u8 = 0;

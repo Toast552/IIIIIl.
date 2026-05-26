@@ -26,8 +26,9 @@ const providers_api = @import("api/providers.zig");
 const channels_api = @import("api/channels.zig");
 const usage_api = @import("api/usage.zig");
 const report_api = @import("api/report.zig");
-const orchestration_api = @import("api/orchestration.zig");
-const observability_api = @import("api/observability.zig");
+const nullboiler_api = @import("api/nullboiler.zig");
+const nulltickets_api = @import("api/nulltickets.zig");
+const nullwatch_api = @import("api/nullwatch.zig");
 const mission_control_api = @import("api/mission_control.zig");
 const mission_core = @import("core/mission_control.zig");
 const launch_args_mod = @import("core/launch_args.zig");
@@ -1124,8 +1125,9 @@ pub const Server = struct {
         return instances_api.isIntegrationPath(target) or
             instances_api.isTicketsActionPath(target) or
             logs_api.isLogsPath(target) or
-            orchestration_api.isProxyPath(target) or
-            observability_api.isProxyPath(target) or
+            nullboiler_api.isProxyPath(target) or
+            nulltickets_api.isProxyPath(target) or
+            nullwatch_api.isProxyPath(target) or
             mission_control_api.isPath(target);
     }
 
@@ -1709,38 +1711,46 @@ pub const Server = struct {
             }
         }
 
-        if (orchestration_api.isProxyPath(target)) {
+        if (nullboiler_api.isProxyPath(target)) {
             const env_boiler_url = self.getBoilerUrl();
             const env_boiler_token = self.getBoilerToken();
-            const env_tickets_url = self.getTicketsUrl();
-            const env_tickets_token = self.getTicketsToken();
-            const requested_boiler = orchestration_api.requestedBoilerInstance(allocator, target) catch null;
+            const requested_boiler = nullboiler_api.requestedBoilerInstance(allocator, target) catch null;
             defer if (requested_boiler) |value| allocator.free(value);
-            const requested_tickets = orchestration_api.requestedTicketsInstance(allocator, target) catch null;
-            defer if (requested_tickets) |value| allocator.free(value);
 
             var managed_boiler = if (shouldResolveManagedBackend(env_boiler_url, requested_boiler))
                 self.resolveManagedBackend(allocator, "nullboiler", requested_boiler)
             else
                 null;
             defer if (managed_boiler) |*cfg| cfg.deinit(allocator);
+
+            const resp = nullboiler_api.handle(allocator, method, target, body, .{
+                .boiler_url = selectBackendUrl(env_boiler_url, managed_boiler, requested_boiler),
+                .boiler_token = selectBackendToken(env_boiler_token, managed_boiler, requested_boiler),
+            });
+            return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
+        }
+
+        if (nulltickets_api.isProxyPath(target)) {
+            const env_tickets_url = self.getTicketsUrl();
+            const env_tickets_token = self.getTicketsToken();
+            const requested_tickets = nulltickets_api.requestedTicketsInstance(allocator, target) catch null;
+            defer if (requested_tickets) |value| allocator.free(value);
+
             var managed_tickets = if (shouldResolveManagedBackend(env_tickets_url, requested_tickets))
                 self.resolveManagedBackend(allocator, "nulltickets", requested_tickets)
             else
                 null;
             defer if (managed_tickets) |*cfg| cfg.deinit(allocator);
 
-            const resp = orchestration_api.handle(allocator, method, target, body, .{
-                .boiler_url = selectBackendUrl(env_boiler_url, managed_boiler, requested_boiler),
-                .boiler_token = selectBackendToken(env_boiler_token, managed_boiler, requested_boiler),
+            const resp = nulltickets_api.handle(allocator, method, target, body, .{
                 .tickets_url = selectBackendUrl(env_tickets_url, managed_tickets, requested_tickets),
                 .tickets_token = selectBackendToken(env_tickets_token, managed_tickets, requested_tickets),
             });
             return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
         }
 
-        if (observability_api.isProxyPath(target)) {
-            const selected_watch = observability_api.selectedWatchNameAlloc(allocator, target) catch
+        if (nullwatch_api.isProxyPath(target)) {
+            const selected_watch = nullwatch_api.selectedWatchNameAlloc(allocator, target) catch
                 return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
             defer if (selected_watch) |value| allocator.free(value);
 
@@ -1751,7 +1761,7 @@ pub const Server = struct {
             };
             defer watch_target.deinit(allocator);
 
-            const resp = observability_api.handle(allocator, method, target, body, .{
+            const resp = nullwatch_api.handle(allocator, method, target, body, .{
                 .watch_url = watch_target.url,
                 .watch_token = watch_target.token,
             });
@@ -2965,18 +2975,19 @@ test "requestOriginAllowed honors configured extra origins" {
     try std.testing.expect(!requestOriginAllowed(foreign_raw, "/api/status", "127.0.0.1", 19800, extras));
 }
 
-test "routeWithoutServerMutex keeps orchestration proxy requests off global lock" {
-    try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration"));
-    try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration/runs"));
-    try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration/store/search"));
-    try std.testing.expect(Server.routeWithoutServerMutex("/api/observability/v1/runs"));
+test "routeWithoutServerMutex keeps product proxy requests off global lock" {
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/nullboiler"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/nullboiler/runs"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/nulltickets/store/search"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/nullwatch/v1/runs"));
+    try std.testing.expect(!Server.routeWithoutServerMutex("/api/nulltickets/tasks"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/mission-control/state"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nullclaw/demo/logs"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nulltickets/tracker-a/tickets"));
     try std.testing.expect(!Server.routeWithoutServerMutex("/api/components"));
 }
 
-test "explicit managed orchestration backend selection overrides env fallback" {
+test "explicit managed product backend selection overrides env fallback" {
     const allocator = std.testing.allocator;
     var managed = Server.ManagedBackendConfig{
         .name = try allocator.dupe(u8, "worker-a"),

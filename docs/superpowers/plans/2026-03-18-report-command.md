@@ -1345,7 +1345,7 @@ git commit -m "Add report API endpoints for preview and submit"
 
 - [ ] **Step 1: Add API methods to client.ts**
 
-Add before the `...createOrchestrationApi(request, withQuery)` line:
+Add before the `...createNullBoilerApi(request, withQuery)` line:
 
 ```typescript
   reportPreview: (data: { repo: string; type: string; message: string }) =>

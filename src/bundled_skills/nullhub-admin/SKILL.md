@@ -1,7 +1,7 @@
 ---
 name: nullhub-admin
 version: 0.1.0
-description: Teach managed nullclaw agents to discover NullHub routes first and then use nullhub api for instance, provider, component, and orchestration tasks.
+description: Teach managed nullclaw agents to discover NullHub routes first and then use nullhub api for instance, provider, component, and NullBoiler workflow tasks.
 always: true
 requires_bins:
   - nullhub
@@ -9,7 +9,7 @@ requires_bins:
 
 # NullHub Admin
 
-Use this skill whenever the task involves `nullhub`, NullHub-managed instances, providers, components, or orchestration routes.
+Use this skill whenever the task involves `nullhub`, NullHub-managed instances, providers, components, or NullBoiler workflow routes.
 
 Workflow:
 

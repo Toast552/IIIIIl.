@@ -1,4 +1,5 @@
-import { encodePathSegment } from '$lib/orchestration/routes';
+import { encodePathSegment, nullticketsApiPaths } from '$lib/nullstack/routes';
+import { getSelectedTicketsInstance } from '$lib/nullstack/backendSelection';
 
 export type NullTicketsHttpMethod = 'GET' | 'POST' | 'DELETE';
 
@@ -10,6 +11,11 @@ export type NullTicketsActionRequest = {
 };
 
 type NullTicketsActionFn = (component: string, name: string, payload: NullTicketsActionRequest) => Promise<any>;
+type RequestFn = <T>(path: string, options?: RequestInit) => Promise<T>;
+type WithQueryFn = (
+  path: string,
+  params: Record<string, string | number | boolean | null | undefined>,
+) => string;
 type QueryValue = string | number | boolean | null | undefined;
 
 function withNullTicketsQuery(path: string, params: Record<string, QueryValue>): string {
@@ -158,5 +164,28 @@ export function createNullTicketsApi(action: NullTicketsActionFn) {
       }),
     nullTicketsCreateArtifact: (c: string, n: string, payload: any) =>
       action(c, n, { method: 'POST', path: ticketsPaths.artifactCollection(), payload }),
+  };
+}
+
+export function createNullTicketsStoreApi(request: RequestFn, withQuery: WithQueryFn) {
+  function selectedTicketsQuery(ticketsInstance?: string) {
+    const selected = ticketsInstance ?? getSelectedTicketsInstance();
+    return { tickets_instance: selected || undefined };
+  }
+
+  return {
+    storeList: (namespace: string, ticketsInstance?: string) =>
+      request<any[]>(withQuery(nullticketsApiPaths.storeNamespace(namespace), selectedTicketsQuery(ticketsInstance))),
+    storeGet: (namespace: string, key: string, ticketsInstance?: string) =>
+      request<any>(withQuery(nullticketsApiPaths.storeEntry(namespace, key), selectedTicketsQuery(ticketsInstance))),
+    storePut: (namespace: string, key: string, value: any, ticketsInstance?: string) =>
+      request<void>(withQuery(nullticketsApiPaths.storeEntry(namespace, key), selectedTicketsQuery(ticketsInstance)), {
+        method: 'PUT',
+        body: JSON.stringify({ value }),
+      }),
+    storeDelete: (namespace: string, key: string, ticketsInstance?: string) =>
+      request<void>(withQuery(nullticketsApiPaths.storeEntry(namespace, key), selectedTicketsQuery(ticketsInstance)), {
+        method: 'DELETE',
+      }),
   };
 }

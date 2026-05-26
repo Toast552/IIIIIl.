@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 
 const Response = http_proxy.Response;
 
-const prefix = "/api/observability";
+const prefix = "/api/nullwatch";
 
 pub const Config = struct {
     watch_url: ?[]const u8 = null,
@@ -48,9 +48,9 @@ fn stripSelectorParamsAlloc(allocator: Allocator, target: []const u8) ![]u8 {
     return buf.toOwnedSlice();
 }
 
-/// Proxies observability API requests to a managed or configured NullWatch instance.
-/// The shared `/api/observability` prefix is stripped before forwarding, so
-/// `/api/observability/v1/runs` becomes `/v1/runs` on NullWatch.
+/// Proxies NullWatch API requests to a managed or configured NullWatch instance.
+/// The shared `/api/nullwatch` prefix is stripped before forwarding, so
+/// `/api/nullwatch/v1/runs` becomes `/v1/runs` on NullWatch.
 pub fn handle(allocator: Allocator, method: []const u8, target: []const u8, body: []const u8, cfg: Config) Response {
     if (!isProxyPath(target)) {
         return .{ .status = "404 Not Found", .content_type = "application/json", .body = "{\"error\":\"not found\"}" };
@@ -75,21 +75,22 @@ pub fn handle(allocator: Allocator, method: []const u8, target: []const u8, body
     });
 }
 
-test "isProxyPath matches observability namespace" {
-    try std.testing.expect(isProxyPath("/api/observability"));
-    try std.testing.expect(isProxyPath("/api/observability?watch=default"));
-    try std.testing.expect(isProxyPath("/api/observability/v1/runs"));
-    try std.testing.expect(isProxyPath("/api/observability/health"));
-    try std.testing.expect(!isProxyPath("/api/orchestration/v1/runs"));
+test "isProxyPath matches NullWatch namespace" {
+    try std.testing.expect(isProxyPath("/api/nullwatch"));
+    try std.testing.expect(isProxyPath("/api/nullwatch?watch=default"));
+    try std.testing.expect(isProxyPath("/api/nullwatch/v1/runs"));
+    try std.testing.expect(isProxyPath("/api/nullwatch/health"));
+    try std.testing.expect(!isProxyPath("/api/nullboiler/v1/runs"));
+    try std.testing.expect(!isProxyPath("/api/nulltickets/store/runs"));
 }
 
 test "handle returns not configured without NullWatch URL" {
-    const resp = handle(std.testing.allocator, "GET", "/api/observability/v1/summary", "", .{});
+    const resp = handle(std.testing.allocator, "GET", "/api/nullwatch/v1/summary", "", .{});
     try std.testing.expectEqualStrings("503 Service Unavailable", resp.status);
     try std.testing.expectEqualStrings("{\"error\":\"NullWatch not configured\"}", resp.body);
 }
 
-test "handle rejects non-observability paths" {
+test "handle rejects non-NullWatch paths" {
     const resp = handle(std.testing.allocator, "GET", "/api/status", "", .{
         .watch_url = "http://127.0.0.1:7710",
     });
@@ -98,23 +99,23 @@ test "handle rejects non-observability paths" {
 
 test "selectedWatchNameAlloc reads hub selector query params" {
     const allocator = std.testing.allocator;
-    const selected = (try selectedWatchNameAlloc(allocator, "/api/observability/v1/runs?limit=1&nullhub_watch=watch+one")).?;
+    const selected = (try selectedWatchNameAlloc(allocator, "/api/nullwatch/v1/runs?limit=1&nullhub_watch=watch+one")).?;
     defer allocator.free(selected);
     try std.testing.expectEqualStrings("watch one", selected);
-    try std.testing.expect((try selectedWatchNameAlloc(allocator, "/api/observability/v1/runs?watch=upstream")) == null);
+    try std.testing.expect((try selectedWatchNameAlloc(allocator, "/api/nullwatch/v1/runs?watch=upstream")) == null);
 }
 
 test "stripSelectorParamsAlloc removes only NullHub watch selector" {
     const allocator = std.testing.allocator;
-    const stripped = try stripSelectorParamsAlloc(allocator, "/api/observability/v1/runs?limit=50&nullhub_watch=alpha&status=ok");
+    const stripped = try stripSelectorParamsAlloc(allocator, "/api/nullwatch/v1/runs?limit=50&nullhub_watch=alpha&status=ok");
     defer allocator.free(stripped);
-    try std.testing.expectEqualStrings("/api/observability/v1/runs?limit=50&status=ok", stripped);
+    try std.testing.expectEqualStrings("/api/nullwatch/v1/runs?limit=50&status=ok", stripped);
 
-    const root = try stripSelectorParamsAlloc(allocator, "/api/observability?nullhub_watch=alpha");
+    const root = try stripSelectorParamsAlloc(allocator, "/api/nullwatch?nullhub_watch=alpha");
     defer allocator.free(root);
-    try std.testing.expectEqualStrings("/api/observability", root);
+    try std.testing.expectEqualStrings("/api/nullwatch", root);
 
-    const upstream_filter = try stripSelectorParamsAlloc(allocator, "/api/observability/v1/runs?watch=alpha&instance=demo");
+    const upstream_filter = try stripSelectorParamsAlloc(allocator, "/api/nullwatch/v1/runs?watch=alpha&instance=demo");
     defer allocator.free(upstream_filter);
-    try std.testing.expectEqualStrings("/api/observability/v1/runs?watch=alpha&instance=demo", upstream_filter);
+    try std.testing.expectEqualStrings("/api/nullwatch/v1/runs?watch=alpha&instance=demo", upstream_filter);
 }

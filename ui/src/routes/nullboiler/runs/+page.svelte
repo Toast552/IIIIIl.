@@ -1,8 +1,8 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
-  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
+  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
 
   let runs = $state<any[]>([]);
   let workflows = $state<any[]>([]);

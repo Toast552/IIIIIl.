@@ -3,10 +3,10 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
-  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
-  import GraphViewer from '$lib/components/orchestration/GraphViewer.svelte';
-  import WorkflowJsonEditor from '$lib/components/orchestration/WorkflowJsonEditor.svelte';
+  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
+  import GraphViewer from '$lib/components/nullboiler/GraphViewer.svelte';
+  import WorkflowJsonEditor from '$lib/components/nullboiler/WorkflowJsonEditor.svelte';
 
   let id = $derived($page.params.id);
   let isNew = $derived(id === 'new');

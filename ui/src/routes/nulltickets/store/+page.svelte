@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api } from '$lib/api/client';
-  import { getSelectedTicketsInstance } from '$lib/orchestration/backendSelection';
-  import TicketsInstanceSelector from '$lib/components/orchestration/TicketsInstanceSelector.svelte';
+  import { getSelectedTicketsInstance } from '$lib/nullstack/backendSelection';
+  import TicketsInstanceSelector from '$lib/components/nulltickets/TicketsInstanceSelector.svelte';
 
   let namespace = $state('');
   let browsedNamespace = $state('');

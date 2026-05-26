@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
-  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
+  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
 
   let workflows = $state<any[]>([]);
   let loading = $state(true);

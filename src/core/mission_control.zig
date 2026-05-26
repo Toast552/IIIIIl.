@@ -473,7 +473,7 @@ fn replayArtifactMapping(fixture: replay.ReplayFixture, workflow_evidence: Workf
         },
         .nullboiler = .{
             .component = "nullboiler",
-            .role = "Workflow orchestration, checkpointing, dispatch, and fork recovery.",
+            .role = "Workflow execution, checkpointing, dispatch, and fork recovery.",
             .status = workflow_evidence.status,
             .source = workflow_evidence.source,
             .boiler_instance = workflow_evidence.boiler_instance,

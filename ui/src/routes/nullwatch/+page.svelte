@@ -94,8 +94,8 @@
     try {
       const watch = await refreshWatchSelection();
       const [summaryResult, runsResult] = await Promise.all([
-        api.getObservabilitySummary({ watch }),
-        api.getObservabilityRuns({ limit: 50, watch }),
+        api.getNullWatchSummary({ watch }),
+        api.getNullWatchRuns({ limit: 50, watch }),
       ]);
       summary = summaryResult;
       runs = runsResult?.items || [];
@@ -123,7 +123,7 @@
   async function loadRun(runId: string, showSpinner = true) {
     if (showSpinner) loadingRun = true;
     try {
-      selectedRun = await api.getObservabilityRun(runId, { watch: selectedWatchName || undefined });
+      selectedRun = await api.getNullWatchRun(runId, { watch: selectedWatchName || undefined });
       error = null;
     } catch (e) {
       error = (e as Error).message;

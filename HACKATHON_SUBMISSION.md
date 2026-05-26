@@ -3,7 +3,7 @@
 ## Problem Discovered
 
 The nullclaw ecosystem already has the building blocks of a lightweight local
-agent platform: NullHub for control, NullBoiler for orchestration,
+agent platform: NullHub for control, NullBoiler for workflow execution,
 NullTickets for tracker-backed work, and NullWatch for traces and evals.
 What was missing was a memorable local demo that shows these ideas as one
 operator experience.
@@ -35,8 +35,8 @@ require model keys, or depend on a running multi-repo stack.
 ## Why This Idea Was Chosen
 
 This was chosen over a smaller CLI-only contribution because it creates a
-stronger hackathon story: judges can see autonomy, orchestration,
-observability, failure recovery, and human-in-the-loop control in under three
+stronger hackathon story: judges can see autonomy, workflow execution,
+trace inspection, failure recovery, and human-in-the-loop control in under three
 minutes.
 
 It belongs in NullHub because NullHub is already the control plane for the

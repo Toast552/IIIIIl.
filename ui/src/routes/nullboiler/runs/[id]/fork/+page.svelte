@@ -3,10 +3,10 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
-  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
-  import CheckpointTimeline from '$lib/components/orchestration/CheckpointTimeline.svelte';
-  import StateInspector from '$lib/components/orchestration/StateInspector.svelte';
+  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
+  import CheckpointTimeline from '$lib/components/nullboiler/CheckpointTimeline.svelte';
+  import StateInspector from '$lib/components/nullboiler/StateInspector.svelte';
 
   let runId = $derived($page.params.id);
 

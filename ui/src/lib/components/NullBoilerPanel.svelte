@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import { api } from "$lib/api/client";
-  import { nullboilerUiRoutes } from "$lib/orchestration/routes";
-  import GraphViewer from "$lib/components/orchestration/GraphViewer.svelte";
-  import StateInspector from "$lib/components/orchestration/StateInspector.svelte";
-  import RunEventLog from "$lib/components/orchestration/RunEventLog.svelte";
-  import CheckpointTimeline from "$lib/components/orchestration/CheckpointTimeline.svelte";
-  import type { RunStreamHandle } from "$lib/api/orchestration";
+  import { nullboilerUiRoutes } from "$lib/nullstack/routes";
+  import GraphViewer from "$lib/components/nullboiler/GraphViewer.svelte";
+  import StateInspector from "$lib/components/nullboiler/StateInspector.svelte";
+  import RunEventLog from "$lib/components/nullboiler/RunEventLog.svelte";
+  import CheckpointTimeline from "$lib/components/nullboiler/CheckpointTimeline.svelte";
+  import type { RunStreamHandle } from "$lib/api/nullboiler";
 
   type Workflow = {
     id?: string;

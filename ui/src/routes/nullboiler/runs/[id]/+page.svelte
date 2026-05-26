@@ -2,13 +2,13 @@
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
-  import GraphViewer from '$lib/components/orchestration/GraphViewer.svelte';
-  import StateInspector from '$lib/components/orchestration/StateInspector.svelte';
-  import RunEventLog from '$lib/components/orchestration/RunEventLog.svelte';
-  import InterruptPanel from '$lib/components/orchestration/InterruptPanel.svelte';
-  import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
-  import type { RunStreamHandle } from '$lib/api/orchestration';
+  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import GraphViewer from '$lib/components/nullboiler/GraphViewer.svelte';
+  import StateInspector from '$lib/components/nullboiler/StateInspector.svelte';
+  import RunEventLog from '$lib/components/nullboiler/RunEventLog.svelte';
+  import InterruptPanel from '$lib/components/nullboiler/InterruptPanel.svelte';
+  import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
+  import type { RunStreamHandle } from '$lib/api/nullboiler';
 
   let id = $derived($page.params.id);
 

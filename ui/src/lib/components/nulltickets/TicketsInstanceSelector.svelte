@@ -1,9 +1,9 @@
 <script lang="ts">
-  import ManagedInstanceSelector from "./ManagedInstanceSelector.svelte";
+  import ManagedInstanceSelector from "../ManagedInstanceSelector.svelte";
   import {
     getSelectedTicketsInstance,
     setSelectedTicketsInstance,
-  } from "$lib/orchestration/backendSelection";
+  } from "$lib/nullstack/backendSelection";
 
   let {
     onChange = () => {},

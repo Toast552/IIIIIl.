@@ -352,12 +352,12 @@ fn mapStatus(code: u10) []const u8 {
 }
 
 test "isPathInNamespace matches exact and slash-delimited paths" {
-    try std.testing.expect(isPathInNamespace("/api/observability", "/api/observability"));
-    try std.testing.expect(isPathInNamespace("/api/observability/v1/runs", "/api/observability"));
-    try std.testing.expect(isPathInNamespace("/api/observability/v1/runs?limit=1", "/api/observability"));
-    try std.testing.expect(!isPathInNamespace("/api/observability?limit=1", "/api/observability"));
-    try std.testing.expect(!isPathInNamespace("/api/observability-extra", "/api/observability"));
-    try std.testing.expect(!isPathInNamespace("/api/orchestration", "/api/observability"));
+    try std.testing.expect(isPathInNamespace("/api/nullwatch", "/api/nullwatch"));
+    try std.testing.expect(isPathInNamespace("/api/nullwatch/v1/runs", "/api/nullwatch"));
+    try std.testing.expect(isPathInNamespace("/api/nullwatch/v1/runs?limit=1", "/api/nullwatch"));
+    try std.testing.expect(!isPathInNamespace("/api/nullwatch?limit=1", "/api/nullwatch"));
+    try std.testing.expect(!isPathInNamespace("/api/nullwatch-extra", "/api/nullwatch"));
+    try std.testing.expect(!isPathInNamespace("/api/nullboiler", "/api/nullwatch"));
 }
 
 test "mapStatus preserves common upstream status codes" {
