@@ -17,7 +17,6 @@ const manifest_mod = @import("../core/manifest.zig");
 const managed_cli = @import("managed_cli.zig");
 const nullclaw_web_channel = @import("../core/nullclaw_web_channel.zig");
 const query_api = @import("query.zig");
-const proxy_api = @import("proxy.zig");
 const test_helpers = @import("../test_helpers.zig");
 const instance_runtime = @import("instance_runtime.zig");
 
@@ -1235,56 +1234,6 @@ fn ensureInstanceRunning(
         if (!waitForRuntimeRunning(allocator, paths, manager, component, name, entry)) return gatewayNotReady();
     }
     return null;
-}
-
-fn isSuccessStatus(status: []const u8) bool {
-    return status.len >= 1 and status[0] == '2';
-}
-
-fn handleGatewayProxy(
-    allocator: std.mem.Allocator,
-    s: *state_mod.State,
-    manager: *manager_mod.Manager,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-    method: []const u8,
-    upstream_path: []const u8,
-    body: []const u8,
-    event_stream: bool,
-) ApiResponse {
-    if (!std.mem.eql(u8, component, "nullclaw")) {
-        return badRequest("{\"error\":\"gateway proxy routes are only supported for nullclaw instances\"}");
-    }
-    const entry = s.getInstance(component, name) orelse return notFound();
-    const access = ensureNullclawGatewayConfig(allocator, paths, component, name) catch |err| switch (err) {
-        error.UnsupportedComponent => return badRequest("{\"error\":\"unsupported component\"}"),
-        error.FileNotFound => return .{ .status = "404 Not Found", .content_type = "application/json", .body = "{\"error\":\"config not found\"}" },
-        else => return helpers.serverError(),
-    };
-    defer access.deinit(allocator);
-
-    if (ensureInstanceRunning(allocator, s, manager, paths, component, name, entry, access.changed)) |resp| return resp;
-
-    const port = resolveGatewayPort(allocator, paths, manager, component, name, entry) orelse
-        return .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = "{\"error\":\"gateway port unavailable\"}" };
-    const base_url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port}) catch return helpers.serverError();
-    defer allocator.free(base_url);
-
-    const proxied = proxy_api.forward(allocator, .{
-        .method = method,
-        .base_url = base_url,
-        .path = upstream_path,
-        .body = body,
-        .bearer_token = access.token,
-        .accept = if (event_stream) "text/event-stream" else null,
-        .unreachable_body = "{\"error\":\"nullclaw gateway unreachable\"}",
-    });
-    return .{
-        .status = proxied.status,
-        .content_type = if (event_stream and isSuccessStatus(proxied.status)) "text/event-stream" else proxied.content_type,
-        .body = proxied.body,
-    };
 }
 
 const GatewayProxyRoute = struct {
@@ -5199,26 +5148,6 @@ pub fn dispatch(
             if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
             return handleAgentInvoke(allocator, s, paths, parsed.component, parsed.name, body);
         }
-        if (std.mem.eql(u8, action, "agent-stream")) {
-            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
-            return .{
-                .status = "501 Not Implemented",
-                .content_type = "application/json",
-                .body = "{\"error\":\"agent-stream requires the HTTP streaming proxy\"}",
-            };
-        }
-        if (std.mem.eql(u8, action, "a2a")) {
-            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
-            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/a2a", body, false);
-        }
-        if (std.mem.eql(u8, action, "a2a-stream")) {
-            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
-            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/a2a", body, true);
-        }
-        if (std.mem.eql(u8, action, "transcribe")) {
-            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
-            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/media/transcribe", body, false);
-        }
         if (std.mem.eql(u8, action, "agent-sessions")) {
             return handleAgentSessions(allocator, s, paths, parsed.component, parsed.name, method, target);
         }
@@ -5439,6 +5368,9 @@ test "buildAgentStreamA2aBody translates managed agent request to A2A message st
     try std.testing.expect(std.mem.indexOf(u8, body, "\"contextId\":\"interview-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"text\":\"hello \\\\\"world\\\\\"\"") != null);
     try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/agent-stream"));
+    try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/a2a"));
+    try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/a2a-stream"));
+    try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/transcribe"));
 }
 
 fn writeTestTrackerWorkflow(
@@ -8448,19 +8380,6 @@ test "dispatch routes agent invoke stream and sessions" {
     defer allocator.free(invoke_resp.body);
     try std.testing.expectEqualStrings("200 OK", invoke_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, invoke_resp.body, "\"response\":\"world\"") != null);
-
-    const stream_resp = dispatch(
-        allocator,
-        &s,
-        &mctx.manager,
-        &mctx.mutex,
-        mctx.paths,
-        "POST",
-        "/api/instances/nullclaw/my-agent/agent-stream",
-        "{\"message\":\"hello\",\"session_key\":\"s-1\",\"provider\":\"openai\",\"model\":\"gpt-5\",\"temperature\":\"0.3\",\"agent\":\"helper\"}",
-    ).?;
-    try std.testing.expectEqualStrings("501 Not Implemented", stream_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, stream_resp.body, "HTTP streaming proxy") != null);
 
     const list_resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/my-agent/agent-sessions", "").?;
     defer allocator.free(list_resp.body);
