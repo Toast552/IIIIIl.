@@ -34,8 +34,10 @@ What changed:
 - Added deep links from mission events to `/observability?run_id=...`.
 - Hydrates failure/recovery trace panels from a running NullWatch instance via
   the existing observability proxy when live run detail is available.
+- Hydrates real NullBoiler workflow run ids and checkpoint metadata through the
+  existing orchestration proxy when matching workflow evidence is available.
 - Keeps mission runtime state scoped to the NullHub server instance and keeps
-  NullWatch hydration discovery outside the Svelte route component.
+  live hydration discovery outside the Svelte route component.
 - Added local smoke test, judge-mode demo driver, macOS video recorder,
   screenshots, README docs, and hackathon submission notes.
 
@@ -182,7 +184,6 @@ This PR intentionally does not:
 
 ## Future Work
 
-- Connect real NullBoiler workflow run ids and checkpoint metadata.
 - Compare failed and recovered replay artifacts side by side.
 - Add durable mission replay storage.
 - Add a one-click judge replay button in the UI.
