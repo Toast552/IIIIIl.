@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api } from '$lib/api/client';
+  import { nullTicketsStoreApi } from '$lib/api/client';
   import { getSelectedTicketsInstance } from '$lib/nullstack/backendSelection';
   import TicketsInstanceSelector from '$lib/components/nulltickets/TicketsInstanceSelector.svelte';
 
@@ -41,7 +41,7 @@
     entries = [];
     selectedEntry = null;
     try {
-      const result = await api.storeList(browsedNamespace, ticketsTarget());
+      const result = await nullTicketsStoreApi.storeList(browsedNamespace, ticketsTarget());
       entries = result || [];
     } catch (e) {
       error = (e as Error).message;
@@ -61,7 +61,7 @@
   async function deleteEntry(key: string) {
     if (!confirm(`Delete key "${key}" from namespace "${browsedNamespace}"?`)) return;
     try {
-      await api.storeDelete(browsedNamespace, key, ticketsTarget());
+      await nullTicketsStoreApi.storeDelete(browsedNamespace, key, ticketsTarget());
       entries = entries.filter((entry) => entryKey(entry) !== key);
       if (selectedEntry?.key === key) selectedEntry = null;
     } catch (e) {
@@ -72,7 +72,7 @@
   async function viewEntry(entry: any) {
     const key = entryKey(entry);
     try {
-      const full = await api.storeGet(browsedNamespace, key, ticketsTarget());
+      const full = await nullTicketsStoreApi.storeGet(browsedNamespace, key, ticketsTarget());
       // nulltickets returns a StoreEntry {namespace, key, value, ...} — extract .value
       selectedEntry = { key, value: full?.value ?? full };
     } catch (e) {
@@ -97,7 +97,7 @@
     }
     addLoading = true;
     try {
-      await api.storePut(addNamespace.trim(), addKey.trim(), parsed, ticketsTarget());
+      await nullTicketsStoreApi.storePut(addNamespace.trim(), addKey.trim(), parsed, ticketsTarget());
       addSuccess = true;
       addKey = '';
       addValue = '';

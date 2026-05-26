@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import { nullBoilerApi } from '$lib/api/client';
+  import { nullboilerUiRoutes } from '$lib/nullboiler/routes';
   import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
 
   let workflows = $state<any[]>([]);
@@ -12,7 +12,7 @@
 
   async function loadWorkflows() {
     try {
-      workflows = await api.listWorkflows() || [];
+      workflows = await nullBoilerApi.listWorkflows() || [];
       error = null;
     } catch (e) {
       error = (e as Error).message;
@@ -25,7 +25,7 @@
 
   async function deleteWorkflow(id: string) {
     try {
-      await api.deleteWorkflow(id);
+      await nullBoilerApi.deleteWorkflow(id);
       deleteConfirm = null;
       await loadWorkflows();
     } catch (e) {

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
-  import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import { nullBoilerApi } from '$lib/api/client';
+  import { nullboilerUiRoutes } from '$lib/nullboiler/routes';
   import GraphViewer from '$lib/components/nullboiler/GraphViewer.svelte';
   import StateInspector from '$lib/components/nullboiler/StateInspector.svelte';
   import RunEventLog from '$lib/components/nullboiler/RunEventLog.svelte';
@@ -24,14 +24,14 @@
 
   async function loadRun() {
     try {
-      const data = await api.getRun(id);
+      const data = await nullBoilerApi.getRun(id);
       previousState = run?.state || null;
       run = data;
       if (data.workflow) {
         workflow = data.workflow;
       } else if (data.workflow_id) {
         try {
-          workflow = await api.getWorkflow(data.workflow_id);
+          workflow = await nullBoilerApi.getWorkflow(data.workflow_id);
         } catch { /* keep current */ }
       }
       // Build node status map
@@ -53,7 +53,7 @@
   function connectStream() {
     runStream?.close();
     try {
-      runStream = api.streamRun(id, (event) => {
+      runStream = nullBoilerApi.streamRun(id, (event) => {
         events = [...events, { ...event, timestamp: event.timestamp ?? Date.now() / 1000 }];
         // On significant events, refresh run data
         if (['step_completed', 'step_failed', 'run_completed', 'run_failed', 'interrupted', 'state_update', 'values', 'updates', 'task_result'].includes(event.type)) {
@@ -93,7 +93,7 @@
 
   async function cancelRun() {
     try {
-      await api.cancelRun(id);
+      await nullBoilerApi.cancelRun(id);
       await loadRun();
     } catch (e) {
       error = (e as Error).message;
@@ -102,7 +102,7 @@
 
   async function resumeRun(updates: any) {
     try {
-      await api.resumeRun(id, updates);
+      await nullBoilerApi.resumeRun(id, updates);
       await loadRun();
     } catch (e) {
       error = (e as Error).message;

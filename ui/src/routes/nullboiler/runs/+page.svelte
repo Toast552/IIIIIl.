@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import { nullBoilerApi } from '$lib/api/client';
+  import { nullboilerUiRoutes } from '$lib/nullboiler/routes';
   import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
 
   let runs = $state<any[]>([]);
@@ -40,13 +40,13 @@
       const key = queryKey();
       const canAppend = append && runsQueryKey === key && nextOffset !== null;
       const [page, w] = await Promise.all([
-        api.listRunsPage({
+        nullBoilerApi.listRunsPage({
           status: filterStatus || undefined,
           workflow_id: filterWorkflow || undefined,
           limit: boundedInt(runLimit, 50, 1, 250),
           offset: canAppend ? nextOffset || 0 : 0,
         }),
-        api.listWorkflows(),
+        nullBoilerApi.listWorkflows(),
       ]);
       const nextItems = page?.items || [];
       if (canAppend) {

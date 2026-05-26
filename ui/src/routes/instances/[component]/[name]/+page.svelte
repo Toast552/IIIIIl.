@@ -12,12 +12,8 @@
   import NullBoilerPanel from "$lib/components/NullBoilerPanel.svelte";
   import NullTicketsPanel from "$lib/components/NullTicketsPanel.svelte";
   import { api, type ApiRequestError } from "$lib/api/client";
-  import {
-    nullboilerUiRoutes,
-    nullticketsUiRoutes,
-    withBoilerInstance,
-    withTicketsInstance,
-  } from "$lib/nullstack/routes";
+  import { nullboilerUiRoutes, withBoilerInstance } from "$lib/nullboiler/routes";
+  import { nullticketsUiRoutes, withTicketsInstance } from "$lib/nulltickets/routes";
   import {
     getSelectedBoilerInstance,
     getSelectedTicketsInstance,

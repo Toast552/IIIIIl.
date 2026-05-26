@@ -90,6 +90,106 @@ pub fn isPathInNamespace(target: []const u8, prefix: []const u8) bool {
             target[prefix.len] == '/');
 }
 
+pub fn isTargetInNamespace(target: []const u8, prefix: []const u8) bool {
+    const path = if (std.mem.indexOfScalar(u8, target, '?')) |idx| target[0..idx] else target;
+    return isPathInNamespace(path, prefix);
+}
+
+pub const ProductProxyRewriteOptions = struct {
+    prefix: []const u8,
+    selector_params: []const []const u8 = &.{},
+    default_path: []const u8 = "/",
+};
+
+pub const ProductProxyTarget = struct {
+    target: []const u8,
+    path: []const u8,
+    target_owned: bool = false,
+    path_owned: bool = false,
+
+    pub fn deinit(self: *ProductProxyTarget, allocator: Allocator) void {
+        if (self.path_owned) allocator.free(self.path);
+        if (self.target_owned) allocator.free(self.target);
+        self.* = .{ .target = "", .path = "" };
+    }
+};
+
+pub fn rewriteProductProxyTarget(allocator: Allocator, target: []const u8, opts: ProductProxyRewriteOptions) !ProductProxyTarget {
+    var stripped = try stripSelectorParams(allocator, target, opts.selector_params);
+    errdefer stripped.deinit(allocator);
+
+    const suffix = stripped.value[opts.prefix.len..];
+    if (suffix.len == 0) {
+        return .{
+            .target = stripped.value,
+            .path = opts.default_path,
+            .target_owned = stripped.owned,
+        };
+    }
+
+    if (suffix[0] == '?') {
+        return .{
+            .target = stripped.value,
+            .path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ opts.default_path, suffix }),
+            .target_owned = stripped.owned,
+            .path_owned = true,
+        };
+    }
+
+    return .{
+        .target = stripped.value,
+        .path = suffix,
+        .target_owned = stripped.owned,
+    };
+}
+
+const StrippedTarget = struct {
+    value: []const u8,
+    owned: bool = false,
+
+    fn deinit(self: *StrippedTarget, allocator: Allocator) void {
+        if (self.owned) allocator.free(self.value);
+        self.* = .{ .value = "" };
+    }
+};
+
+fn stripSelectorParams(allocator: Allocator, target: []const u8, selector_params: []const []const u8) !StrippedTarget {
+    const qmark = std.mem.indexOfScalar(u8, target, '?') orelse return .{ .value = target };
+    if (selector_params.len == 0) return .{ .value = target };
+
+    var stripped_any = false;
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+
+    try buf.appendSlice(target[0..qmark]);
+    var wrote_query = false;
+    var params = std.mem.splitScalar(u8, target[qmark + 1 ..], '&');
+    while (params.next()) |param| {
+        if (param.len == 0) continue;
+        if (isSelectorParam(param, selector_params)) {
+            stripped_any = true;
+            continue;
+        }
+        try buf.append(if (wrote_query) '&' else '?');
+        wrote_query = true;
+        try buf.appendSlice(param);
+    }
+
+    if (!stripped_any) {
+        buf.deinit();
+        return .{ .value = target };
+    }
+    return .{ .value = try buf.toOwnedSlice(), .owned = true };
+}
+
+fn isSelectorParam(param: []const u8, selector_params: []const []const u8) bool {
+    const key = if (std.mem.indexOfScalar(u8, param, '=')) |eq| param[0..eq] else param;
+    for (selector_params) |selector| {
+        if (std.mem.eql(u8, key, selector)) return true;
+    }
+    return false;
+}
+
 pub fn forward(allocator: Allocator, opts: ForwardOptions) Response {
     const http_method = parseMethod(opts.method) orelse
         return .{ .status = "405 Method Not Allowed", .content_type = "application/json", .body = "{\"error\":\"method not allowed\"}" };
@@ -147,6 +247,78 @@ pub fn forward(allocator: Allocator, opts: ForwardOptions) Response {
         .body = resp_body,
     };
 }
+
+pub const TestUpstream = struct {
+    allocator: Allocator,
+    ctx: *Context,
+    thread: std.Thread,
+
+    const Context = struct {
+        server: std_compat.net.Server,
+        stop_flag: std.atomic.Value(bool),
+        response: []u8,
+        request_buf: [4096]u8 = undefined,
+        request_len: usize = 0,
+
+        fn run(ctx: *Context) void {
+            while (!ctx.stop_flag.load(.acquire)) {
+                var conn = ctx.server.accept() catch |err| switch (err) {
+                    error.WouldBlock => {
+                        std_compat.thread.sleep(10 * std.time.ns_per_ms);
+                        continue;
+                    },
+                    else => return,
+                };
+                defer conn.stream.close();
+
+                ctx.request_len = conn.stream.read(&ctx.request_buf) catch return;
+                _ = conn.stream.write(ctx.response) catch return;
+                return;
+            }
+        }
+    };
+
+    pub fn start(allocator: Allocator, response: []const u8) !TestUpstream {
+        const response_owned = try allocator.dupe(u8, response);
+        errdefer allocator.free(response_owned);
+
+        const ctx = try allocator.create(Context);
+        errdefer allocator.destroy(ctx);
+        ctx.* = .{
+            .server = undefined,
+            .stop_flag = std.atomic.Value(bool).init(false),
+            .response = response_owned,
+        };
+
+        const addr = try std_compat.net.Address.resolveIp("127.0.0.1", 0);
+        ctx.server = try addr.listen(.{});
+        errdefer ctx.server.deinit();
+
+        const thread = try std.Thread.spawn(.{}, Context.run, .{ctx});
+
+        return .{
+            .allocator = allocator,
+            .ctx = ctx,
+            .thread = thread,
+        };
+    }
+
+    pub fn deinit(self: *TestUpstream) void {
+        self.ctx.stop_flag.store(true, .release);
+        self.thread.join();
+        self.ctx.server.deinit();
+        self.allocator.free(self.ctx.response);
+        self.allocator.destroy(self.ctx);
+    }
+
+    pub fn baseUrl(self: *const TestUpstream, allocator: Allocator) ![]const u8 {
+        return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{self.ctx.server.listen_address.in.getPort()});
+    }
+
+    pub fn request(self: *const TestUpstream) []const u8 {
+        return self.ctx.request_buf[0..self.ctx.request_len];
+    }
+};
 
 pub fn forwardStream(allocator: Allocator, opts: ForwardOptions, downstream: std_compat.net.Stream, cors_headers: []const u8) !void {
     const http_method = parseMethod(opts.method) orelse {
@@ -358,6 +530,68 @@ test "isPathInNamespace matches exact and slash-delimited paths" {
     try std.testing.expect(!isPathInNamespace("/api/nullwatch?limit=1", "/api/nullwatch"));
     try std.testing.expect(!isPathInNamespace("/api/nullwatch-extra", "/api/nullwatch"));
     try std.testing.expect(!isPathInNamespace("/api/nullboiler", "/api/nullwatch"));
+}
+
+test "isTargetInNamespace matches query targets by path only" {
+    try std.testing.expect(isTargetInNamespace("/api/nullwatch?limit=1", "/api/nullwatch"));
+    try std.testing.expect(isTargetInNamespace("/api/nullwatch/v1/runs?limit=1", "/api/nullwatch"));
+    try std.testing.expect(!isTargetInNamespace("/api/nullwatch-extra?limit=1", "/api/nullwatch"));
+}
+
+test "rewriteProductProxyTarget strips selector params and public prefix" {
+    const allocator = std.testing.allocator;
+    const selector_params = [_][]const u8{"nullhub_watch"};
+
+    var rewritten = try rewriteProductProxyTarget(
+        allocator,
+        "/api/nullwatch/v1/runs?limit=50&nullhub_watch=alpha&status=ok",
+        .{
+            .prefix = "/api/nullwatch",
+            .selector_params = selector_params[0..],
+            .default_path = "/v1/summary",
+        },
+    );
+    defer rewritten.deinit(allocator);
+
+    try std.testing.expectEqualStrings("/api/nullwatch/v1/runs?limit=50&status=ok", rewritten.target);
+    try std.testing.expectEqualStrings("/v1/runs?limit=50&status=ok", rewritten.path);
+}
+
+test "rewriteProductProxyTarget keeps similarly named upstream params" {
+    const allocator = std.testing.allocator;
+    const selector_params = [_][]const u8{"boiler_instance"};
+
+    var rewritten = try rewriteProductProxyTarget(
+        allocator,
+        "/api/nullboiler/runs?boiler_instance_id=upstream&boiler_instance=local&status=running",
+        .{
+            .prefix = "/api/nullboiler",
+            .selector_params = selector_params[0..],
+        },
+    );
+    defer rewritten.deinit(allocator);
+
+    try std.testing.expectEqualStrings("/api/nullboiler/runs?boiler_instance_id=upstream&status=running", rewritten.target);
+    try std.testing.expectEqualStrings("/runs?boiler_instance_id=upstream&status=running", rewritten.path);
+}
+
+test "rewriteProductProxyTarget keeps root upstream filters on default path" {
+    const allocator = std.testing.allocator;
+    const selector_params = [_][]const u8{"nullhub_watch"};
+
+    var rewritten = try rewriteProductProxyTarget(
+        allocator,
+        "/api/nullwatch?nullhub_watch=alpha&watch=upstream",
+        .{
+            .prefix = "/api/nullwatch",
+            .selector_params = selector_params[0..],
+            .default_path = "/v1/summary",
+        },
+    );
+    defer rewritten.deinit(allocator);
+
+    try std.testing.expectEqualStrings("/api/nullwatch?watch=upstream", rewritten.target);
+    try std.testing.expectEqualStrings("/v1/summary?watch=upstream", rewritten.path);
 }
 
 test "mapStatus preserves common upstream status codes" {

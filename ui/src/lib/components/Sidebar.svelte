@@ -2,7 +2,9 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
-  import { nullboilerUiRoutes, nullticketsUiRoutes, routePath } from "$lib/nullstack/routes";
+  import { nullboilerUiRoutes } from "$lib/nullboiler/routes";
+  import { nullticketsUiRoutes } from "$lib/nulltickets/routes";
+  import { routePath } from "$lib/nullstack/path";
   import {
     BOILER_INSTANCE_CHANGE_EVENT,
     TICKETS_INSTANCE_CHANGE_EVENT,

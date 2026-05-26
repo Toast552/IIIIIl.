@@ -46,7 +46,7 @@
     JUDGE_REPLAY_PREROLL_MS,
     nextJudgeReplayTransition,
   } from '$lib/missionControl/judgeReplay.js';
-  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import { nullboilerUiRoutes } from '$lib/nullboiler/routes';
 
   type MissionAction = 'launch' | 'reset' | 'recover';
   type JudgeReplayStage = 'idle' | 'resetting' | 'preroll' | 'launching' | 'waiting_failure' | 'holding_failure' | 'recovering' | 'watching';

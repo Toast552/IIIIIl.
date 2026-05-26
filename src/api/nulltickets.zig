@@ -38,62 +38,23 @@ pub fn handle(allocator: Allocator, method: []const u8, target: []const u8, body
     const base_url = cfg.tickets_url orelse
         return .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = "{\"error\":\"NullTickets not configured\"}" };
 
-    var forwarded = forwardedTarget(allocator, target) catch
+    const selector_params = [_][]const u8{"tickets_instance"};
+    var forwarded = http_proxy.rewriteProductProxyTarget(allocator, target, .{
+        .prefix = prefix,
+        .selector_params = selector_params[0..],
+        .default_path = "/",
+    }) catch
         return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
     defer forwarded.deinit(allocator);
-
-    const proxied_path = forwarded.value[prefix.len..];
-    const path = if (proxied_path.len == 0) "/" else proxied_path;
 
     return http_proxy.forward(allocator, .{
         .method = method,
         .base_url = base_url,
-        .path = path,
+        .path = forwarded.path,
         .body = body,
         .bearer_token = cfg.tickets_token,
         .unreachable_body = "{\"error\":\"NullTickets unreachable\"}",
     });
-}
-
-const ForwardedTarget = struct {
-    value: []const u8,
-    owned: bool = false,
-
-    fn deinit(self: *ForwardedTarget, allocator: Allocator) void {
-        if (self.owned) allocator.free(self.value);
-        self.* = .{ .value = "" };
-    }
-};
-
-fn forwardedTarget(allocator: Allocator, target: []const u8) !ForwardedTarget {
-    const qmark = std.mem.indexOfScalar(u8, target, '?') orelse return .{ .value = target };
-    var stripped_any = false;
-    var buf = std.array_list.Managed(u8).init(allocator);
-    errdefer buf.deinit();
-
-    try buf.appendSlice(target[0..qmark]);
-    var wrote_query = false;
-    var params = std.mem.splitScalar(u8, target[qmark + 1 ..], '&');
-    while (params.next()) |param| {
-        if (isHubProxyParam(param)) {
-            stripped_any = true;
-            continue;
-        }
-        try buf.append(if (wrote_query) '&' else '?');
-        wrote_query = true;
-        try buf.appendSlice(param);
-    }
-
-    if (!stripped_any) {
-        buf.deinit();
-        return .{ .value = target };
-    }
-    return .{ .value = try buf.toOwnedSlice(), .owned = true };
-}
-
-fn isHubProxyParam(param: []const u8) bool {
-    const key = if (std.mem.indexOfScalar(u8, param, '=')) |eq| param[0..eq] else param;
-    return std.mem.eql(u8, key, "tickets_instance");
 }
 
 test "isProxyPath matches NullTickets store namespace" {
@@ -113,15 +74,24 @@ test "requestedTicketsInstance decodes store target selection" {
     try std.testing.expect(try requestedTicketsInstance(allocator, "/api/nullboiler/runs?tickets_instance=tracker-a") == null);
 }
 
-test "forwardedTarget strips only NullTickets selector params" {
+test "rewriteProductProxyTarget strips only NullTickets selector params" {
     const allocator = std.testing.allocator;
-    var forwarded = try forwardedTarget(allocator, "/api/nulltickets/store/search?q=tasks&tickets_instance=tracker-a&limit=10");
+    const selector_params = [_][]const u8{"tickets_instance"};
+    var forwarded = try http_proxy.rewriteProductProxyTarget(allocator, "/api/nulltickets/store/search?q=tasks&tickets_instance=tracker-a&limit=10", .{
+        .prefix = prefix,
+        .selector_params = selector_params[0..],
+    });
     defer forwarded.deinit(allocator);
-    try std.testing.expectEqualStrings("/api/nulltickets/store/search?q=tasks&limit=10", forwarded.value);
+    try std.testing.expectEqualStrings("/api/nulltickets/store/search?q=tasks&limit=10", forwarded.target);
+    try std.testing.expectEqualStrings("/store/search?q=tasks&limit=10", forwarded.path);
 
-    var upstream_filter = try forwardedTarget(allocator, "/api/nulltickets/store/search?owner=team-a");
+    var upstream_filter = try http_proxy.rewriteProductProxyTarget(allocator, "/api/nulltickets/store/search?owner=team-a", .{
+        .prefix = prefix,
+        .selector_params = selector_params[0..],
+    });
     defer upstream_filter.deinit(allocator);
-    try std.testing.expectEqualStrings("/api/nulltickets/store/search?owner=team-a", upstream_filter.value);
+    try std.testing.expectEqualStrings("/api/nulltickets/store/search?owner=team-a", upstream_filter.target);
+    try std.testing.expectEqualStrings("/store/search?owner=team-a", upstream_filter.path);
 }
 
 test "handle returns not configured without NullTickets URL" {
@@ -144,4 +114,27 @@ test "handle rejects unsupported methods before fetch" {
     });
     try std.testing.expectEqualStrings("405 Method Not Allowed", resp.status);
     try std.testing.expectEqualStrings("{\"error\":\"method not allowed\"}", resp.body);
+}
+
+test "handle forwards store path, strips selector, and sends bearer token" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var upstream = try http_proxy.TestUpstream.start(allocator, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}");
+    defer upstream.deinit();
+
+    const base_url = try upstream.baseUrl(allocator);
+    defer allocator.free(base_url);
+
+    const resp = handle(allocator, "GET", "/api/nulltickets/store/search?q=tasks&tickets_instance=tracker-a&limit=10", "", .{
+        .tickets_url = base_url,
+        .tickets_token = "tickets-token",
+    });
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expectEqualStrings("{\"ok\":true}", resp.body);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "GET /store/search?q=tasks&limit=10 HTTP/1.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "Authorization: Bearer tickets-token") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "tickets_instance") == null);
 }

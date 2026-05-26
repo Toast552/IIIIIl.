@@ -1,4 +1,5 @@
-import { encodePathSegment, nullticketsApiPaths } from '$lib/nullstack/routes';
+import { nullticketsApiPaths } from '$lib/nulltickets/routes';
+import { encodePathSegment } from '$lib/nullstack/path';
 import { getSelectedTicketsInstance } from '$lib/nullstack/backendSelection';
 
 export type NullTicketsHttpMethod = 'GET' | 'POST' | 'DELETE';

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
-  import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import { nullBoilerApi } from '$lib/api/client';
+  import { nullboilerUiRoutes } from '$lib/nullboiler/routes';
   import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
 
   let runs = $state<any[]>([]);
@@ -12,7 +12,7 @@
 
   async function loadRuns() {
     try {
-      runs = await api.listRuns() || [];
+      runs = await nullBoilerApi.listRuns() || [];
       stats = {
         active: runs.filter((r: any) => r.status === 'running' || r.status === 'pending').length,
         completed: runs.filter((r: any) => r.status === 'completed').length,

@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import { nullBoilerApi } from '$lib/api/client';
+  import { nullboilerUiRoutes } from '$lib/nullboiler/routes';
   import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
   import GraphViewer from '$lib/components/nullboiler/GraphViewer.svelte';
   import WorkflowJsonEditor from '$lib/components/nullboiler/WorkflowJsonEditor.svelte';
@@ -40,7 +40,7 @@
     }
 
     try {
-      const wf = await api.getWorkflow(id);
+      const wf = await nullBoilerApi.getWorkflow(id);
       parsedWorkflow = wf;
       jsonValue = JSON.stringify(wf, null, 2);
     } catch (e) {
@@ -77,7 +77,7 @@
     validating = true;
     validationResult = null;
     try {
-      const result = await api.validateWorkflow(id);
+      const result = await nullBoilerApi.validateWorkflow(id);
       validationResult = result;
     } catch (e) {
       validationResult = { valid: false, errors: [(e as Error).message] };
@@ -92,10 +92,10 @@
     error = null;
     try {
       if (isNew) {
-        const result = await api.createWorkflow(parsedWorkflow);
+        const result = await nullBoilerApi.createWorkflow(parsedWorkflow);
         await goto(nullboilerUiRoutes.workflow(result.id || parsedWorkflow.id));
       } else {
-        await api.updateWorkflow(id, parsedWorkflow);
+        await nullBoilerApi.updateWorkflow(id, parsedWorkflow);
       }
     } catch (e) {
       error = (e as Error).message;
@@ -107,7 +107,7 @@
   async function run() {
     if (parseError || isNew) return;
     try {
-      const result = await api.runWorkflow(id, {});
+      const result = await nullBoilerApi.runWorkflow(id, {});
       if (result?.id) {
         await goto(nullboilerUiRoutes.run(result.id));
       }

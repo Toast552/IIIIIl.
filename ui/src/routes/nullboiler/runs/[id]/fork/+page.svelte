@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { api } from '$lib/api/client';
-  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import { nullBoilerApi } from '$lib/api/client';
+  import { nullboilerUiRoutes } from '$lib/nullboiler/routes';
   import BoilerInstanceSelector from '$lib/components/nullboiler/BoilerInstanceSelector.svelte';
   import CheckpointTimeline from '$lib/components/nullboiler/CheckpointTimeline.svelte';
   import StateInspector from '$lib/components/nullboiler/StateInspector.svelte';
@@ -26,7 +26,7 @@
     selectedCp = '';
     selectedState = null;
     try {
-      checkpoints = await api.listCheckpoints(runId) || [];
+      checkpoints = await nullBoilerApi.listCheckpoints(runId) || [];
       if (checkpoints.length > 0) {
         await selectCheckpoint(checkpoints[checkpoints.length - 1].id);
       }
@@ -44,7 +44,7 @@
   async function selectCheckpoint(cpId: string) {
     selectedCp = cpId;
     try {
-      const cp = await api.getCheckpoint(runId, cpId);
+      const cp = await nullBoilerApi.getCheckpoint(runId, cpId);
       selectedState = cp?.state || cp;
     } catch (e) {
       error = (e as Error).message;
@@ -67,7 +67,7 @@
     error = null;
     try {
       const overrides = JSON.parse(overridesJson);
-      const result = await api.forkRun(selectedCp, Object.keys(overrides).length > 0 ? overrides : undefined);
+      const result = await nullBoilerApi.forkRun(selectedCp, Object.keys(overrides).length > 0 ? overrides : undefined);
       if (result?.id) {
         await goto(nullboilerUiRoutes.run(result.id));
       }

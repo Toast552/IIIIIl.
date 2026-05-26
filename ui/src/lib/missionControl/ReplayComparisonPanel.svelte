@@ -3,7 +3,7 @@
     MissionControlReplayArtifactPanel,
     MissionControlReplayComparison,
   } from '$lib/api/missionControl';
-  import { nullboilerUiRoutes } from '$lib/nullstack/routes';
+  import { nullboilerUiRoutes } from '$lib/nullboiler/routes';
   import {
     formatTokens,
     signedMetric,

@@ -1,4 +1,4 @@
-import { nullboilerApiPaths } from '$lib/nullstack/routes';
+import { nullboilerApiPaths } from '$lib/nullboiler/routes';
 import { getSelectedBoilerInstance } from '$lib/nullstack/backendSelection';
 
 type RequestFn = <T>(path: string, options?: RequestInit) => Promise<T>;

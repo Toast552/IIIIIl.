@@ -1,5 +1,4 @@
 const std = @import("std");
-const std_compat = @import("compat");
 const http_proxy = @import("proxy.zig");
 const query_api = @import("query.zig");
 
@@ -14,8 +13,7 @@ pub const Config = struct {
 };
 
 pub fn isProxyPath(target: []const u8) bool {
-    const clean = query_api.stripTarget(target);
-    return http_proxy.isPathInNamespace(clean, prefix);
+    return http_proxy.isTargetInNamespace(target, prefix);
 }
 
 pub fn requestedBoilerInstance(allocator: Allocator, target: []const u8) !?[]u8 {
@@ -38,130 +36,24 @@ pub fn handle(allocator: Allocator, method: []const u8, target: []const u8, body
     const base_url = cfg.boiler_url orelse
         return .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = "{\"error\":\"NullBoiler not configured\"}" };
 
-    var forwarded = forwardedTarget(allocator, target) catch
+    const selector_params = [_][]const u8{"boiler_instance"};
+    var forwarded = http_proxy.rewriteProductProxyTarget(allocator, target, .{
+        .prefix = prefix,
+        .selector_params = selector_params[0..],
+        .default_path = "/",
+    }) catch
         return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
     defer forwarded.deinit(allocator);
-
-    const proxied_path = forwarded.value[prefix.len..];
-    const path = if (proxied_path.len == 0) "/" else proxied_path;
 
     return http_proxy.forward(allocator, .{
         .method = method,
         .base_url = base_url,
-        .path = path,
+        .path = forwarded.path,
         .body = body,
         .bearer_token = cfg.boiler_token,
         .unreachable_body = "{\"error\":\"NullBoiler unreachable\"}",
     });
 }
-
-const ForwardedTarget = struct {
-    value: []const u8,
-    owned: bool = false,
-
-    fn deinit(self: *ForwardedTarget, allocator: Allocator) void {
-        if (self.owned) allocator.free(self.value);
-        self.* = .{ .value = "" };
-    }
-};
-
-fn forwardedTarget(allocator: Allocator, target: []const u8) !ForwardedTarget {
-    const qmark = std.mem.indexOfScalar(u8, target, '?') orelse return .{ .value = target };
-    var stripped_any = false;
-    var buf = std.array_list.Managed(u8).init(allocator);
-    errdefer buf.deinit();
-
-    try buf.appendSlice(target[0..qmark]);
-    var wrote_query = false;
-    var params = std.mem.splitScalar(u8, target[qmark + 1 ..], '&');
-    while (params.next()) |param| {
-        if (isHubProxyParam(param)) {
-            stripped_any = true;
-            continue;
-        }
-        try buf.append(if (wrote_query) '&' else '?');
-        wrote_query = true;
-        try buf.appendSlice(param);
-    }
-
-    if (!stripped_any) {
-        buf.deinit();
-        return .{ .value = target };
-    }
-    return .{ .value = try buf.toOwnedSlice(), .owned = true };
-}
-
-fn isHubProxyParam(param: []const u8) bool {
-    const key = if (std.mem.indexOfScalar(u8, param, '=')) |eq| param[0..eq] else param;
-    return std.mem.eql(u8, key, "boiler_instance");
-}
-
-const TestUpstream = struct {
-    allocator: Allocator,
-    ctx: *Context,
-    thread: std.Thread,
-
-    const Context = struct {
-        server: std_compat.net.Server,
-        stop_flag: std.atomic.Value(bool),
-        response: []u8,
-
-        fn run(ctx: *Context) void {
-            while (!ctx.stop_flag.load(.acquire)) {
-                var conn = ctx.server.accept() catch |err| switch (err) {
-                    error.WouldBlock => {
-                        std_compat.thread.sleep(10 * std.time.ns_per_ms);
-                        continue;
-                    },
-                    else => return,
-                };
-                defer conn.stream.close();
-
-                var read_buf: [1024]u8 = undefined;
-                _ = conn.stream.read(&read_buf) catch return;
-                _ = conn.stream.write(ctx.response) catch return;
-                return;
-            }
-        }
-    };
-
-    fn start(allocator: Allocator, response: []const u8) !TestUpstream {
-        const response_owned = try allocator.dupe(u8, response);
-        errdefer allocator.free(response_owned);
-
-        const ctx = try allocator.create(Context);
-        errdefer allocator.destroy(ctx);
-        ctx.* = .{
-            .server = undefined,
-            .stop_flag = std.atomic.Value(bool).init(false),
-            .response = response_owned,
-        };
-
-        const addr = try std_compat.net.Address.resolveIp("127.0.0.1", 0);
-        ctx.server = try addr.listen(.{});
-        errdefer ctx.server.deinit();
-
-        const thread = try std.Thread.spawn(.{}, Context.run, .{ctx});
-
-        return .{
-            .allocator = allocator,
-            .ctx = ctx,
-            .thread = thread,
-        };
-    }
-
-    fn deinit(self: *TestUpstream) void {
-        self.ctx.stop_flag.store(true, .release);
-        self.thread.join();
-        self.ctx.server.deinit();
-        self.allocator.free(self.ctx.response);
-        self.allocator.destroy(self.ctx);
-    }
-
-    fn baseUrl(self: *const TestUpstream, allocator: Allocator) ![]const u8 {
-        return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{self.ctx.server.listen_address.in.getPort()});
-    }
-};
 
 test "isProxyPath matches NullBoiler namespace" {
     try std.testing.expect(isProxyPath("/api/nullboiler"));
@@ -180,15 +72,24 @@ test "requestedBoilerInstance decodes NullBoiler target selection" {
     try std.testing.expect(try requestedBoilerInstance(allocator, "/api/nulltickets/store/ns?boiler_instance=boiler-a") == null);
 }
 
-test "forwardedTarget strips only NullBoiler selector params" {
+test "rewriteProductProxyTarget strips only NullBoiler selector params" {
     const allocator = std.testing.allocator;
-    var forwarded = try forwardedTarget(allocator, "/api/nullboiler/runs?boiler_instance=boiler-a&status=running");
+    const selector_params = [_][]const u8{"boiler_instance"};
+    var forwarded = try http_proxy.rewriteProductProxyTarget(allocator, "/api/nullboiler/runs?boiler_instance=boiler-a&status=running", .{
+        .prefix = prefix,
+        .selector_params = selector_params[0..],
+    });
     defer forwarded.deinit(allocator);
-    try std.testing.expectEqualStrings("/api/nullboiler/runs?status=running", forwarded.value);
+    try std.testing.expectEqualStrings("/api/nullboiler/runs?status=running", forwarded.target);
+    try std.testing.expectEqualStrings("/runs?status=running", forwarded.path);
 
-    var upstream_filter = try forwardedTarget(allocator, "/api/nullboiler/runs?worker=primary");
+    var upstream_filter = try http_proxy.rewriteProductProxyTarget(allocator, "/api/nullboiler/runs?worker=primary", .{
+        .prefix = prefix,
+        .selector_params = selector_params[0..],
+    });
     defer upstream_filter.deinit(allocator);
-    try std.testing.expectEqualStrings("/api/nullboiler/runs?worker=primary", upstream_filter.value);
+    try std.testing.expectEqualStrings("/api/nullboiler/runs?worker=primary", upstream_filter.target);
+    try std.testing.expectEqualStrings("/runs?worker=primary", upstream_filter.path);
 }
 
 test "handle returns not configured without NullBoiler URL" {
@@ -215,17 +116,21 @@ test "handle passes through upstream 409 status and body" {
     if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
-    var upstream = try TestUpstream.start(allocator, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{\"error\":\"conflict\"}");
+    var upstream = try http_proxy.TestUpstream.start(allocator, "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{\"error\":\"conflict\"}");
     defer upstream.deinit();
 
     const base_url = try upstream.baseUrl(allocator);
     defer allocator.free(base_url);
 
-    const resp = handle(allocator, "GET", "/api/nullboiler/runs", "", .{
+    const resp = handle(allocator, "GET", "/api/nullboiler/runs?boiler_instance=boiler-a&status=running", "", .{
         .boiler_url = base_url,
+        .boiler_token = "boiler-token",
     });
     defer allocator.free(resp.body);
 
     try std.testing.expectEqualStrings("409 Conflict", resp.status);
     try std.testing.expectEqualStrings("{\"error\":\"conflict\"}", resp.body);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "GET /runs?status=running HTTP/1.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "Authorization: Bearer boiler-token") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "boiler_instance") == null);
 }

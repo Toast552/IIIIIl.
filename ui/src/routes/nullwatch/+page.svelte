@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { onDestroy, onMount } from 'svelte';
-  import { api } from '$lib/api/client';
+  import { api, nullWatchApi } from '$lib/api/client';
 
   let summary = $state<any>(null);
   let runs = $state<any[]>([]);
@@ -94,8 +94,8 @@
     try {
       const watch = await refreshWatchSelection();
       const [summaryResult, runsResult] = await Promise.all([
-        api.getNullWatchSummary({ watch }),
-        api.getNullWatchRuns({ limit: 50, watch }),
+        nullWatchApi.getNullWatchSummary({ watch }),
+        nullWatchApi.getNullWatchRuns({ limit: 50, watch }),
       ]);
       summary = summaryResult;
       runs = runsResult?.items || [];
@@ -123,7 +123,7 @@
   async function loadRun(runId: string, showSpinner = true) {
     if (showSpinner) loadingRun = true;
     try {
-      selectedRun = await api.getNullWatchRun(runId, { watch: selectedWatchName || undefined });
+      selectedRun = await nullWatchApi.getNullWatchRun(runId, { watch: selectedWatchName || undefined });
       error = null;
     } catch (e) {
       error = (e as Error).message;
