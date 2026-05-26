@@ -32,6 +32,10 @@ export type {
   MissionControlStatus,
   MissionControlTelemetry,
   MissionControlTraceRef,
+  MissionControlWorkflowEvidence,
+  MissionControlWorkflowEvidenceCheckpoint,
+  MissionControlWorkflowEvidenceRun,
+  MissionControlWorkflowEvidenceStatus,
   MissionControlWorkflowMapping,
 } from '$lib/api/missionControl';
 

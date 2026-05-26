@@ -21,6 +21,8 @@ The exported JSON contains:
 - `scenario_id`, `scenario_version`, `mode` - replay identity.
 - `snapshot` - the current rendered Mission Control state.
 - `replay_fixture` - the source fixture used to derive the replay.
+- `workflow_evidence` - resolved NullBoiler run/checkpoint evidence when a
+  matching local instance is available.
 - `ecosystem_mapping` - how the fixture maps to nullclaw ecosystem concepts.
 
 ## Ecosystem Mapping
@@ -33,6 +35,7 @@ The exported JSON contains:
 `ecosystem_mapping.nullboiler` points to orchestration evidence:
 
 - phase timing and workflow graph edges
+- `workflow_evidence`
 - `checkpoint_id`
 - failed and recovered run ids
 - human fork instruction

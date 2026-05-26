@@ -9,6 +9,8 @@
     MissionControlState,
     MissionControlTelemetry,
     MissionControlTraceRef,
+    MissionControlWorkflowEvidenceCheckpoint,
+    MissionControlWorkflowEvidenceRun,
   } from '$lib/api/missionControl';
   import {
     findRunningNullWatchName,
@@ -16,14 +18,6 @@
     missionTracePanelRunIds,
     type TraceHydration,
   } from '$lib/missionControl/traceHydration';
-  import {
-    hydrateMissionWorkflowPanels,
-    missionWorkflowHasRefs,
-    missionWorkflowHydrationKey,
-    type NullBoilerCheckpointHydration,
-    type NullBoilerRunHydration,
-    type WorkflowHydration,
-  } from '$lib/missionControl/workflowHydration';
   import { orchestrationUiRoutes } from '$lib/orchestration/routes';
 
   type MissionAction = 'launch' | 'reset' | 'recover';
@@ -104,19 +98,13 @@
   let traceHydration = $state<Record<string, TraceHydration>>({});
   let traceHydrating = $state(false);
   let traceWatchName = $state<string | null>(null);
-  let workflowHydration = $state<WorkflowHydration | null>(null);
-  let workflowHydrating = $state(false);
   let traceHydrationKey = '';
   let traceHydrationInFlightKey = '';
   let traceHydrationCheckedAt = 0;
   let traceWatchCheckedAt = 0;
-  let workflowHydrationKey = '';
-  let workflowHydrationInFlightKey = '';
-  let workflowHydrationCheckedAt = 0;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
   const traceHydrationRefreshMs = 5000;
-  const workflowHydrationRefreshMs = 5000;
 
   const nodes = $derived(mission?.graph?.nodes || []);
   const edges = $derived(mission?.graph?.edges || []);
@@ -131,10 +119,13 @@
   const failedTrace = $derived(failedRunId ? traceHydration[failedRunId] || null : null);
   const recoveredTrace = $derived(recoveredRunId ? traceHydration[recoveredRunId] || null : null);
   const liveTraceAvailable = $derived(Boolean(failedTrace || recoveredTrace));
-  const failedWorkflowRun = $derived(workflowHydration?.failedRun || null);
-  const recoveredWorkflowRun = $derived(workflowHydration?.recoveredRun || null);
-  const workflowCheckpoint = $derived(workflowHydration?.checkpoint || null);
-  const liveWorkflowAvailable = $derived(Boolean(failedWorkflowRun || recoveredWorkflowRun || workflowCheckpoint));
+  const workflowEvidence = $derived(mission?.workflow_evidence || null);
+  const failedWorkflowRun = $derived(workflowEvidence?.failed_run || null);
+  const recoveredWorkflowRun = $derived(workflowEvidence?.recovered_run || null);
+  const workflowCheckpoint = $derived(workflowEvidence?.checkpoint || null);
+  const liveWorkflowAvailable = $derived(
+    workflowEvidence?.status === 'available' && Boolean(failedWorkflowRun || recoveredWorkflowRun || workflowCheckpoint),
+  );
   const displayTelemetry = $derived(hydratedTelemetry(telemetry, [failedTrace, recoveredTrace]));
 
   function schedulePoll() {
@@ -148,7 +139,6 @@
       const nextMission = await api.getMissionControlState();
       mission = nextMission;
       queueTraceHydration(nextMission);
-      queueWorkflowHydration(nextMission);
       error = null;
     } catch (e) {
       error = (e as Error).message;
@@ -217,10 +207,6 @@
     void refreshTraceHydration(snapshot);
   }
 
-  function queueWorkflowHydration(snapshot: MissionControlState) {
-    void refreshWorkflowHydration(snapshot);
-  }
-
   async function refreshTraceHydration(snapshot: MissionControlState) {
     const runIds = missionTracePanelRunIds(snapshot);
     if (runIds.length === 0) {
@@ -253,38 +239,6 @@
       if (traceHydrationInFlightKey === key) {
         traceHydrationInFlightKey = '';
         traceHydrating = false;
-      }
-    }
-  }
-
-  async function refreshWorkflowHydration(snapshot: MissionControlState) {
-    if (!missionWorkflowHasRefs(snapshot)) {
-      workflowHydration = null;
-      workflowHydrationKey = '';
-      workflowHydrationInFlightKey = '';
-      workflowHydrationCheckedAt = Date.now();
-      workflowHydrating = false;
-      return;
-    }
-
-    const key = missionWorkflowHydrationKey(snapshot);
-    const now = Date.now();
-    if (workflowHydrationInFlightKey === key) return;
-    if (workflowHydrationKey === key && now - workflowHydrationCheckedAt < workflowHydrationRefreshMs) return;
-
-    workflowHydrationInFlightKey = key;
-    workflowHydrating = true;
-    try {
-      const nextHydration = await hydrateMissionWorkflowPanels(api, snapshot);
-      if (disposed || workflowHydrationInFlightKey !== key) return;
-
-      workflowHydration = nextHydration;
-      workflowHydrationKey = key;
-      workflowHydrationCheckedAt = Date.now();
-    } finally {
-      if (workflowHydrationInFlightKey === key) {
-        workflowHydrationInFlightKey = '';
-        workflowHydrating = false;
       }
     }
   }
@@ -413,37 +367,40 @@
   }
 
   function workflowRunHref(runId: string): string {
-    return orchestrationUiRoutes.run(runId);
+    return orchestrationUiRoutes.run(runId, { boilerInstance: workflowEvidence?.boiler_instance || undefined });
   }
 
   function workflowSourceSummary(): string {
     if (liveWorkflowAvailable) return 'Live NullBoiler';
-    if (workflowHydrating) return 'Checking NullBoiler';
+    if (workflowEvidence?.status === 'not_configured') return 'NullBoiler not configured';
+    if (workflowEvidence?.status === 'ambiguous') return 'Ambiguous NullBoiler evidence';
+    if (workflowEvidence?.status === 'not_found') return 'No matching NullBoiler evidence';
+    if (workflowEvidence?.status === 'schema_mismatch') return 'NullBoiler schema mismatch';
     return 'NullBoiler unavailable';
   }
 
   function workflowPanelNote(): string {
     if (liveWorkflowAvailable) return 'Hydrated workflow evidence';
-    if (workflowHydrating) return 'Looking for run and checkpoint links';
+    if (workflowEvidence?.reason) return workflowEvidence.reason.replaceAll('_', ' ');
     if (mission?.failure || mission?.recovery) return 'No matching workflow evidence';
     return 'Waiting for checkpoint';
   }
 
-  function workflowRunSuffix(run: NullBoilerRunHydration | null): string {
+  function workflowRunSuffix(run: MissionControlWorkflowEvidenceRun | null): string {
     if (!run) return '';
     const parts = [run.status];
-    if (run.checkpointCount != null) parts.push(`${run.checkpointCount} checkpoints`);
+    if (run.checkpoint_count != null) parts.push(`${run.checkpoint_count} checkpoints`);
     return ` · ${parts.join(' · ')}`;
   }
 
-  function workflowCheckpointLabel(checkpoint: NullBoilerCheckpointHydration | null): string {
+  function workflowCheckpointLabel(checkpoint: MissionControlWorkflowEvidenceCheckpoint | null): string {
     if (!checkpoint) return '';
-    const parts = [checkpoint.stepId || 'checkpoint'];
+    const parts = [checkpoint.step_id || 'checkpoint'];
     if (checkpoint.version != null) parts.push(`v${checkpoint.version}`);
     return parts.join(' · ');
   }
 
-  function workflowCheckpointMetadata(checkpoint: NullBoilerCheckpointHydration | null): string {
+  function workflowCheckpointMetadata(checkpoint: MissionControlWorkflowEvidenceCheckpoint | null): string {
     if (!checkpoint?.metadata || typeof checkpoint.metadata !== 'object' || Array.isArray(checkpoint.metadata)) return '';
     const metadata = checkpoint.metadata as Record<string, unknown>;
     const keys = Object.keys(metadata).filter((key) => key !== 'route_results');
@@ -666,21 +623,17 @@
             <strong>{workflowSourceSummary()}</strong>
             <em>{workflowPanelNote()}</em>
           </div>
-          {#if failedWorkflowRun}
-            <a href={workflowRunHref(failedWorkflowRun.runId)}>Failed workflow{workflowRunSuffix(failedWorkflowRun)}</a>
-          {:else if workflowHydrating && (failedRunId || mission.failure)}
-            <span class="trace-placeholder">Checking failed workflow</span>
-          {:else if failedRunId || mission.failure}
-            <span class="trace-placeholder">Failed workflow unavailable</span>
+            {#if failedWorkflowRun}
+              <a href={workflowRunHref(failedWorkflowRun.run_id)}>Failed workflow{workflowRunSuffix(failedWorkflowRun)}</a>
+            {:else if failedRunId || mission.failure}
+              <span class="trace-placeholder">Failed workflow unavailable</span>
           {:else}
             <span class="trace-placeholder">Workflow pending</span>
           {/if}
-          {#if recoveredWorkflowRun}
-            <a href={workflowRunHref(recoveredWorkflowRun.runId)}>Recovered workflow{workflowRunSuffix(recoveredWorkflowRun)}</a>
-          {:else if workflowHydrating && (recoveredRunId || mission.recovery)}
-            <span class="trace-placeholder">Checking recovered workflow</span>
-          {:else if recoveredRunId || mission.recovery}
-            <span class="trace-placeholder">Recovered workflow unavailable</span>
+            {#if recoveredWorkflowRun}
+              <a href={workflowRunHref(recoveredWorkflowRun.run_id)}>Recovered workflow{workflowRunSuffix(recoveredWorkflowRun)}</a>
+            {:else if recoveredRunId || mission.recovery}
+              <span class="trace-placeholder">Recovered workflow unavailable</span>
           {:else}
             <span class="trace-placeholder">Recovery pending</span>
           {/if}
@@ -699,8 +652,8 @@
                   · {workflowCheckpointMetadata(workflowCheckpoint)}
                 {/if}
               </p>
-              {#if failedWorkflowRun}
-                <a href={workflowRunHref(failedWorkflowRun.runId)}>Open failed workflow</a>
+                {#if failedWorkflowRun}
+                  <a href={workflowRunHref(failedWorkflowRun.run_id)}>Open failed workflow</a>
               {/if}
             {/if}
             {#if failedTrace}
@@ -736,9 +689,9 @@
             <strong>{mission.recovery.status}</strong>
             <p>{mission.recovery.human_instruction}</p>
             <code>{mission.recovery.run_id}</code>
-            {#if recoveredWorkflowRun}
-              <p class="trace-evidence">NullBoiler run {recoveredWorkflowRun.runId}{workflowRunSuffix(recoveredWorkflowRun)}</p>
-              <a href={workflowRunHref(recoveredWorkflowRun.runId)}>Open recovered workflow</a>
+              {#if recoveredWorkflowRun}
+                <p class="trace-evidence">NullBoiler run {recoveredWorkflowRun.run_id}{workflowRunSuffix(recoveredWorkflowRun)}</p>
+                <a href={workflowRunHref(recoveredWorkflowRun.run_id)}>Open recovered workflow</a>
             {/if}
             {#if recoveredTrace}
               <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
@@ -799,9 +752,9 @@
                 <p class="trace-evidence">{spanCount(failedTrace)} spans · {evalCount(failedTrace)} evals · {formatCost(traceCost(failedTrace))}</p>
                 <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
               {/if}
-              {#if failedWorkflowRun}
-                <p class="trace-evidence">NullBoiler {failedWorkflowRun.runId}{workflowRunSuffix(failedWorkflowRun)}</p>
-                <a href={workflowRunHref(failedWorkflowRun.runId)}>Open failed workflow</a>
+                {#if failedWorkflowRun}
+                  <p class="trace-evidence">NullBoiler {failedWorkflowRun.run_id}{workflowRunSuffix(failedWorkflowRun)}</p>
+                  <a href={workflowRunHref(failedWorkflowRun.run_id)}>Open failed workflow</a>
               {/if}
             {/if}
           </div>
@@ -829,9 +782,9 @@
                 <p class="trace-evidence">{spanCount(recoveredTrace)} spans · {evalCount(recoveredTrace)} evals · {formatCost(traceCost(recoveredTrace))}</p>
                 <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
               {/if}
-              {#if recoveredWorkflowRun}
-                <p class="trace-evidence">NullBoiler {recoveredWorkflowRun.runId}{workflowRunSuffix(recoveredWorkflowRun)}</p>
-                <a href={workflowRunHref(recoveredWorkflowRun.runId)}>Open recovered workflow</a>
+                {#if recoveredWorkflowRun}
+                  <p class="trace-evidence">NullBoiler {recoveredWorkflowRun.run_id}{workflowRunSuffix(recoveredWorkflowRun)}</p>
+                  <a href={workflowRunHref(recoveredWorkflowRun.run_id)}>Open recovered workflow</a>
               {/if}
             {:else}
               <p>Waiting for human checkpoint fork.</p>

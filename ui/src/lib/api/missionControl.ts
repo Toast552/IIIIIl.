@@ -62,6 +62,40 @@ export type MissionControlTelemetry = {
   total_cost_usd: number;
   verdict: string;
 };
+export type MissionControlWorkflowEvidenceStatus =
+  | 'available'
+  | 'not_configured'
+  | 'unavailable'
+  | 'not_found'
+  | 'ambiguous'
+  | 'schema_mismatch';
+export type MissionControlWorkflowEvidenceRun = {
+  run_id: string;
+  status: string;
+  created_at_ms: number | null;
+  updated_at_ms: number | null;
+  checkpoint_count: number | null;
+};
+export type MissionControlWorkflowEvidenceCheckpoint = {
+  id: string;
+  run_id: string;
+  step_id: string;
+  parent_id: string | null;
+  version: number | null;
+  created_at_ms: number | null;
+  completed_nodes: string[];
+  metadata: unknown;
+};
+export type MissionControlWorkflowEvidence = {
+  status: MissionControlWorkflowEvidenceStatus | string;
+  source: string;
+  boiler_instance: string | null;
+  failed_run: MissionControlWorkflowEvidenceRun | null;
+  recovered_run: MissionControlWorkflowEvidenceRun | null;
+  checkpoint: MissionControlWorkflowEvidenceCheckpoint | null;
+  scanned_run_count: number;
+  reason: string | null;
+};
 export type MissionControlFailure = {
   run_id: string;
   checkpoint_id: string;
@@ -99,6 +133,7 @@ export type MissionControlState = {
   };
   events: MissionControlEvent[];
   telemetry: MissionControlTelemetry;
+  workflow_evidence: MissionControlWorkflowEvidence;
   failure: MissionControlFailure | null;
   recovery: MissionControlRecovery | null;
 };
@@ -108,6 +143,9 @@ export type MissionControlComponentMapping = {
   evidence: string[];
 };
 export type MissionControlWorkflowMapping = MissionControlComponentMapping & {
+  status: string;
+  source: string;
+  boiler_instance: string | null;
   checkpoint_id: string;
   failed_run_id: string;
   recovered_run_id: string;
@@ -128,6 +166,7 @@ export type MissionControlReplayArtifact = {
   mode: string;
   snapshot: MissionControlState;
   replay_fixture: unknown;
+  workflow_evidence: MissionControlWorkflowEvidence;
   ecosystem_mapping: {
     nulltickets: MissionControlComponentMapping;
     nullboiler: MissionControlWorkflowMapping;

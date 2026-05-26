@@ -3,6 +3,7 @@ const std_compat = @import("compat");
 const net_compat = @import("net_compat.zig");
 const auth = @import("auth.zig");
 const instances_api = @import("api/instances.zig");
+const proxy_api = @import("api/proxy.zig");
 const platform = @import("core/platform.zig");
 const components_api = @import("api/components.zig");
 const config_api = @import("api/config.zig");
@@ -28,6 +29,7 @@ const report_api = @import("api/report.zig");
 const orchestration_api = @import("api/orchestration.zig");
 const observability_api = @import("api/observability.zig");
 const mission_control_api = @import("api/mission_control.zig");
+const mission_core = @import("core/mission_control.zig");
 const launch_args_mod = @import("core/launch_args.zig");
 const ui_modules = @import("installer/ui_modules.zig");
 const orchestrator = @import("installer/orchestrator.zig");
@@ -37,6 +39,40 @@ const version = @import("version.zig");
 const test_helpers = @import("test_helpers.zig");
 
 const max_request_size: usize = 65_536;
+const mission_workflow_evidence_ttl_ms: i64 = 5000;
+const mission_workflow_scan_limit: usize = 50;
+
+const MissionWorkflowEvidenceCache = struct {
+    arena: ?std.heap.ArenaAllocator = null,
+    key: []const u8 = "",
+    checked_at_ms: i64 = 0,
+    evidence: mission_core.WorkflowEvidence = mission_core.workflowEvidenceUnavailable("not_checked"),
+
+    fn deinit(self: *MissionWorkflowEvidenceCache) void {
+        if (self.arena) |*arena| arena.deinit();
+        self.* = .{};
+    }
+
+    fn get(self: *const MissionWorkflowEvidenceCache, key: []const u8, now_ms: i64) ?mission_core.WorkflowEvidence {
+        if (self.arena == null) return null;
+        if (!std.mem.eql(u8, self.key, key)) return null;
+        if (now_ms - self.checked_at_ms > mission_workflow_evidence_ttl_ms) return null;
+        return self.evidence;
+    }
+
+    fn replace(self: *MissionWorkflowEvidenceCache, arena: std.heap.ArenaAllocator, key: []const u8, checked_at_ms: i64, evidence: mission_core.WorkflowEvidence) void {
+        if (self.arena) |*old| old.deinit();
+        self.arena = arena;
+        self.key = key;
+        self.checked_at_ms = checked_at_ms;
+        self.evidence = evidence;
+    }
+};
+
+const MissionRunCandidate = struct {
+    run: mission_core.WorkflowEvidenceRun,
+    checkpoints: []const mission_core.WorkflowEvidenceCheckpoint,
+};
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -51,6 +87,7 @@ pub const Server = struct {
     manager: *manager_mod.Manager,
     mutex: *std_compat.sync.Mutex,
     mission_control: mission_control_api.RuntimeStore = .{},
+    mission_workflow_evidence_cache: MissionWorkflowEvidenceCache = .{},
     start_time: i64,
 
     pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16, manager: *manager_mod.Manager, mutex: *std_compat.sync.Mutex) !Server {
@@ -97,6 +134,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
+        self.mission_workflow_evidence_cache.deinit();
         self.state.deinit();
         self.allocator.destroy(self.state);
         self.paths.deinit(self.allocator);
@@ -665,6 +703,113 @@ pub const Server = struct {
         return env_token orelse if (managed) |cfg| cfg.token else null;
     }
 
+    fn resolveMissionWorkflowEvidence(self: *Server, request_allocator: std.mem.Allocator, refs: mission_core.WorkflowEvidenceRefs) mission_core.WorkflowEvidence {
+        const now_ms = std_compat.time.milliTimestamp();
+        const cache_key = missionWorkflowEvidenceCacheKey(request_allocator, refs) catch
+            return mission_core.workflowEvidenceUnavailable("cache_key_allocation_failed");
+        defer request_allocator.free(cache_key);
+
+        if (self.mission_workflow_evidence_cache.get(cache_key, now_ms)) |cached| return cached;
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const allocator = arena.allocator();
+        const owned_key = allocator.dupe(u8, cache_key) catch
+            return mission_core.workflowEvidenceUnavailable("cache_key_allocation_failed");
+        const evidence = self.loadMissionWorkflowEvidence(allocator, refs);
+        self.mission_workflow_evidence_cache.replace(arena, owned_key, now_ms, evidence);
+        return self.mission_workflow_evidence_cache.evidence;
+    }
+
+    fn loadMissionWorkflowEvidence(self: *Server, allocator: std.mem.Allocator, refs: mission_core.WorkflowEvidenceRefs) mission_core.WorkflowEvidence {
+        const env_boiler_url = self.getBoilerUrl();
+        const env_boiler_token = self.getBoilerToken();
+
+        var managed_boiler = if (shouldResolveManagedBackend(env_boiler_url, null))
+            self.resolveManagedBackend(allocator, "nullboiler", null)
+        else
+            null;
+        defer if (managed_boiler) |*cfg| cfg.deinit(allocator);
+
+        const base_url = selectBackendUrl(env_boiler_url, managed_boiler, null) orelse
+            return missionWorkflowEvidenceStatus("not_configured", "nullboiler_not_configured", 0);
+        const token = selectBackendToken(env_boiler_token, managed_boiler, null);
+
+        const runs_resp = proxy_api.forward(allocator, .{
+            .method = "GET",
+            .base_url = base_url,
+            .path = "/runs?limit=50",
+            .body = "",
+            .bearer_token = token,
+            .unreachable_body = "{\"error\":\"NullBoiler unreachable\"}",
+        });
+        if (!isSuccessStatus(runs_resp.status)) {
+            return missionWorkflowEvidenceStatus("unavailable", "nullboiler_runs_unavailable", 0);
+        }
+
+        const parsed_runs = std.json.parseFromSlice(std.json.Value, allocator, runs_resp.body, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return missionWorkflowEvidenceStatus("schema_mismatch", "invalid_runs_payload", 0);
+
+        const items = missionWorkflowRunItems(parsed_runs.value) orelse
+            return missionWorkflowEvidenceStatus("schema_mismatch", "missing_runs_items", 0);
+
+        var candidates: std.ArrayListUnmanaged(MissionRunCandidate) = .empty;
+        for (items[0..@min(items.len, mission_workflow_scan_limit)]) |item| {
+            const run_id = jsonStringField(item, "id");
+            if (run_id.len == 0) continue;
+
+            const checkpoints = self.loadMissionRunCheckpoints(allocator, base_url, token, run_id) catch
+                return missionWorkflowEvidenceStatus("unavailable", "nullboiler_checkpoints_unavailable", candidates.items.len);
+            const evidence_run = mission_core.WorkflowEvidenceRun{
+                .run_id = run_id,
+                .status = jsonStringFieldOr(item, "status", "unknown"),
+                .created_at_ms = jsonIntField(item, "created_at_ms"),
+                .updated_at_ms = jsonIntField(item, "updated_at_ms"),
+                .checkpoint_count = checkpoints.len,
+            };
+            candidates.append(allocator, .{ .run = evidence_run, .checkpoints = checkpoints }) catch
+                return missionWorkflowEvidenceStatus("unavailable", "candidate_allocation_failed", candidates.items.len);
+        }
+
+        return selectMissionWorkflowEvidence(refs, candidates.items);
+    }
+
+    fn loadMissionRunCheckpoints(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        base_url: []const u8,
+        token: ?[]const u8,
+        run_id: []const u8,
+    ) ![]const mission_core.WorkflowEvidenceCheckpoint {
+        _ = self;
+        const path = try missionRunCheckpointsPath(allocator, run_id);
+        const resp = proxy_api.forward(allocator, .{
+            .method = "GET",
+            .base_url = base_url,
+            .path = path,
+            .body = "",
+            .bearer_token = token,
+            .unreachable_body = "{\"error\":\"NullBoiler unreachable\"}",
+        });
+        if (!isSuccessStatus(resp.status)) return error.CheckpointsUnavailable;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, resp.body, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return error.InvalidCheckpointPayload;
+        if (parsed.value != .array) return error.InvalidCheckpointPayload;
+
+        var checkpoints: std.ArrayListUnmanaged(mission_core.WorkflowEvidenceCheckpoint) = .empty;
+        for (parsed.value.array.items) |item| {
+            if (normalizeMissionCheckpoint(allocator, item, run_id)) |checkpoint| {
+                try checkpoints.append(allocator, checkpoint);
+            }
+        }
+        return try checkpoints.toOwnedSlice(allocator);
+    }
+
     const WatchTarget = struct {
         url: ?[]const u8 = null,
         url_owned: bool = false,
@@ -798,7 +943,12 @@ pub const Server = struct {
 
     fn route(self: *Server, allocator: std.mem.Allocator, method: []const u8, target: []const u8, body: []const u8) Response {
         if (mission_control_api.isPath(target)) {
-            const resp = mission_control_api.handle(allocator, method, target, &self.mission_control);
+            const resp = mission_control_api.handleWithIntegrations(allocator, method, target, &self.mission_control, .{
+                .workflow_evidence_resolver = .{
+                    .ptr = self,
+                    .resolve = missionWorkflowEvidenceResolver,
+                },
+            });
             return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
         }
 
@@ -1442,6 +1592,229 @@ pub const Server = struct {
         };
     }
 };
+
+fn missionWorkflowEvidenceResolver(ptr: *anyopaque, allocator: std.mem.Allocator, refs: mission_core.WorkflowEvidenceRefs) mission_core.WorkflowEvidence {
+    const server: *Server = @ptrCast(@alignCast(ptr));
+    return server.resolveMissionWorkflowEvidence(allocator, refs);
+}
+
+fn missionWorkflowEvidenceCacheKey(allocator: std.mem.Allocator, refs: mission_core.WorkflowEvidenceRefs) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}|{s}|{s}|{s}|{s}", .{
+        refs.scenario_id,
+        refs.mission_id,
+        refs.failed_run_id,
+        refs.recovered_run_id,
+        refs.checkpoint_id,
+    });
+}
+
+fn missionWorkflowEvidenceStatus(status: []const u8, reason: []const u8, scanned_run_count: usize) mission_core.WorkflowEvidence {
+    return .{
+        .status = status,
+        .reason = reason,
+        .scanned_run_count = scanned_run_count,
+    };
+}
+
+fn missionWorkflowRunItems(value: std.json.Value) ?[]std.json.Value {
+    if (value == .array) return value.array.items;
+    if (value != .object) return null;
+    const items = value.object.get("items") orelse value.object.get("runs") orelse return null;
+    if (items != .array) return null;
+    return items.array.items;
+}
+
+fn missionRunCheckpointsPath(allocator: std.mem.Allocator, run_id: []const u8) ![]u8 {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    try buf.appendSlice("/runs/");
+    try appendUrlPathSegment(&buf, run_id);
+    try buf.appendSlice("/checkpoints");
+    return try buf.toOwnedSlice();
+}
+
+fn appendUrlPathSegment(buf: *std.array_list.Managed(u8), value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.' or byte == '~') {
+            try buf.append(byte);
+        } else {
+            try buf.append('%');
+            try buf.append(hex[byte >> 4]);
+            try buf.append(hex[byte & 0x0f]);
+        }
+    }
+}
+
+fn isSuccessStatus(status: []const u8) bool {
+    return status.len >= 1 and status[0] == '2';
+}
+
+fn normalizeMissionCheckpoint(allocator: std.mem.Allocator, item: std.json.Value, default_run_id: []const u8) ?mission_core.WorkflowEvidenceCheckpoint {
+    const id = jsonStringField(item, "id");
+    if (id.len == 0) return null;
+    const run_id = jsonStringFieldOr(item, "run_id", default_run_id);
+    return .{
+        .id = id,
+        .run_id = run_id,
+        .step_id = firstJsonStringField(item, &.{ "step_id", "step_name", "after_step" }),
+        .parent_id = jsonOptionalStringField(item, "parent_id"),
+        .version = jsonIntField(item, "version"),
+        .created_at_ms = jsonIntField(item, "created_at_ms"),
+        .completed_nodes = jsonStringArrayField(allocator, item, "completed_nodes") catch &.{},
+        .metadata = jsonOptionalValueField(item, "metadata"),
+    };
+}
+
+fn selectMissionWorkflowEvidence(refs: mission_core.WorkflowEvidenceRefs, candidates: []const MissionRunCandidate) mission_core.WorkflowEvidence {
+    const checkpoint_match = findUniqueCheckpointById(candidates, refs.checkpoint_id) catch
+        return missionWorkflowEvidenceStatus("ambiguous", "checkpoint_id_matched_multiple_runs", candidates.len);
+    const failed_exact = findCandidateByRunId(candidates, refs.failed_run_id) catch
+        return missionWorkflowEvidenceStatus("ambiguous", "failed_run_id_matched_multiple_runs", candidates.len);
+    const recovered_exact = findCandidateByRunId(candidates, refs.recovered_run_id) catch
+        return missionWorkflowEvidenceStatus("ambiguous", "recovered_run_id_matched_multiple_runs", candidates.len);
+    const fork_match = if (checkpoint_match.checkpoint) |checkpoint|
+        findUniqueForkCandidate(candidates, checkpoint.id) catch
+            return missionWorkflowEvidenceStatus("ambiguous", "fork_parent_matched_multiple_runs", candidates.len)
+    else
+        MissionCandidateMatch{};
+
+    var failed_run: ?mission_core.WorkflowEvidenceRun = null;
+    if (failed_exact.candidate) |candidate| failed_run = candidate.run;
+    if (checkpoint_match.candidate) |candidate| {
+        if (failed_run) |run| {
+            if (!std.mem.eql(u8, run.run_id, candidate.run.run_id)) {
+                return missionWorkflowEvidenceStatus("ambiguous", "failed_run_checkpoint_owner_mismatch", candidates.len);
+            }
+        } else {
+            failed_run = candidate.run;
+        }
+    }
+
+    var recovered_run: ?mission_core.WorkflowEvidenceRun = null;
+    if (recovered_exact.candidate) |candidate| recovered_run = candidate.run;
+    if (fork_match.candidate) |candidate| {
+        if (recovered_run) |run| {
+            if (!std.mem.eql(u8, run.run_id, candidate.run.run_id)) {
+                return missionWorkflowEvidenceStatus("ambiguous", "recovered_run_fork_owner_mismatch", candidates.len);
+            }
+        } else {
+            recovered_run = candidate.run;
+        }
+    }
+
+    if (failed_run == null and recovered_run == null and checkpoint_match.checkpoint == null) {
+        return missionWorkflowEvidenceStatus("not_found", "no_matching_run_or_checkpoint", candidates.len);
+    }
+
+    return .{
+        .status = "available",
+        .failed_run = failed_run,
+        .recovered_run = recovered_run,
+        .checkpoint = checkpoint_match.checkpoint,
+        .scanned_run_count = candidates.len,
+    };
+}
+
+const MissionCandidateMatch = struct {
+    candidate: ?MissionRunCandidate = null,
+    checkpoint: ?mission_core.WorkflowEvidenceCheckpoint = null,
+};
+
+fn findCandidateByRunId(candidates: []const MissionRunCandidate, run_id: []const u8) !MissionCandidateMatch {
+    if (run_id.len == 0) return .{};
+    var match: ?MissionRunCandidate = null;
+    for (candidates) |candidate| {
+        if (!std.mem.eql(u8, candidate.run.run_id, run_id)) continue;
+        if (match != null) return error.Ambiguous;
+        match = candidate;
+    }
+    return .{ .candidate = match };
+}
+
+fn findUniqueCheckpointById(candidates: []const MissionRunCandidate, checkpoint_id: []const u8) !MissionCandidateMatch {
+    if (checkpoint_id.len == 0) return .{};
+    var found_candidate: ?MissionRunCandidate = null;
+    var found_checkpoint: ?mission_core.WorkflowEvidenceCheckpoint = null;
+    for (candidates) |candidate| {
+        for (candidate.checkpoints) |checkpoint| {
+            if (!std.mem.eql(u8, checkpoint.id, checkpoint_id)) continue;
+            if (found_checkpoint != null) return error.Ambiguous;
+            found_candidate = candidate;
+            found_checkpoint = checkpoint;
+        }
+    }
+    return .{ .candidate = found_candidate, .checkpoint = found_checkpoint };
+}
+
+fn findUniqueForkCandidate(candidates: []const MissionRunCandidate, checkpoint_id: []const u8) !MissionCandidateMatch {
+    if (checkpoint_id.len == 0) return .{};
+    var found: ?MissionRunCandidate = null;
+    for (candidates) |candidate| {
+        for (candidate.checkpoints) |checkpoint| {
+            const parent_id = checkpoint.parent_id orelse continue;
+            if (!std.mem.eql(u8, parent_id, checkpoint_id)) continue;
+            if (found != null and !std.mem.eql(u8, found.?.run.run_id, candidate.run.run_id)) return error.Ambiguous;
+            found = candidate;
+        }
+    }
+    return .{ .candidate = found };
+}
+
+fn jsonStringField(value: std.json.Value, key: []const u8) []const u8 {
+    if (value != .object) return "";
+    return switch (value.object.get(key) orelse .null) {
+        .string => |string| string,
+        .number_string => |string| string,
+        else => "",
+    };
+}
+
+fn jsonStringFieldOr(value: std.json.Value, key: []const u8, default: []const u8) []const u8 {
+    const string = jsonStringField(value, key);
+    return if (string.len > 0) string else default;
+}
+
+fn firstJsonStringField(value: std.json.Value, keys: []const []const u8) []const u8 {
+    for (keys) |key| {
+        const string = jsonStringField(value, key);
+        if (string.len > 0) return string;
+    }
+    return "";
+}
+
+fn jsonOptionalStringField(value: std.json.Value, key: []const u8) ?[]const u8 {
+    const string = jsonStringField(value, key);
+    return if (string.len > 0) string else null;
+}
+
+fn jsonOptionalValueField(value: std.json.Value, key: []const u8) ?std.json.Value {
+    if (value != .object) return null;
+    const field = value.object.get(key) orelse return null;
+    if (field == .null) return null;
+    return field;
+}
+
+fn jsonIntField(value: std.json.Value, key: []const u8) ?i64 {
+    if (value != .object) return null;
+    return switch (value.object.get(key) orelse .null) {
+        .integer => |integer| integer,
+        .number_string => |string| std.fmt.parseInt(i64, string, 10) catch null,
+        .string => |string| std.fmt.parseInt(i64, string, 10) catch null,
+        else => null,
+    };
+}
+
+fn jsonStringArrayField(allocator: std.mem.Allocator, value: std.json.Value, key: []const u8) ![]const []const u8 {
+    if (value != .object) return &.{};
+    const field = value.object.get(key) orelse return &.{};
+    if (field != .array) return &.{};
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (field.array.items) |item| {
+        if (item == .string) try list.append(allocator, item.string);
+    }
+    return try list.toOwnedSlice(allocator);
+}
 
 const Response = struct {
     status: []const u8,

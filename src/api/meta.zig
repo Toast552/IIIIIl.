@@ -1350,7 +1350,7 @@ const routes = [_]RouteSpec{
         .category = "mission-control",
         .summary = "Read the local deterministic NullOS Mission Control replay state.",
         .auth_mode = "optional_bearer",
-        .response = "Schema-versioned mission state, controls, graph, timeline, telemetry, recovery metadata, and NullWatch-style trace references.",
+        .response = "Schema-versioned mission state, controls, graph, timeline, telemetry, recovery metadata, NullWatch-style trace references, and resolved NullBoiler workflow evidence.",
     },
     .{
         .id = "mission-control.replay",
@@ -1359,7 +1359,7 @@ const routes = [_]RouteSpec{
         .category = "mission-control",
         .summary = "Export the current Mission Control replay artifact for local review and debugging.",
         .auth_mode = "optional_bearer",
-        .response = "Replay artifact with current snapshot, source fixture, and NullTickets/NullBoiler/NullClaw/NullWatch mapping metadata.",
+        .response = "Replay artifact with current snapshot, source fixture, resolved NullBoiler workflow evidence, and NullTickets/NullBoiler/NullClaw/NullWatch mapping metadata.",
     },
     .{
         .id = "mission-control.reset",

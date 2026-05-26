@@ -59,6 +59,44 @@ pub const MissionTelemetry = struct {
     verdict: []const u8,
 };
 
+pub const WorkflowEvidenceRefs = struct {
+    scenario_id: []const u8,
+    mission_id: []const u8,
+    failed_run_id: []const u8,
+    recovered_run_id: []const u8,
+    checkpoint_id: []const u8,
+};
+
+pub const WorkflowEvidenceRun = struct {
+    run_id: []const u8,
+    status: []const u8,
+    created_at_ms: ?i64 = null,
+    updated_at_ms: ?i64 = null,
+    checkpoint_count: ?usize = null,
+};
+
+pub const WorkflowEvidenceCheckpoint = struct {
+    id: []const u8,
+    run_id: []const u8,
+    step_id: []const u8,
+    parent_id: ?[]const u8 = null,
+    version: ?i64 = null,
+    created_at_ms: ?i64 = null,
+    completed_nodes: []const []const u8 = &.{},
+    metadata: ?std.json.Value = null,
+};
+
+pub const WorkflowEvidence = struct {
+    status: []const u8,
+    source: []const u8 = "nullboiler",
+    boiler_instance: ?[]const u8 = null,
+    failed_run: ?WorkflowEvidenceRun = null,
+    recovered_run: ?WorkflowEvidenceRun = null,
+    checkpoint: ?WorkflowEvidenceCheckpoint = null,
+    scanned_run_count: usize = 0,
+    reason: ?[]const u8 = null,
+};
+
 pub const FailurePanel = struct {
     run_id: []const u8,
     checkpoint_id: []const u8,
@@ -95,6 +133,7 @@ pub const MissionSnapshot = struct {
     graph: MissionGraph,
     events: []const MissionEvent,
     telemetry: MissionTelemetry,
+    workflow_evidence: WorkflowEvidence,
     failure: ?FailurePanel,
     recovery: ?RecoveryPanel,
 };
@@ -108,6 +147,9 @@ pub const ComponentMapping = struct {
 pub const WorkflowMapping = struct {
     component: []const u8,
     role: []const u8,
+    status: []const u8,
+    source: []const u8,
+    boiler_instance: ?[]const u8,
     checkpoint_id: []const u8,
     failed_run_id: []const u8,
     recovered_run_id: []const u8,
@@ -141,6 +183,7 @@ pub const ReplayArtifact = struct {
     mode: []const u8,
     snapshot: MissionSnapshot,
     replay_fixture: replay.ReplayFixture,
+    workflow_evidence: WorkflowEvidence,
     ecosystem_mapping: ReplayArtifactMapping,
 };
 
@@ -221,8 +264,36 @@ pub fn canRecoverWithFixture(fixture: replay.ReplayFixture, runtime: RuntimeStat
     return canRecoverPhase(fixture, runtime, phase);
 }
 
-pub fn buildSnapshotView(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) !SnapshotView {
-    var parsed = try parseReplay(allocator);
+pub fn workflowEvidenceRefs(fixture: replay.ReplayFixture) WorkflowEvidenceRefs {
+    return .{
+        .scenario_id = fixture.scenario_id,
+        .mission_id = fixture.scenario_id,
+        .failed_run_id = fixture.run_ids.failed,
+        .recovered_run_id = fixture.run_ids.recovered,
+        .checkpoint_id = fixture.checkpoint_id,
+    };
+}
+
+pub fn workflowEvidenceUnavailable(reason: []const u8) WorkflowEvidence {
+    return .{
+        .status = "unavailable",
+        .reason = reason,
+    };
+}
+
+pub fn buildSnapshotViewWithEvidence(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64, workflow_evidence: WorkflowEvidence) !SnapshotView {
+    const parsed = try parseReplay(allocator);
+    return buildSnapshotViewFromParsed(allocator, parsed, runtime, now_ms, workflow_evidence);
+}
+
+pub fn buildSnapshotViewFromParsed(
+    allocator: std.mem.Allocator,
+    parsed_fixture: std.json.Parsed(replay.ReplayFixture),
+    runtime: RuntimeState,
+    now_ms: i64,
+    workflow_evidence: WorkflowEvidence,
+) !SnapshotView {
+    var parsed = parsed_fixture;
     errdefer parsed.deinit();
     const fixture = parsed.value;
 
@@ -247,6 +318,7 @@ pub fn buildSnapshotView(allocator: std.mem.Allocator, runtime: RuntimeState, no
         nodes,
         edges,
         events,
+        workflow_evidence,
     );
     return .{
         .parsed = parsed,
@@ -258,8 +330,19 @@ pub fn buildSnapshotView(allocator: std.mem.Allocator, runtime: RuntimeState, no
     };
 }
 
-pub fn buildReplayArtifactView(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) !ReplayArtifactView {
-    var snapshot_view = try buildSnapshotView(allocator, runtime, now_ms);
+pub fn buildReplayArtifactViewWithEvidence(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64, workflow_evidence: WorkflowEvidence) !ReplayArtifactView {
+    const parsed = try parseReplay(allocator);
+    return buildReplayArtifactViewFromParsed(allocator, parsed, runtime, now_ms, workflow_evidence);
+}
+
+pub fn buildReplayArtifactViewFromParsed(
+    allocator: std.mem.Allocator,
+    parsed_fixture: std.json.Parsed(replay.ReplayFixture),
+    runtime: RuntimeState,
+    now_ms: i64,
+    workflow_evidence: WorkflowEvidence,
+) !ReplayArtifactView {
+    var snapshot_view = try buildSnapshotViewFromParsed(allocator, parsed_fixture, runtime, now_ms, workflow_evidence);
     errdefer snapshot_view.deinit(allocator);
     const fixture = snapshot_view.parsed.value;
     const artifact = ReplayArtifact{
@@ -272,7 +355,8 @@ pub fn buildReplayArtifactView(allocator: std.mem.Allocator, runtime: RuntimeSta
         .mode = fixture.mode,
         .snapshot = snapshot_view.snapshot,
         .replay_fixture = fixture,
-        .ecosystem_mapping = replayArtifactMapping(fixture),
+        .workflow_evidence = workflow_evidence,
+        .ecosystem_mapping = replayArtifactMapping(fixture, workflow_evidence),
     };
     return .{
         .snapshot_view = snapshot_view,
@@ -280,7 +364,11 @@ pub fn buildReplayArtifactView(allocator: std.mem.Allocator, runtime: RuntimeSta
     };
 }
 
-fn replayArtifactMapping(fixture: replay.ReplayFixture) ReplayArtifactMapping {
+fn replayArtifactMapping(fixture: replay.ReplayFixture, workflow_evidence: WorkflowEvidence) ReplayArtifactMapping {
+    const workflow_checkpoint_id = if (workflow_evidence.checkpoint) |checkpoint| checkpoint.id else fixture.checkpoint_id;
+    const workflow_failed_run_id = if (workflow_evidence.failed_run) |run| run.run_id else fixture.run_ids.failed;
+    const workflow_recovered_run_id = if (workflow_evidence.recovered_run) |run| run.run_id else fixture.run_ids.recovered;
+
     return .{
         .nulltickets = .{
             .component = "nulltickets",
@@ -290,11 +378,14 @@ fn replayArtifactMapping(fixture: replay.ReplayFixture) ReplayArtifactMapping {
         .nullboiler = .{
             .component = "nullboiler",
             .role = "Workflow orchestration, checkpointing, dispatch, and fork recovery.",
-            .checkpoint_id = fixture.checkpoint_id,
-            .failed_run_id = fixture.run_ids.failed,
-            .recovered_run_id = fixture.run_ids.recovered,
+            .status = workflow_evidence.status,
+            .source = workflow_evidence.source,
+            .boiler_instance = workflow_evidence.boiler_instance,
+            .checkpoint_id = workflow_checkpoint_id,
+            .failed_run_id = workflow_failed_run_id,
+            .recovered_run_id = workflow_recovered_run_id,
             .human_instruction = fixture.human_instruction,
-            .evidence = &.{ "phases", "graph.edges", "events[source=nullboiler]", "failure.checkpoint_id", "recovery.forked_from" },
+            .evidence = &.{ "workflow_evidence", "phases", "graph.edges", "events[source=nullboiler]", "failure.checkpoint_id", "recovery.forked_from" },
         },
         .nullclaw = .{
             .component = "nullclaw",
@@ -322,6 +413,7 @@ fn buildSnapshot(
     nodes: []const GraphNode,
     edges: []const GraphEdge,
     events: []const MissionEvent,
+    workflow_evidence: WorkflowEvidence,
 ) MissionSnapshot {
     const failed_visible = isAtOrAfter(fixture, phase, fixture.failure.visible_from_phase);
     const recovered_visible = runtime.recovered;
@@ -355,6 +447,7 @@ fn buildSnapshot(
         },
         .events = events,
         .telemetry = telemetryForPhase(fixture, phase),
+        .workflow_evidence = workflow_evidence,
         .failure = if (failed_visible) FailurePanel{
             .run_id = fixture.failure.run_id,
             .checkpoint_id = fixture.failure.checkpoint_id,
@@ -535,17 +628,39 @@ fn isAtOrAfter(fixture: replay.ReplayFixture, phase: []const u8, threshold: []co
 }
 
 fn snapshotJsonForTest(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) ![]u8 {
-    var view = try buildSnapshotView(allocator, runtime, now_ms);
+    var view = try buildSnapshotViewWithEvidence(allocator, runtime, now_ms, workflowEvidenceForTest());
     defer view.deinit(allocator);
 
     return std.json.Stringify.valueAlloc(allocator, view.snapshot, .{ .whitespace = .indent_2 });
 }
 
 fn replayArtifactJsonForTest(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64) ![]u8 {
-    var view = try buildReplayArtifactView(allocator, runtime, now_ms);
+    var view = try buildReplayArtifactViewWithEvidence(allocator, runtime, now_ms, workflowEvidenceForTest());
     defer view.deinit(allocator);
 
     return std.json.Stringify.valueAlloc(allocator, view.artifact, .{ .whitespace = .indent_2 });
+}
+
+fn workflowEvidenceForTest() WorkflowEvidence {
+    return .{
+        .status = "available",
+        .failed_run = .{
+            .run_id = "run-demo-failed-primary",
+            .status = "failed",
+            .checkpoint_count = 1,
+        },
+        .recovered_run = .{
+            .run_id = "run-demo-recovered-fork",
+            .status = "completed",
+            .checkpoint_count = 1,
+        },
+        .checkpoint = .{
+            .id = "ckpt-demo-code-red-failed",
+            .run_id = "run-demo-failed-primary",
+            .step_id = "code.build",
+        },
+        .scanned_run_count = 2,
+    };
 }
 
 test "buildSnapshotView returns idle mission before launch" {
@@ -557,6 +672,7 @@ test "buildSnapshotView returns idle mission before launch" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"scenario_id\": \"mission-code-red\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\": \"idle\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"phase\": \"idle\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workflow_evidence\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"can_launch\": true") != null);
 }
 
@@ -603,6 +719,8 @@ test "buildReplayArtifactView exports fixture snapshot and ecosystem mapping" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"replay_fixture_path\": \"src/core/mission_control/code_red.v1.json\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"snapshot\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"replay_fixture\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workflow_evidence\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"scanned_run_count\": 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"ecosystem_mapping\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nullwatch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trace_ref_source\": \"events[].trace\"") != null);

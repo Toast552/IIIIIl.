@@ -166,9 +166,9 @@ schema, references, ordering, required phases, graph links, and telemetry phase
 coverage. Mission timeline trace links deep-link to `/observability?run_id=...`.
 When a managed NullWatch instance is running, `/mission-control` hydrates the
 failure and recovery trace panels from live run detail through the observability
-proxy. When a NullBoiler instance has matching workflow evidence, the page also
-hydrates real workflow run links and checkpoint metadata through the
-orchestration proxy.
+proxy. When a NullBoiler instance has matching workflow evidence, the Mission
+Control API includes real workflow run links and checkpoint metadata resolved
+through the orchestration proxy.
 `GET /api/mission-control/replay` exports the current snapshot, source fixture,
 and ecosystem mapping metadata as a portable JSON artifact for debugging and
 review.
