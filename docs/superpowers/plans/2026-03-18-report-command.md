@@ -145,7 +145,7 @@ pub const ReportOptions = struct {
 
 - [ ] **Step 4: Add `report` to Command union**
 
-Add `report: ReportOptions,` after `add_source: AddSourceOptions,` in the `Command` union.
+Add `report: ReportOptions,` to the `Command` union near the other CLI commands.
 
 - [ ] **Step 5: Add parseReport function and wire into parse()**
 

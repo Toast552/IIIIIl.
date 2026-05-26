@@ -186,11 +186,11 @@ Recovered mission:
 
 ![NullHub Mission Control recovered workflow](docs/screenshots/nullhub-mission-control-recovered.png)
 
-## Limitations And Future Improvements
+## Execution Boundary
 
-- The MVP uses deterministic demo state instead of real cross-service execution.
-- The mission replay maps to NullTickets, NullBoiler, and NullWatch concepts,
-  but does not yet write into those services.
+- The Mission Control run is deterministic local replay state owned by NullHub.
+- The mission replay maps to NullTickets, NullBoiler, and NullWatch concepts
+  without mutating those services during the demo.
 - Durable replay storage, side-by-side replay comparison, live NullWatch
   hydration, real NullBoiler run/checkpoint evidence, and judge-mode one-click
   replay are included in this local-first slice.

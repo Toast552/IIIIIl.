@@ -260,11 +260,7 @@ fn writeStoredToken(
     const path = try gatewayTokenPath(allocator, paths, component, name);
     defer allocator.free(path);
 
-    const file = try std_compat.fs.createFileAbsolute(path, .{ .truncate = true });
-    defer file.close();
-    if (comptime std_compat.fs.has_executable_bit) file.chmod(0o600) catch {};
-    try file.writeAll(token);
-    try file.writeAll("\n");
+    try durable_file.writeTextFileAtomicallyWithMode(allocator, path, token, 0o600);
 }
 
 fn ensurePairedToken(

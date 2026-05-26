@@ -1,6 +1,8 @@
 const std = @import("std");
 const std_compat = @import("compat");
 const durable_file = @import("durable_file.zig");
+const mission_core = @import("mission_control.zig");
+const replay_fixture = @import("mission_control_replay.zig");
 const paths_mod = @import("paths.zig");
 
 pub const max_artifact_bytes: usize = 8 * 1024 * 1024;
@@ -63,9 +65,11 @@ pub fn save(
     paths: paths_mod.Paths,
     saved_at_ms: i64,
     artifact_json: []const u8,
-    metadata: Metadata,
 ) !Record {
     if (artifact_json.len > max_artifact_bytes) return error.ArtifactTooLarge;
+    var parsed = try parseValidatedReplayArtifact(allocator, artifact_json);
+    defer parsed.deinit();
+    const metadata = metadataFromArtifact(parsed.value);
 
     const dir_path = try ensureReplayDir(allocator, paths);
     defer allocator.free(dir_path);
@@ -148,7 +152,11 @@ pub fn read(allocator: std.mem.Allocator, paths: paths_mod.Paths, id: []const u8
 
     const file = try std_compat.fs.openFileAbsolute(artifact_path, .{});
     defer file.close();
-    return try file.readToEndAlloc(allocator, max_artifact_bytes);
+    const artifact_json = try file.readToEndAlloc(allocator, max_artifact_bytes);
+    errdefer allocator.free(artifact_json);
+    var parsed = try parseValidatedReplayArtifact(allocator, artifact_json);
+    defer parsed.deinit();
+    return artifact_json;
 }
 
 pub fn deinitRecords(allocator: std.mem.Allocator, records: []Record) void {
@@ -193,30 +201,49 @@ fn recordFromMetadata(allocator: std.mem.Allocator, id: []const u8, saved_at_ms:
 }
 
 fn recordFromArtifactJson(allocator: std.mem.Allocator, id: []const u8, artifact_json: []const u8, size_bytes: usize) !Record {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, artifact_json, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    });
+    var parsed = try parseValidatedReplayArtifact(allocator, artifact_json);
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidReplayArtifact;
+    return recordFromArtifact(allocator, id, parsed.value, size_bytes);
+}
 
-    const root = parsed.value.object;
-    const snapshot_value = root.get("snapshot") orelse return error.InvalidReplayArtifact;
-    if (snapshot_value != .object) return error.InvalidReplayArtifact;
-    const snapshot = snapshot_value.object;
+fn parseValidatedReplayArtifact(allocator: std.mem.Allocator, artifact_json: []const u8) !std.json.Parsed(mission_core.ReplayArtifact) {
+    var parsed = try std.json.parseFromSlice(mission_core.ReplayArtifact, allocator, artifact_json, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = false,
+    });
+    errdefer parsed.deinit();
+    try validateReplayArtifact(parsed.value);
+    return parsed;
+}
 
-    const generated_at_ms = jsonInt(root, "generated_at_ms") orelse return error.InvalidReplayArtifact;
-    const metadata = Metadata{
-        .generated_at_ms = generated_at_ms,
-        .scenario_id = jsonString(root, "scenario_id") orelse return error.InvalidReplayArtifact,
-        .scenario_version = jsonString(root, "scenario_version") orelse return error.InvalidReplayArtifact,
-        .mission_id = jsonString(snapshot, "mission_id") orelse jsonString(root, "scenario_id") orelse return error.InvalidReplayArtifact,
-        .title = jsonString(snapshot, "title") orelse "Mission Replay",
-        .status = jsonString(snapshot, "status") orelse "unknown",
-        .phase = jsonString(snapshot, "phase") orelse "unknown",
-        .artifact_kind = jsonString(root, "artifact_kind") orelse "nullhub.mission_control.replay",
+fn validateReplayArtifact(artifact: mission_core.ReplayArtifact) !void {
+    if (artifact.artifact_schema_version != 1) return error.InvalidReplayArtifact;
+    if (!std.mem.eql(u8, artifact.artifact_kind, "nullhub.mission_control.replay")) return error.InvalidReplayArtifact;
+    if (artifact.generated_at_ms <= 0) return error.InvalidReplayArtifact;
+    if (!std.mem.eql(u8, artifact.scenario_id, artifact.replay_fixture.scenario_id)) return error.InvalidReplayArtifact;
+    if (!std.mem.eql(u8, artifact.scenario_version, artifact.replay_fixture.scenario_version)) return error.InvalidReplayArtifact;
+    if (!std.mem.eql(u8, artifact.snapshot.scenario_id, artifact.scenario_id)) return error.InvalidReplayArtifact;
+    if (!std.mem.eql(u8, artifact.snapshot.scenario_version, artifact.scenario_version)) return error.InvalidReplayArtifact;
+    if (!std.mem.eql(u8, artifact.workflow_evidence.status, artifact.snapshot.workflow_evidence.status)) return error.InvalidReplayArtifact;
+    replay_fixture.validate(artifact.replay_fixture) catch return error.InvalidReplayArtifact;
+}
+
+fn metadataFromArtifact(artifact: mission_core.ReplayArtifact) Metadata {
+    return .{
+        .generated_at_ms = artifact.generated_at_ms,
+        .scenario_id = artifact.scenario_id,
+        .scenario_version = artifact.scenario_version,
+        .mission_id = artifact.snapshot.mission_id,
+        .title = artifact.snapshot.title,
+        .status = artifact.snapshot.status,
+        .phase = artifact.snapshot.phase,
+        .artifact_kind = artifact.artifact_kind,
     };
-    return recordFromMetadata(allocator, id, parseSavedAtFromId(id) orelse generated_at_ms, metadata, size_bytes);
+}
+
+fn recordFromArtifact(allocator: std.mem.Allocator, id: []const u8, artifact: mission_core.ReplayArtifact, size_bytes: usize) !Record {
+    const metadata = metadataFromArtifact(artifact);
+    return recordFromMetadata(allocator, id, parseSavedAtFromId(id) orelse artifact.generated_at_ms, metadata, size_bytes);
 }
 
 fn writeArtifactAtomic(allocator: std.mem.Allocator, artifact_path: []const u8, artifact_json: []const u8) !void {
@@ -299,54 +326,25 @@ fn candidateNewerFirst(_: void, a: ReplayCandidate, b: ReplayCandidate) bool {
     return a.saved_at_ms > b.saved_at_ms;
 }
 
-fn jsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const value = obj.get(key) orelse return null;
-    return if (value == .string) value.string else null;
-}
-
-fn jsonInt(obj: std.json.ObjectMap, key: []const u8) ?i64 {
-    const value = obj.get(key) orelse return null;
-    return switch (value) {
-        .integer => |int| int,
-        .number_string => |text| std.fmt.parseInt(i64, text, 10) catch null,
-        .string => |text| std.fmt.parseInt(i64, text, 10) catch null,
-        else => null,
-    };
-}
-
 test "mission replay store saves lists and reads artifacts" {
     const test_helpers = @import("../test_helpers.zig");
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
     defer fixture.deinit();
 
-    const artifact =
-        \\{
-        \\  "artifact_kind": "nullhub.mission_control.replay",
-        \\  "generated_at_ms": 1234,
-        \\  "scenario_id": "mission-code-red",
-        \\  "scenario_version": "v1",
-        \\  "snapshot": {
-        \\    "mission_id": "mission-code-red",
-        \\    "title": "Mission Code Red",
-        \\    "status": "completed",
-        \\    "phase": "completed"
-        \\  }
-        \\}
-    ;
+    var view = try mission_core.buildReplayArtifactViewWithEvidence(allocator, .{
+        .launched = true,
+        .started_at_ms = 1_000,
+        .recovered = true,
+        .recovery_started_at_ms = 11_000,
+    }, 20_000, replayEvidenceForTest());
+    defer view.deinit(allocator);
+    const artifact = try std.json.Stringify.valueAlloc(allocator, view.artifact, .{ .whitespace = .indent_2 });
+    defer allocator.free(artifact);
 
-    var record = try save(allocator, fixture.paths, 1234, artifact, .{
-        .generated_at_ms = 1234,
-        .scenario_id = "mission-code-red",
-        .scenario_version = "v1",
-        .mission_id = "mission-code-red",
-        .title = "Mission Code Red",
-        .status = "completed",
-        .phase = "completed",
-        .artifact_kind = "nullhub.mission_control.replay",
-    });
+    var record = try save(allocator, fixture.paths, 20_000, artifact);
     defer record.deinit(allocator);
-    try std.testing.expect(std.mem.startsWith(u8, record.id, "1234-mission-code-red-completed-"));
+    try std.testing.expect(std.mem.startsWith(u8, record.id, "20000-mission-code-red-completed-"));
 
     const body = try read(allocator, fixture.paths, record.id);
     defer allocator.free(body);
@@ -357,6 +355,28 @@ test "mission replay store saves lists and reads artifacts" {
     try std.testing.expectEqual(@as(usize, 1), records.len);
     try std.testing.expectEqualStrings(record.id, records[0].id);
     try std.testing.expectEqualStrings("completed", records[0].phase);
+}
+
+fn replayEvidenceForTest() mission_core.WorkflowEvidence {
+    return .{
+        .status = "available",
+        .failed_run = .{
+            .run_id = "run-demo-failed-primary",
+            .status = "failed",
+            .checkpoint_count = 1,
+        },
+        .recovered_run = .{
+            .run_id = "run-demo-recovered-fork",
+            .status = "completed",
+            .checkpoint_count = 1,
+        },
+        .checkpoint = .{
+            .id = "ckpt-demo-code-red-failed",
+            .run_id = "run-demo-failed-primary",
+            .step_id = "code.build",
+        },
+        .scanned_run_count = 2,
+    };
 }
 
 test "mission replay store list and read do not create replay directories" {
@@ -375,6 +395,27 @@ test "mission replay store list and read do not create replay directories" {
 
     try std.testing.expectError(
         error.FileNotFound,
+        read(allocator, fixture.paths, "1234-mission-code-red-completed-deadbeef"),
+    );
+}
+
+test "mission replay store rejects corrupted persisted artifact reads" {
+    const test_helpers = @import("../test_helpers.zig");
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    const replay_dir = try ensureReplayDir(allocator, fixture.paths);
+    defer allocator.free(replay_dir);
+    const bad_path = try std.fs.path.join(allocator, &.{ replay_dir, "1234-mission-code-red-completed-deadbeef.json" });
+    defer allocator.free(bad_path);
+
+    var file = try std_compat.fs.createFileAbsolute(bad_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("{\"artifact_kind\":\"wrong\"}");
+
+    try std.testing.expectError(
+        error.InvalidReplayArtifact,
         read(allocator, fixture.paths, "1234-mission-code-red-completed-deadbeef"),
     );
 }

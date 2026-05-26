@@ -2440,8 +2440,8 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
     const bin_path = start_binary.path;
     const current_version = start_binary.version;
 
-    // Read manifest from binary to get health endpoint and port, falling back
-    // to registry/config defaults for older binaries without manifest support.
+    // Read manifest from binary to get health endpoint and port. Registry/config
+    // defaults remain the deterministic path when manifest probing is unavailable.
     const known_component = registry.findKnownComponent(component);
     var health_endpoint: []const u8 = if (known_component) |known| known.default_health_endpoint else "/health";
     var port: u16 = if (known_component) |known| known.default_port else 0;

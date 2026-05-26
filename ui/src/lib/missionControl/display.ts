@@ -3,7 +3,7 @@ import type {
   MissionControlPhase,
   MissionControlTelemetry,
 } from '$lib/api/missionControl';
-import type { TraceHydration } from '$lib/missionControl/traceHydration';
+import { isAvailableTrace, type TraceHydration } from '$lib/missionControl/traceHydration';
 
 export const emptyControls: MissionControlControls = {
   can_launch: false,
@@ -122,8 +122,9 @@ export function signedMetric(value: number, decimals = 0): string {
 }
 
 export function traceSourceLabel(trace: TraceHydration | null, hydrating: boolean): string {
-  if (trace) return 'Live NullWatch';
+  if (isAvailableTrace(trace)) return 'Live NullWatch';
   if (hydrating) return 'Checking NullWatch';
+  if (trace?.message) return trace.message;
   return 'NullWatch unavailable';
 }
 
@@ -142,10 +143,89 @@ export function tracePanelNote(options: {
   traceHydrating: boolean;
   hasRunIds: boolean;
   hasWatch: boolean;
+  unavailableMessage?: string | null;
 }): string {
   if (options.liveTraceAvailable) return 'Hydrated run detail';
   if (options.traceHydrating && options.hasRunIds) return 'Looking for live traces';
+  if (options.unavailableMessage) return options.unavailableMessage;
   if (options.hasRunIds && options.hasWatch) return 'No matching live runs';
   if (options.hasRunIds) return 'No running instance';
   return 'No run ids';
+}
+
+export function spanCount(trace: TraceHydration | null): number {
+  if (!isAvailableTrace(trace)) return 0;
+  return trace.summary?.span_count ?? trace.spans.length ?? 0;
+}
+
+export function evalCount(trace: TraceHydration | null): number {
+  if (!isAvailableTrace(trace)) return 0;
+  return trace.summary?.eval_count ?? trace.evals.length ?? 0;
+}
+
+export function errorCount(trace: TraceHydration | null): number {
+  if (!isAvailableTrace(trace)) return 0;
+  return trace.summary?.error_count ?? trace.spans.filter((span) => span.status === 'error' || span.error_message).length;
+}
+
+export function tokenCount(trace: TraceHydration | null): number {
+  if (!isAvailableTrace(trace) || !trace.summary) return 0;
+  return (trace.summary.total_input_tokens || 0) + (trace.summary.total_output_tokens || 0);
+}
+
+export function traceCost(trace: TraceHydration | null): number {
+  if (!isAvailableTrace(trace)) return 0;
+  return trace.summary?.total_cost_usd || 0;
+}
+
+export function traceVerdict(trace: TraceHydration | null): string | null {
+  if (!isAvailableTrace(trace)) return null;
+  if (trace.summary?.overall_verdict) return trace.summary.overall_verdict;
+  const failedEval = trace.evals.find((evaluation) => evaluation.verdict === 'fail');
+  if (failedEval) return 'fail';
+  const passedEval = trace.evals.find((evaluation) => evaluation.verdict === 'pass');
+  if (passedEval) return 'pass';
+  return 'live';
+}
+
+export function traceSuffix(trace: TraceHydration | null): string {
+  return isAvailableTrace(trace) ? ` · ${spanCount(trace)} spans · ${evalCount(trace)} evals` : '';
+}
+
+export function primaryErrorText(trace: TraceHydration | null): string {
+  if (!isAvailableTrace(trace)) return '';
+  const span = trace.spans.find((item) => item.status === 'error' || item.error_message);
+  if (!span) return '';
+  const operation = span.operation || span.tool_name || 'span';
+  const detail = span.error_message || span.status || 'error';
+  return `${operation}: ${detail}`;
+}
+
+export function primaryEvalText(trace: TraceHydration | null, evalKey?: string): string {
+  if (!isAvailableTrace(trace)) return '';
+  const evaluation =
+    (evalKey ? trace.evals.find((item) => item.eval_key === evalKey) : null) ||
+    trace.evals.find((item) => item.verdict === 'fail') ||
+    trace.evals[0];
+  if (!evaluation) return '';
+  const key = evaluation.eval_key || 'eval';
+  const verdict = evaluation.verdict || 'unknown';
+  return `${key}: ${verdict} (${formatScore(evaluation.score)})`;
+}
+
+export function hydratedTelemetry(base: MissionControlTelemetry, traces: (TraceHydration | null)[]): MissionControlTelemetry {
+  const liveTraces = traces.filter(isAvailableTrace);
+  if (liveTraces.length === 0) return base;
+
+  const verdicts = liveTraces.map(traceVerdict).filter((value): value is string => Boolean(value));
+  return {
+    ...base,
+    runs: liveTraces.length,
+    spans: liveTraces.reduce((total, trace) => total + spanCount(trace), 0),
+    evals: liveTraces.reduce((total, trace) => total + evalCount(trace), 0),
+    errors: liveTraces.reduce((total, trace) => total + errorCount(trace), 0),
+    total_tokens: liveTraces.reduce((total, trace) => total + tokenCount(trace), 0),
+    total_cost_usd: liveTraces.reduce((total, trace) => total + traceCost(trace), 0),
+    verdict: verdicts.includes('fail') ? 'fail' : verdicts.includes('pass') ? 'pass' : base.verdict,
+  };
 }

@@ -130,11 +130,12 @@ fn saveReplayResponse(allocator: std.mem.Allocator, runtime: mission.RuntimeStat
     const workflow_evidence = resolveWorkflowEvidence(allocator, integrations, mission.workflowEvidenceRefs(parsed.value));
     var view = mission.buildReplayArtifactViewFromParsed(allocator, parsed, runtime, now_ms, workflow_evidence) catch return helpers.serverError();
     defer view.deinit(allocator);
+    if (!std.mem.eql(u8, view.artifact.snapshot.status, "completed")) return replayNotComplete();
 
     const artifact_body = std.json.Stringify.valueAlloc(allocator, view.artifact, .{ .whitespace = .indent_2 }) catch return helpers.serverError();
     defer allocator.free(artifact_body);
 
-    var record = replay_store.save(allocator, paths, now_ms, artifact_body, replayMetadata(view.artifact)) catch return helpers.serverError();
+    var record = replay_store.save(allocator, paths, now_ms, artifact_body) catch return helpers.serverError();
     defer record.deinit(allocator);
 
     const response = struct {
@@ -170,22 +171,10 @@ fn storedReplayResponse(allocator: std.mem.Allocator, id: []const u8, integratio
     const paths = integrations.paths orelse return helpers.serverError();
     const body = replay_store.read(allocator, paths, id) catch |err| switch (err) {
         error.FileNotFound, error.InvalidReplayId => return helpers.notFound(),
+        error.InvalidReplayArtifact => return invalidReplayArtifact(),
         else => return helpers.serverError(),
     };
     return helpers.jsonOk(body);
-}
-
-fn replayMetadata(artifact: mission.ReplayArtifact) replay_store.Metadata {
-    return .{
-        .generated_at_ms = artifact.generated_at_ms,
-        .scenario_id = artifact.scenario_id,
-        .scenario_version = artifact.scenario_version,
-        .mission_id = artifact.snapshot.mission_id,
-        .title = artifact.snapshot.title,
-        .status = artifact.snapshot.status,
-        .phase = artifact.snapshot.phase,
-        .artifact_kind = artifact.artifact_kind,
-    };
 }
 
 fn storedReplayId(path: []const u8) ?[]const u8 {
@@ -214,6 +203,22 @@ fn missionNotRecoverable() ApiResponse {
         .status = "409 Conflict",
         .content_type = "application/json",
         .body = "{\"error\":{\"code\":\"mission_not_recoverable\",\"message\":\"Mission can only be recovered after the validation failure phase.\"}}",
+    };
+}
+
+fn replayNotComplete() ApiResponse {
+    return .{
+        .status = "409 Conflict",
+        .content_type = "application/json",
+        .body = "{\"error\":{\"code\":\"mission_replay_not_complete\",\"message\":\"Mission replay can only be saved after recovered validation completes.\"}}",
+    };
+}
+
+fn invalidReplayArtifact() ApiResponse {
+    return .{
+        .status = "422 Unprocessable Entity",
+        .content_type = "application/json",
+        .body = "{\"error\":{\"code\":\"invalid_replay_artifact\",\"message\":\"Stored mission replay artifact failed schema validation.\"}}",
     };
 }
 
@@ -397,4 +402,17 @@ test "handle saves lists and reads durable replay artifacts" {
     try std.testing.expectEqualStrings("200 OK", read_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, read_resp.body, "\"artifact_kind\": \"nullhub.mission_control.replay\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, read_resp.body, "\"phase\": \"completed\"") != null);
+}
+
+test "handle rejects saving incomplete replay snapshots" {
+    const allocator = std.testing.allocator;
+    const test_helpers = @import("../test_helpers.zig");
+
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var store = RuntimeStore{};
+    const save_resp = handleForTestWithPaths(allocator, "POST", "/api/mission-control/replay/save", &store, fixture.paths);
+    try std.testing.expectEqualStrings("409 Conflict", save_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, save_resp.body, "mission_replay_not_complete") != null);
 }

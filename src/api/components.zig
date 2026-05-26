@@ -130,10 +130,20 @@ pub fn handleManifest(allocator: std.mem.Allocator, component_name: []const u8) 
     return null;
 }
 
-/// Handle POST /api/components/refresh — placeholder for future manifest refresh.
-/// Returns a success response body.
+/// Handle POST /api/components/refresh — report the current known registry snapshot.
 pub fn handleRefresh(allocator: std.mem.Allocator) ![]const u8 {
-    return try allocator.dupe(u8, "{\"status\":\"ok\"}");
+    var installable_count: usize = 0;
+    var alpha_count: usize = 0;
+    for (registry.known_components) |comp| {
+        if (comp.installable) installable_count += 1;
+        if (comp.is_alpha) alpha_count += 1;
+    }
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "{{\"status\":\"ok\",\"component_count\":{d},\"installable_count\":{d},\"alpha_count\":{d}}}",
+        .{ registry.known_components.len, installable_count, alpha_count },
+    );
 }
 
 // ─── Route extraction helper ─────────────────────────────────────────────────
@@ -253,7 +263,9 @@ test "handleRefresh returns ok status" {
 
     const json = try handleRefresh(allocator);
     defer allocator.free(json);
-    try std.testing.expectEqualStrings("{\"status\":\"ok\"}", json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"component_count\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"installable_count\":4") != null);
 }
 
 test "extractComponentName parses paths correctly" {

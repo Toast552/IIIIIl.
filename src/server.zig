@@ -751,6 +751,88 @@ pub const Server = struct {
         };
     }
 
+    fn ownedManagedBackend(allocator: std.mem.Allocator, name: []const u8, url: []const u8, token: ?[]const u8) !ManagedBackendConfig {
+        const owned_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_name);
+        const owned_url = try allocator.dupe(u8, url);
+        errdefer allocator.free(owned_url);
+        const owned_token = if (token) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (owned_token) |value| allocator.free(value);
+        return .{
+            .name = owned_name,
+            .url = owned_url,
+            .token = owned_token,
+        };
+    }
+
+    fn deinitManagedBackendConfigs(allocator: std.mem.Allocator, configs: []ManagedBackendConfig) void {
+        for (configs) |*cfg| cfg.deinit(allocator);
+        allocator.free(configs);
+    }
+
+    fn appendUniqueManagedBackend(
+        allocator: std.mem.Allocator,
+        list: *std.ArrayListUnmanaged(ManagedBackendConfig),
+        backend: ManagedBackendConfig,
+    ) !void {
+        var owned = backend;
+        errdefer owned.deinit(allocator);
+        for (list.items) |item| {
+            if (std.mem.eql(u8, item.url, owned.url)) {
+                owned.deinit(allocator);
+                return;
+            }
+        }
+        try list.append(allocator, owned);
+    }
+
+    fn appendManagedNullBoilerBackends(self: *Server, allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(ManagedBackendConfig)) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const configs = try integration_mod.listNullBoilers(allocator, self.state, self.paths);
+        defer integration_mod.deinitNullBoilerConfigs(allocator, configs);
+
+        const before_running = list.items.len;
+        try self.appendManagedBackendPass(allocator, list, "nullboiler", configs, true);
+        if (list.items.len == before_running) {
+            try self.appendManagedBackendPass(allocator, list, "nullboiler", configs, false);
+        }
+    }
+
+    fn appendManagedBackendPass(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        list: *std.ArrayListUnmanaged(ManagedBackendConfig),
+        component: []const u8,
+        configs: anytype,
+        running_pass: bool,
+    ) !void {
+        for (configs) |cfg| {
+            const status = self.manager.getStatus(component, cfg.name);
+            const running = if (status) |value| value.status == .running else false;
+            if (running != running_pass) continue;
+            const backend = managedBackendFromConfig(allocator, cfg.name, cfg.port, cfg.api_token) orelse return error.OutOfMemory;
+            try appendUniqueManagedBackend(allocator, list, backend);
+        }
+    }
+
+    fn missionWorkflowBackends(self: *Server, allocator: std.mem.Allocator) ![]ManagedBackendConfig {
+        var list: std.ArrayListUnmanaged(ManagedBackendConfig) = .empty;
+        errdefer {
+            for (list.items) |*cfg| cfg.deinit(allocator);
+            list.deinit(allocator);
+        }
+        defer list.deinit(allocator);
+
+        if (self.getBoilerUrl()) |url| {
+            const env_backend = try ownedManagedBackend(allocator, "env", url, self.getBoilerToken());
+            try appendUniqueManagedBackend(allocator, &list, env_backend);
+        }
+        try self.appendManagedNullBoilerBackends(allocator, &list);
+        return try list.toOwnedSlice(allocator);
+    }
+
     fn shouldResolveManagedBackend(env_url: ?[]const u8, requested_name: ?[]const u8) bool {
         return requested_name != null or env_url == null;
     }
@@ -765,15 +847,13 @@ pub const Server = struct {
         return env_token orelse if (managed) |cfg| cfg.token else null;
     }
 
-    fn selectedManagedBackend(env_url: ?[]const u8, managed: ?ManagedBackendConfig, requested_name: ?[]const u8) ?ManagedBackendConfig {
-        if (requested_name != null) return managed;
-        if (env_url == null) return managed;
-        return null;
-    }
-
     fn resolveMissionWorkflowEvidence(self: *Server, request_allocator: std.mem.Allocator, refs: mission_core.WorkflowEvidenceRefs) mission_core.WorkflowEvidence {
         const now_ms = std_compat.time.milliTimestamp();
-        const cache_key = missionWorkflowEvidenceCacheKey(request_allocator, refs) catch
+        const backends = self.missionWorkflowBackends(request_allocator) catch
+            return mission_core.workflowEvidenceUnavailable("nullboiler_backend_discovery_failed");
+        defer deinitManagedBackendConfigs(request_allocator, backends);
+
+        const cache_key = missionWorkflowEvidenceCacheKey(request_allocator, refs, backends) catch
             return mission_core.workflowEvidenceUnavailable("cache_key_allocation_failed");
         defer request_allocator.free(cache_key);
 
@@ -784,50 +864,78 @@ pub const Server = struct {
         const allocator = arena.allocator();
         const owned_key = allocator.dupe(u8, cache_key) catch
             return mission_core.workflowEvidenceUnavailable("cache_key_allocation_failed");
-        const evidence = self.loadMissionWorkflowEvidence(allocator, refs);
+        const evidence = self.loadMissionWorkflowEvidence(allocator, refs, backends);
         return self.mission_workflow_evidence_cache.replaceAndClone(request_allocator, arena, owned_key, now_ms, evidence);
     }
 
-    fn loadMissionWorkflowEvidence(self: *Server, allocator: std.mem.Allocator, refs: mission_core.WorkflowEvidenceRefs) mission_core.WorkflowEvidence {
+    fn loadMissionWorkflowEvidence(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        refs: mission_core.WorkflowEvidenceRefs,
+        backends: []const ManagedBackendConfig,
+    ) mission_core.WorkflowEvidence {
+        if (backends.len == 0) return missionWorkflowEvidenceStatus("not_configured", "nullboiler_not_configured", 0);
+
+        var available: ?mission_core.WorkflowEvidence = null;
+        var best_not_found: ?mission_core.WorkflowEvidence = null;
+        var best_unavailable: ?mission_core.WorkflowEvidence = null;
+        var scanned_run_count: usize = 0;
+
+        for (backends) |backend| {
+            const evidence = self.loadMissionWorkflowEvidenceFromBackend(allocator, refs, backend);
+            scanned_run_count += evidence.scanned_run_count;
+            if (std.mem.eql(u8, evidence.status, "available")) {
+                if (available != null) {
+                    return missionWorkflowEvidenceStatus("ambiguous", "workflow_evidence_matched_multiple_backends", scanned_run_count);
+                }
+                available = evidence;
+                continue;
+            }
+            if (std.mem.eql(u8, evidence.status, "ambiguous")) return evidence;
+            if (std.mem.eql(u8, evidence.status, "not_found")) {
+                if (best_not_found == null or evidence.scanned_run_count > best_not_found.?.scanned_run_count) best_not_found = evidence;
+                continue;
+            }
+            if (best_unavailable == null) best_unavailable = evidence;
+        }
+
+        if (available) |evidence| return evidence;
+        if (best_not_found) |evidence| return evidence;
+        if (best_unavailable) |evidence| return evidence;
+        return missionWorkflowEvidenceStatus("not_configured", "nullboiler_not_configured", 0);
+    }
+
+    fn loadMissionWorkflowEvidenceFromBackend(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        refs: mission_core.WorkflowEvidenceRefs,
+        backend: ManagedBackendConfig,
+    ) mission_core.WorkflowEvidence {
         var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const env_boiler_url = self.getBoilerUrl();
-        const env_boiler_token = self.getBoilerToken();
-
-        var managed_boiler = if (shouldResolveManagedBackend(env_boiler_url, null))
-            self.resolveManagedBackend(allocator, "nullboiler", null)
-        else
-            null;
-        defer if (managed_boiler) |*cfg| cfg.deinit(allocator);
-
-        const selected_managed_boiler = selectedManagedBackend(env_boiler_url, managed_boiler, null);
-        const base_url = selectBackendUrl(env_boiler_url, managed_boiler, null) orelse
-            return missionWorkflowEvidenceStatus("not_configured", "nullboiler_not_configured", 0);
-        const token = selectBackendToken(env_boiler_token, managed_boiler, null);
-
         const runs_resp = proxy_api.forward(scratch_allocator, .{
             .method = "GET",
-            .base_url = base_url,
+            .base_url = backend.url,
             .path = "/runs?limit=50",
             .body = "",
-            .bearer_token = token,
+            .bearer_token = backend.token,
             .unreachable_body = "{\"error\":\"NullBoiler unreachable\"}",
             .max_response_bytes = mission_workflow_response_max_bytes,
         });
         if (!isSuccessStatus(runs_resp.status)) {
-            return missionWorkflowEvidenceWithBackend(allocator, missionWorkflowEvidenceStatus("unavailable", "nullboiler_runs_unavailable", 0), selected_managed_boiler);
+            return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("unavailable", "nullboiler_runs_unavailable", 0), backend.name);
         }
 
         const parsed_runs = std.json.parseFromSlice(std.json.Value, scratch_allocator, runs_resp.body, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
-        }) catch return missionWorkflowEvidenceWithBackend(allocator, missionWorkflowEvidenceStatus("schema_mismatch", "invalid_runs_payload", 0), selected_managed_boiler);
+        }) catch return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("schema_mismatch", "invalid_runs_payload", 0), backend.name);
         defer parsed_runs.deinit();
 
         const items = missionWorkflowRunItems(parsed_runs.value) orelse
-            return missionWorkflowEvidenceWithBackend(allocator, missionWorkflowEvidenceStatus("schema_mismatch", "missing_runs_items", 0), selected_managed_boiler);
+            return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("schema_mismatch", "missing_runs_items", 0), backend.name);
 
         var candidates: std.ArrayListUnmanaged(MissionRunCandidate) = .empty;
         for (items[0..@min(items.len, mission_workflow_scan_limit)]) |item| {
@@ -835,22 +943,22 @@ pub const Server = struct {
             if (run_id.len == 0) continue;
 
             const loaded_checkpoints: ?[]const mission_core.WorkflowEvidenceCheckpoint =
-                self.loadMissionRunCheckpoints(allocator, scratch_allocator, base_url, token, run_id) catch null;
+                self.loadMissionRunCheckpoints(allocator, scratch_allocator, backend.url, backend.token, run_id) catch null;
             const checkpoints = loaded_checkpoints orelse &.{};
             const evidence_run = mission_core.WorkflowEvidenceRun{
                 .run_id = allocator.dupe(u8, run_id) catch
-                    return missionWorkflowEvidenceWithBackend(allocator, missionWorkflowEvidenceStatus("unavailable", "run_id_allocation_failed", candidates.items.len), selected_managed_boiler),
+                    return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("unavailable", "run_id_allocation_failed", candidates.items.len), backend.name),
                 .status = allocator.dupe(u8, jsonStringFieldOr(item, "status", "unknown")) catch
-                    return missionWorkflowEvidenceWithBackend(allocator, missionWorkflowEvidenceStatus("unavailable", "run_status_allocation_failed", candidates.items.len), selected_managed_boiler),
+                    return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("unavailable", "run_status_allocation_failed", candidates.items.len), backend.name),
                 .created_at_ms = jsonIntField(item, "created_at_ms"),
                 .updated_at_ms = jsonIntField(item, "updated_at_ms"),
                 .checkpoint_count = if (loaded_checkpoints != null) checkpoints.len else null,
             };
             candidates.append(allocator, .{ .run = evidence_run, .checkpoints = checkpoints }) catch
-                return missionWorkflowEvidenceWithBackend(allocator, missionWorkflowEvidenceStatus("unavailable", "candidate_allocation_failed", candidates.items.len), selected_managed_boiler);
+                return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("unavailable", "candidate_allocation_failed", candidates.items.len), backend.name);
         }
 
-        return missionWorkflowEvidenceWithBackend(allocator, selectMissionWorkflowEvidence(refs, candidates.items), selected_managed_boiler);
+        return missionWorkflowEvidenceWithBackendName(allocator, selectMissionWorkflowEvidence(refs, candidates.items), backend.name);
     }
 
     fn loadMissionRunCheckpoints(
@@ -1679,14 +1787,45 @@ fn missionWorkflowEvidenceResolver(ptr: *anyopaque, allocator: std.mem.Allocator
     return server.resolveMissionWorkflowEvidence(allocator, refs);
 }
 
-fn missionWorkflowEvidenceCacheKey(allocator: std.mem.Allocator, refs: mission_core.WorkflowEvidenceRefs) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}|{s}|{s}|{s}|{s}", .{
-        refs.scenario_id,
-        refs.mission_id,
-        refs.failed_run_id,
-        refs.recovered_run_id,
-        refs.checkpoint_id,
-    });
+fn missionWorkflowEvidenceCacheKey(
+    allocator: std.mem.Allocator,
+    refs: mission_core.WorkflowEvidenceRefs,
+    backends: []const Server.ManagedBackendConfig,
+) ![]u8 {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    try buf.appendSlice(refs.scenario_id);
+    try buf.append('|');
+    try buf.appendSlice(refs.mission_id);
+    try buf.append('|');
+    try buf.appendSlice(refs.failed_run_id);
+    try buf.append('|');
+    try buf.appendSlice(refs.recovered_run_id);
+    try buf.append('|');
+    try buf.appendSlice(refs.checkpoint_id);
+    for (backends) |backend| {
+        try buf.appendSlice("|backend=");
+        try buf.appendSlice(backend.name);
+        try buf.append('@');
+        try buf.appendSlice(backend.url);
+        try buf.append('#');
+        try appendTokenFingerprint(&buf, backend.token);
+    }
+    return try buf.toOwnedSlice();
+}
+
+fn appendTokenFingerprint(buf: *std.array_list.Managed(u8), token: ?[]const u8) !void {
+    const value = token orelse {
+        try buf.append('-');
+        return;
+    };
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(value, &digest, .{});
+    const hex = "0123456789abcdef";
+    for (digest) |byte| {
+        try buf.append(hex[byte >> 4]);
+        try buf.append(hex[byte & 0x0f]);
+    }
 }
 
 fn missionWorkflowEvidenceStatus(status: []const u8, reason: []const u8, scanned_run_count: usize) mission_core.WorkflowEvidence {
@@ -1697,10 +1836,10 @@ fn missionWorkflowEvidenceStatus(status: []const u8, reason: []const u8, scanned
     };
 }
 
-fn missionWorkflowEvidenceWithBackend(allocator: std.mem.Allocator, evidence: mission_core.WorkflowEvidence, managed: ?Server.ManagedBackendConfig) mission_core.WorkflowEvidence {
+fn missionWorkflowEvidenceWithBackendName(allocator: std.mem.Allocator, evidence: mission_core.WorkflowEvidence, backend_name: ?[]const u8) mission_core.WorkflowEvidence {
     var out = evidence;
-    if (managed) |cfg| {
-        out.boiler_instance = allocator.dupe(u8, cfg.name) catch null;
+    if (backend_name) |name| {
+        out.boiler_instance = allocator.dupe(u8, name) catch null;
     }
     return out;
 }
@@ -2721,7 +2860,8 @@ test "route POST /api/components/refresh returns 200" {
     const resp = ctx.route(std.testing.allocator, "POST", "/api/components/refresh", "");
     defer std.testing.allocator.free(resp.body);
     try std.testing.expectEqualStrings("200 OK", resp.status);
-    try std.testing.expectEqualStrings("{\"status\":\"ok\"}", resp.body);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"component_count\":4") != null);
 }
 
 test "extractHeader finds Content-Length" {
@@ -2862,12 +3002,10 @@ test "explicit managed orchestration backend selection overrides env fallback" {
         "env-token",
         Server.selectBackendToken("env-token", managed, null).?,
     );
-    try std.testing.expect(Server.selectedManagedBackend(null, managed, null) != null);
-    try std.testing.expect(Server.selectedManagedBackend("http://env.example", managed, null) == null);
-    const evidence = missionWorkflowEvidenceWithBackend(
+    const evidence = missionWorkflowEvidenceWithBackendName(
         allocator,
         missionWorkflowEvidenceStatus("available", "ok", 1),
-        managed,
+        managed.name,
     );
     defer allocator.free(evidence.boiler_instance.?);
     try std.testing.expectEqualStrings("worker-a", evidence.boiler_instance.?);

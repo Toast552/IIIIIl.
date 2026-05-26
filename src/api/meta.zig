@@ -83,6 +83,13 @@ const channel_id_param = ParamSpec{
     .description = "Saved channel numeric identifier.",
 };
 
+const mission_replay_id_param = ParamSpec{
+    .name = "id",
+    .location = "path",
+    .required = true,
+    .description = "Durable Mission Control replay artifact id.",
+};
+
 const window_query = ParamSpec{
     .name = "window",
     .location = "query",
@@ -174,6 +181,13 @@ const memory_limit_query = ParamSpec{
     .description = "Maximum number of memory results.",
 };
 
+const mission_replay_limit_query = ParamSpec{
+    .name = "limit",
+    .location = "query",
+    .required = false,
+    .description = "Maximum number of durable replay records to return, clamped to 1..100.",
+};
+
 const memory_offset_query = ParamSpec{
     .name = "offset",
     .location = "query",
@@ -248,6 +262,7 @@ const common_instance_params = [_]ParamSpec{ component_param, instance_name_para
 const component_only_params = [_]ParamSpec{component_param};
 const provider_id_params = [_]ParamSpec{provider_id_param};
 const channel_id_params = [_]ParamSpec{channel_id_param};
+const mission_replay_id_params = [_]ParamSpec{mission_replay_id_param};
 const module_name_params = [_]ParamSpec{module_name_param};
 const component_name_params = [_]ParamSpec{component_name_param};
 const wizard_component_params = [_]ParamSpec{wizard_component_param};
@@ -261,6 +276,7 @@ const config_query_params = [_]ParamSpec{config_path_query};
 const named_query_params = [_]ParamSpec{named_query};
 const session_query_params = [_]ParamSpec{session_query};
 const limit_query_params = [_]ParamSpec{history_limit_query};
+const mission_replay_limit_query_params = [_]ParamSpec{mission_replay_limit_query};
 const cron_job_id_params = [_]ParamSpec{ component_param, instance_name_param, cron_job_id_param };
 
 const route_examples_status = [_]ExampleSpec{
@@ -412,9 +428,9 @@ const routes = [_]RouteSpec{
         .method = "POST",
         .path_template = "/api/components/refresh",
         .category = "components",
-        .summary = "Refresh the component registry and cached manifests.",
+        .summary = "Return the current component registry snapshot.",
         .auth_mode = "optional_bearer",
-        .response = "Refresh status payload.",
+        .response = "Registry snapshot payload.",
     },
     .{
         .id = "wizard.free_port",
@@ -1400,10 +1416,10 @@ const routes = [_]RouteSpec{
         .method = "POST",
         .path_template = "/api/mission-control/replay/save",
         .category = "mission-control",
-        .summary = "Persist the current Mission Control replay artifact in local NullHub storage.",
+        .summary = "Persist the completed Mission Control replay artifact in local NullHub storage.",
         .auth_mode = "optional_bearer",
         .body = "No request body required.",
-        .response = "Saved replay record and the captured replay artifact.",
+        .response = "Saved replay record and the captured completed replay artifact; returns 409 before recovered validation completes.",
     },
     .{
         .id = "mission-control.replays.list",
@@ -1412,6 +1428,7 @@ const routes = [_]RouteSpec{
         .category = "mission-control",
         .summary = "List durable Mission Control replay records.",
         .auth_mode = "optional_bearer",
+        .query_params = mission_replay_limit_query_params[0..],
         .response = "Recent replay records from local NullHub storage.",
     },
     .{
@@ -1421,6 +1438,7 @@ const routes = [_]RouteSpec{
         .category = "mission-control",
         .summary = "Read a durable Mission Control replay artifact by id.",
         .auth_mode = "optional_bearer",
+        .path_params = mission_replay_id_params[0..],
         .response = "The stored replay artifact JSON.",
     },
     .{

@@ -61,7 +61,8 @@ This PR keeps the demo deterministic and honest: it does not mutate real
 NullTickets, NullBoiler, NullClaw, or NullWatch state. When local NullWatch or
 NullBoiler instances are running and contain matching evidence, Mission Control
 hydrates trace panels, workflow run ids, and checkpoint metadata from those
-services; otherwise it falls back to the deterministic replay fixture.
+services. Without matching live evidence, the deterministic replay fixture
+remains the source of truth for the local Mission Control run.
 
 Validation performed:
 

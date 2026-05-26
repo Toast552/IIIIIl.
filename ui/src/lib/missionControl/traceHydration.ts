@@ -45,8 +45,20 @@ export type NullWatchEval = {
   notes?: string;
 };
 
+export type TraceHydrationStatus = 'available' | 'unavailable';
+export type TraceHydrationUnavailableReason =
+  | 'no_running_nullwatch'
+  | 'status_unavailable'
+  | 'run_not_found'
+  | 'observability_unavailable'
+  | 'run_detail_unavailable'
+  | 'empty_run_detail';
+
 export type TraceHydration = {
   runId: string;
+  status: TraceHydrationStatus;
+  unavailableReason?: TraceHydrationUnavailableReason;
+  message?: string;
   summary: NullWatchRunSummary | null;
   spans: NullWatchSpan[];
   evals: NullWatchEval[];
@@ -56,6 +68,12 @@ export type TraceHydration = {
 type NullWatchOption = {
   name: string;
   status: string;
+};
+
+export type NullWatchSelection = {
+  watch: string | null;
+  unavailableReason?: TraceHydrationUnavailableReason;
+  message?: string;
 };
 
 type StatusPayload = {
@@ -75,12 +93,22 @@ type ObservabilityRunDetail = {
   evals?: NullWatchEval[];
 };
 
-export async function findRunningNullWatchName(api: TraceHydrationApi): Promise<string | null> {
+export async function findRunningNullWatch(api: TraceHydrationApi): Promise<NullWatchSelection> {
   try {
     const status = await api.getStatus();
-    return runningTraceWatchName(status);
+    const watch = runningTraceWatchName(status);
+    if (watch) return { watch };
+    return {
+      watch: null,
+      unavailableReason: 'no_running_nullwatch',
+      message: unavailableTraceMessage('no_running_nullwatch'),
+    };
   } catch {
-    return null;
+    return {
+      watch: null,
+      unavailableReason: 'status_unavailable',
+      message: unavailableTraceMessage('status_unavailable'),
+    };
   }
 }
 
@@ -88,14 +116,25 @@ export async function hydrateMissionTracePanels(
   api: TraceHydrationApi,
   snapshot: MissionControlState,
   watch: string | null,
+  unavailableReason: TraceHydrationUnavailableReason = 'no_running_nullwatch',
 ): Promise<Record<string, TraceHydration>> {
   const runIds = missionTracePanelRunIds(snapshot);
-  if (runIds.length === 0 || !watch) return {};
+  if (runIds.length === 0) return {};
+  if (!watch) {
+    return Object.fromEntries(
+      runIds.map((runId) => [
+        runId,
+        unavailableTrace(runId, unavailableReason),
+      ]),
+    );
+  }
 
   const entries = await Promise.all(runIds.map((runId) => loadTraceHydration(api, runId, watch)));
-  return Object.fromEntries(
-    entries.filter((entry): entry is TraceHydration => Boolean(entry)).map((entry) => [entry.runId, entry]),
-  );
+  return Object.fromEntries(entries.map((entry) => [entry.runId, entry]));
+}
+
+export function isAvailableTrace(trace: TraceHydration | null | undefined): trace is TraceHydration {
+  return trace?.status === 'available';
 }
 
 function runningTraceWatchName(status: StatusPayload): string | null {
@@ -116,27 +155,56 @@ async function loadTraceHydration(
   api: TraceHydrationApi,
   runId: string,
   watch: string,
-): Promise<TraceHydration | null> {
+): Promise<TraceHydration> {
+  let listed: ObservabilityRunsPayload;
   try {
-    const listed = await api.getObservabilityRuns({ run_id: runId, limit: 1, watch });
-    const found = Array.isArray(listed?.items) && listed.items.some((item) => item?.run_id === runId);
-    if (!found) return null;
+    listed = await api.getObservabilityRuns({ run_id: runId, limit: 1, watch });
+  } catch {
+    return unavailableTrace(runId, 'observability_unavailable');
+  }
 
+  const found = Array.isArray(listed?.items) && listed.items.some((item) => item?.run_id === runId);
+  if (!found) return unavailableTrace(runId, 'run_not_found');
+
+  try {
     const detail = await api.getObservabilityRun(runId, { watch });
     const summary = normalizeRunSummary(detail, runId);
     const spans = Array.isArray(detail?.spans) ? detail.spans : [];
     const evals = Array.isArray(detail?.evals) ? detail.evals : [];
-    if (!summary && spans.length === 0 && evals.length === 0) return null;
+    if (!summary && spans.length === 0 && evals.length === 0) return unavailableTrace(runId, 'empty_run_detail');
     return {
       runId,
+      status: 'available',
       summary,
       spans,
       evals,
       loadedAtMs: Date.now(),
     };
   } catch {
-    return null;
+    return unavailableTrace(runId, 'run_detail_unavailable');
   }
+}
+
+function unavailableTrace(runId: string, reason: TraceHydrationUnavailableReason): TraceHydration {
+  return {
+    runId,
+    status: 'unavailable',
+    unavailableReason: reason,
+    message: unavailableTraceMessage(reason),
+    summary: null,
+    spans: [],
+    evals: [],
+    loadedAtMs: Date.now(),
+  };
+}
+
+function unavailableTraceMessage(reason: TraceHydrationUnavailableReason): string {
+  if (reason === 'no_running_nullwatch') return 'No running NullWatch instance';
+  if (reason === 'status_unavailable') return 'NullHub status unavailable';
+  if (reason === 'run_not_found') return 'No matching live run';
+  if (reason === 'observability_unavailable') return 'NullWatch run list unavailable';
+  if (reason === 'run_detail_unavailable') return 'NullWatch run detail unavailable';
+  return 'NullWatch returned no run detail';
 }
 
 export function missionTracePanelRunIds(snapshot: MissionControlState): string[] {

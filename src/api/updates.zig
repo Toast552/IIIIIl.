@@ -116,8 +116,8 @@ fn buildUpdatesJson(allocator: std.mem.Allocator, buf: *std.array_list.Managed(u
     try buf.appendSlice("]}");
 }
 
-/// Compatibility wrapper used by tests and internal call sites that don't have
-/// supervisor context yet.
+/// Lightweight update response helper for tests and call sites without
+/// supervisor runtime context.
 pub fn handleApplyUpdate(allocator: std.mem.Allocator, s: *state_mod.State, component: []const u8, name: []const u8) ApiResponse {
     _ = s.getInstance(component, name) orelse return notFound();
 

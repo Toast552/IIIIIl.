@@ -20,7 +20,7 @@ This is a hackathon product slice, not a generic platform rewrite.
 7. The recovered run passes and the final screen compares failed vs recovered
    execution.
 
-## MVP Scope
+## Local Slice Scope
 
 - One NullHub page: `/mission-control`.
 - One deterministic local mission scenario.
@@ -37,12 +37,13 @@ This is a hackathon product slice, not a generic platform rewrite.
   - event timeline
   - telemetry strip
   - failure/recovery panel
-- No external services, secrets, or real model calls required for the MVP.
+- No external services, secrets, or real model calls required for the local
+  replay.
 
 ## Production-Grade Hackathon Bar
 
 Mission Control is production-ready for the hackathon when it is a durable,
-reviewable demo mode rather than a throwaway mock:
+reviewable local replay mode:
 
 - The API has a stable schema version, scenario identity, explicit demo-mode
   metadata, and predictable action semantics.
@@ -207,8 +208,8 @@ Status: DONE
 
 Definition of done:
 
-- The MVP is honest about what is simulated and what maps to real ecosystem
-  components.
+- The local replay is explicit about deterministic state and live ecosystem
+  evidence hydration.
 
 ### Iteration 5 - Validation And Demo Assets
 

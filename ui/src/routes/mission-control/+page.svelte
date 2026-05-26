@@ -7,31 +7,39 @@
     MissionControlReplayArtifact,
     MissionControlReplayRecord,
     MissionControlState,
-    MissionControlTelemetry,
     MissionControlTraceRef,
     MissionControlWorkflowEvidenceCheckpoint,
     MissionControlWorkflowEvidenceRun,
   } from '$lib/api/missionControl';
   import {
-    findRunningNullWatchName,
+    findRunningNullWatch,
     hydrateMissionTracePanels,
+    isAvailableTrace,
     missionTracePanelRunIds,
     type TraceHydration,
+    type TraceHydrationUnavailableReason,
   } from '$lib/missionControl/traceHydration';
   import {
     emptyControls,
     emptyTelemetry,
+    errorCount,
     formatBytes,
     formatCost,
     formatDuration,
-    formatScore,
     formatTokens,
+    evalCount,
+    hydratedTelemetry,
     phaseOrder,
+    primaryErrorText,
+    primaryEvalText,
+    spanCount,
     statusClass,
     storyBeats,
     tracePanelNote as missionTracePanelNote,
+    traceSuffix,
     traceSourceLabel as missionTraceSourceLabel,
     traceSourceSummary as missionTraceSourceSummary,
+    traceVerdict,
   } from '$lib/missionControl/display';
   import ReplayComparisonPanel from '$lib/missionControl/ReplayComparisonPanel.svelte';
   import {
@@ -59,6 +67,7 @@
   let traceHydration = $state<Record<string, TraceHydration>>({});
   let traceHydrating = $state(false);
   let traceWatchName = $state<string | null>(null);
+  let traceWatchUnavailableReason = $state<TraceHydrationUnavailableReason | null>(null);
   let traceHydrationKey = '';
   let traceHydrationInFlightKey = '';
   let traceHydrationCheckedAt = 0;
@@ -78,7 +87,9 @@
   const recoveredRunId = $derived(mission?.recovery?.run_id || mission?.recovered_run_id || '');
   const failedTrace = $derived(failedRunId ? traceHydration[failedRunId] || null : null);
   const recoveredTrace = $derived(recoveredRunId ? traceHydration[recoveredRunId] || null : null);
-  const liveTraceAvailable = $derived(Boolean(failedTrace || recoveredTrace));
+  const failedTraceAvailable = $derived(isAvailableTrace(failedTrace));
+  const recoveredTraceAvailable = $derived(isAvailableTrace(recoveredTrace));
+  const liveTraceAvailable = $derived(failedTraceAvailable || recoveredTraceAvailable);
   const workflowEvidence = $derived(mission?.workflow_evidence || null);
   const failedWorkflowRun = $derived(workflowEvidence?.failed_run || null);
   const recoveredWorkflowRun = $derived(workflowEvidence?.recovered_run || null);
@@ -89,6 +100,7 @@
   );
   const displayTelemetry = $derived(hydratedTelemetry(telemetry, [failedTrace, recoveredTrace]));
   const pageBusy = $derived(loading || acting !== null || exporting || judgeReplayActive);
+  const canSaveReplay = $derived(Boolean(mission?.status === 'completed' && mission?.replay_comparison));
 
   function schedulePoll() {
     if (disposed) return;
@@ -303,7 +315,12 @@
     traceHydrationInFlightKey = key;
     traceHydrating = Boolean(watch);
     try {
-      const traces = await hydrateMissionTracePanels(api, snapshot, watch);
+      const traces = await hydrateMissionTracePanels(
+        api,
+        snapshot,
+        watch,
+        traceWatchUnavailableReason || 'no_running_nullwatch',
+      );
       if (disposed || traceHydrationInFlightKey !== key) return;
 
       traceHydration = traces;
@@ -322,7 +339,9 @@
     if (now - traceWatchCheckedAt < 5000) return traceWatchName;
     traceWatchCheckedAt = now;
 
-    traceWatchName = await findRunningNullWatchName(api);
+    const selection = await findRunningNullWatch(api);
+    traceWatchName = selection.watch;
+    traceWatchUnavailableReason = selection.watch ? null : selection.unavailableReason || 'no_running_nullwatch';
     return traceWatchName;
   }
 
@@ -385,42 +404,6 @@
     return new Date(record.saved_at_ms).toLocaleString();
   }
 
-  function spanCount(trace: TraceHydration | null): number {
-    return trace?.summary?.span_count ?? trace?.spans.length ?? 0;
-  }
-
-  function evalCount(trace: TraceHydration | null): number {
-    return trace?.summary?.eval_count ?? trace?.evals.length ?? 0;
-  }
-
-  function errorCount(trace: TraceHydration | null): number {
-    if (!trace) return 0;
-    return trace.summary?.error_count ?? trace.spans.filter((span) => span.status === 'error' || span.error_message).length;
-  }
-
-  function tokenCount(trace: TraceHydration | null): number {
-    if (!trace?.summary) return 0;
-    return (trace.summary.total_input_tokens || 0) + (trace.summary.total_output_tokens || 0);
-  }
-
-  function traceCost(trace: TraceHydration | null): number {
-    return trace?.summary?.total_cost_usd || 0;
-  }
-
-  function traceVerdict(trace: TraceHydration | null): string | null {
-    if (!trace) return null;
-    if (trace.summary?.overall_verdict) return trace.summary.overall_verdict;
-    const failedEval = trace.evals.find((evaluation) => evaluation.verdict === 'fail');
-    if (failedEval) return 'fail';
-    const passedEval = trace.evals.find((evaluation) => evaluation.verdict === 'pass');
-    if (passedEval) return 'pass';
-    return 'live';
-  }
-
-  function traceSuffix(trace: TraceHydration | null): string {
-    return trace ? ` · ${spanCount(trace)} spans · ${evalCount(trace)} evals` : '';
-  }
-
   function traceSourceLabel(trace: TraceHydration | null): string {
     return missionTraceSourceLabel(trace, traceHydrating);
   }
@@ -439,6 +422,7 @@
       traceHydrating,
       hasRunIds: Boolean(failedRunId || recoveredRunId),
       hasWatch: Boolean(traceWatchName),
+      unavailableMessage: failedTrace?.message || recoveredTrace?.message || null,
     });
   }
 
@@ -484,44 +468,6 @@
     return `metadata: ${keys.slice(0, 4).join(', ')}`;
   }
 
-  function primaryErrorText(trace: TraceHydration | null): string {
-    if (!trace) return '';
-    const span = trace.spans.find((item) => item.status === 'error' || item.error_message);
-    if (!span) return '';
-    const operation = span.operation || span.tool_name || 'span';
-    const detail = span.error_message || span.status || 'error';
-    return `${operation}: ${detail}`;
-  }
-
-  function primaryEvalText(trace: TraceHydration | null, evalKey?: string): string {
-    if (!trace) return '';
-    const evaluation =
-      (evalKey ? trace.evals.find((item) => item.eval_key === evalKey) : null) ||
-      trace.evals.find((item) => item.verdict === 'fail') ||
-      trace.evals[0];
-    if (!evaluation) return '';
-    const key = evaluation.eval_key || 'eval';
-    const verdict = evaluation.verdict || 'unknown';
-    return `${key}: ${verdict} (${formatScore(evaluation.score)})`;
-  }
-
-  function hydratedTelemetry(base: MissionControlTelemetry, traces: (TraceHydration | null)[]): MissionControlTelemetry {
-    const liveTraces = traces.filter((trace): trace is TraceHydration => Boolean(trace));
-    if (liveTraces.length === 0) return base;
-
-    const verdicts = liveTraces.map(traceVerdict).filter((value): value is string => Boolean(value));
-    return {
-      ...base,
-      runs: liveTraces.length,
-      spans: liveTraces.reduce((total, trace) => total + spanCount(trace), 0),
-      evals: liveTraces.reduce((total, trace) => total + evalCount(trace), 0),
-      errors: liveTraces.reduce((total, trace) => total + errorCount(trace), 0),
-      total_tokens: liveTraces.reduce((total, trace) => total + tokenCount(trace), 0),
-      total_cost_usd: liveTraces.reduce((total, trace) => total + traceCost(trace), 0),
-      verdict: verdicts.includes('fail') ? 'fail' : verdicts.includes('pass') ? 'pass' : base.verdict,
-    };
-  }
-
   function runVerdict(kind: 'failed' | 'recovered'): string {
     const liveVerdict = traceVerdict(kind === 'failed' ? failedTrace : recoveredTrace);
     if (liveVerdict && liveVerdict !== 'live') return liveVerdict;
@@ -548,7 +494,7 @@
       <button class="danger" onclick={() => runAction('recover')} disabled={!controls.can_recover || acting !== null || loading || judgeReplayActive}>
         {acting === 'recover' ? 'Forking...' : 'Fork From Checkpoint'}
       </button>
-      <button onclick={() => exportReplay()} disabled={!mission || exporting || loading || judgeReplayActive}>
+      <button onclick={() => exportReplay()} disabled={!canSaveReplay || exporting || loading || judgeReplayActive}>
         {exporting ? 'Saving...' : 'Save Replay'}
       </button>
     </div>
@@ -699,19 +645,23 @@
             <strong>{traceSourceSummary()}</strong>
             <em>{tracePanelNote()}</em>
           </div>
-          {#if failedTrace}
+          {#if failedTraceAvailable}
             <a href={observabilityHref(failedRunId)}>Failed run{traceSuffix(failedTrace)}</a>
           {:else if failedRunId && traceHydrating}
             <span class="trace-placeholder">Checking failed run</span>
+          {:else if failedTrace?.message}
+            <span class="trace-placeholder">{failedTrace.message}</span>
           {:else if failedRunId}
             <span class="trace-placeholder">Failed run unavailable</span>
           {:else}
             <span class="trace-placeholder">Failed pending</span>
           {/if}
-          {#if recoveredTrace}
+          {#if recoveredTraceAvailable}
             <a href={observabilityHref(recoveredRunId)}>Recovered run{traceSuffix(recoveredTrace)}</a>
           {:else if recoveredRunId && traceHydrating}
             <span class="trace-placeholder">Checking recovered run</span>
+          {:else if recoveredTrace?.message}
+            <span class="trace-placeholder">{recoveredTrace.message}</span>
           {:else if recoveredRunId}
             <span class="trace-placeholder">Recovered run unavailable</span>
           {:else}
@@ -758,16 +708,16 @@
                   <a href={workflowRunHref(failedWorkflowRun.run_id)}>Open failed workflow</a>
               {/if}
             {/if}
-            {#if failedTrace}
+            {#if failedTraceAvailable}
               <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
             {/if}
             {#if failedTrace || traceHydrating}
-            <div class="trace-detail {failedTrace ? 'live' : 'loading'}">
+            <div class="trace-detail {failedTraceAvailable ? 'live' : 'loading'}">
               <div class="trace-detail-top">
                 <span>{traceSourceLabel(failedTrace)}</span>
                 <strong>{traceVerdict(failedTrace) || runVerdict('failed')}</strong>
               </div>
-              {#if failedTrace}
+              {#if failedTraceAvailable}
                 <dl class="trace-stats">
                   <div><dt>Spans</dt><dd>{spanCount(failedTrace)}</dd></div>
                   <div><dt>Evals</dt><dd>{evalCount(failedTrace)}</dd></div>
@@ -779,6 +729,8 @@
                 {#if primaryEvalText(failedTrace, 'tool_success')}
                   <p class="trace-evidence">{primaryEvalText(failedTrace, 'tool_success')}</p>
                 {/if}
+              {:else if failedTrace?.message}
+                <p class="trace-evidence">{failedTrace.message}</p>
               {/if}
             </div>
             {/if}
@@ -795,16 +747,16 @@
                 <p class="trace-evidence">NullBoiler run {recoveredWorkflowRun.run_id}{workflowRunSuffix(recoveredWorkflowRun)}</p>
                 <a href={workflowRunHref(recoveredWorkflowRun.run_id)}>Open recovered workflow</a>
             {/if}
-            {#if recoveredTrace}
+            {#if recoveredTraceAvailable}
               <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
             {/if}
             {#if recoveredTrace || traceHydrating}
-            <div class="trace-detail {recoveredTrace ? 'live' : 'loading'}">
+            <div class="trace-detail {recoveredTraceAvailable ? 'live' : 'loading'}">
               <div class="trace-detail-top">
                 <span>{traceSourceLabel(recoveredTrace)}</span>
                 <strong>{traceVerdict(recoveredTrace) || runVerdict('recovered')}</strong>
               </div>
-              {#if recoveredTrace}
+              {#if recoveredTraceAvailable}
                 <dl class="trace-stats">
                   <div><dt>Spans</dt><dd>{spanCount(recoveredTrace)}</dd></div>
                   <div><dt>Evals</dt><dd>{evalCount(recoveredTrace)}</dd></div>
@@ -816,6 +768,8 @@
                 {#if primaryEvalText(recoveredTrace, 'tool_success')}
                   <p class="trace-evidence">{primaryEvalText(recoveredTrace, 'tool_success')}</p>
                 {/if}
+              {:else if recoveredTrace?.message}
+                <p class="trace-evidence">{recoveredTrace.message}</p>
               {/if}
             </div>
             {/if}
