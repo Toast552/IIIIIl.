@@ -361,18 +361,18 @@ fn replayEvidenceForTest() mission_core.WorkflowEvidence {
     return .{
         .status = "available",
         .failed_run = .{
-            .run_id = "run-demo-failed-primary",
+            .run_id = "run-mission-code-red-primary",
             .status = "failed",
             .checkpoint_count = 1,
         },
         .recovered_run = .{
-            .run_id = "run-demo-recovered-fork",
+            .run_id = "run-mission-code-red-recovered",
             .status = "completed",
             .checkpoint_count = 1,
         },
         .checkpoint = .{
-            .id = "ckpt-demo-code-red-failed",
-            .run_id = "run-demo-failed-primary",
+            .id = "ckpt-mission-code-red-failed",
+            .run_id = "run-mission-code-red-primary",
             .step_id = "code.build",
         },
         .scanned_run_count = 2,

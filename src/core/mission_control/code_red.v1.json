@@ -5,10 +5,10 @@
   "scenario_version": "2026-05-06",
   "title": "Ship a bug fix through autonomous agents",
   "run_ids": {
-    "failed": "run-demo-failed-test",
-    "recovered": "run-demo-recovered-fork"
+    "failed": "run-mission-code-red-failed",
+    "recovered": "run-mission-code-red-recovered"
   },
-  "checkpoint_id": "cp-demo-before-test",
+  "checkpoint_id": "cp-mission-code-red-before-test",
   "human_instruction": "apply missing validation guard",
   "phases": [
     {
@@ -287,8 +287,8 @@
       "detail": "Mission task entered the durable backlog.",
       "trace": {
         "kind": "span",
-        "run_id": "run-demo-failed-test",
-        "trace_id": "trace-demo-code-red-primary",
+        "run_id": "run-mission-code-red-failed",
+        "trace_id": "trace-mission-code-red-primary",
         "span_id": "span-ticket-queued",
         "operation": "ticket.claim"
       }
@@ -302,8 +302,8 @@
       "detail": "Graph runtime selected researcher -> coder -> test -> review.",
       "trace": {
         "kind": "span",
-        "run_id": "run-demo-failed-test",
-        "trace_id": "trace-demo-code-red-primary",
+        "run_id": "run-mission-code-red-failed",
+        "trace_id": "trace-mission-code-red-primary",
         "span_id": "span-workflow-started",
         "operation": "workflow.dispatch"
       }
@@ -317,8 +317,8 @@
       "detail": "Coder agent produced a minimal implementation patch.",
       "trace": {
         "kind": "span",
-        "run_id": "run-demo-failed-test",
-        "trace_id": "trace-demo-code-red-primary",
+        "run_id": "run-mission-code-red-failed",
+        "trace_id": "trace-mission-code-red-primary",
         "span_id": "span-agent-coder",
         "operation": "agent.coder.patch"
       }
@@ -329,11 +329,11 @@
       "source": "nullboiler",
       "level": "info",
       "title": "Checkpoint created",
-      "detail": "State saved as cp-demo-before-test.",
+      "detail": "State saved as cp-mission-code-red-before-test.",
       "trace": {
         "kind": "span",
-        "run_id": "run-demo-failed-test",
-        "trace_id": "trace-demo-code-red-primary",
+        "run_id": "run-mission-code-red-failed",
+        "trace_id": "trace-mission-code-red-primary",
         "span_id": "span-checkpoint-created",
         "operation": "workflow.checkpoint"
       }
@@ -347,8 +347,8 @@
       "detail": "tool.call shell returned exit code 1.",
       "trace": {
         "kind": "eval",
-        "run_id": "run-demo-failed-test",
-        "trace_id": "trace-demo-code-red-primary",
+        "run_id": "run-mission-code-red-failed",
+        "trace_id": "trace-mission-code-red-primary",
         "span_id": "span-test-failure",
         "eval_key": "tool_success",
         "operation": "tool.shell.zig_build_test"
@@ -363,8 +363,8 @@
       "detail": "Fork from checkpoint and inject validation guard.",
       "trace": {
         "kind": "span",
-        "run_id": "run-demo-failed-test",
-        "trace_id": "trace-demo-code-red-primary",
+        "run_id": "run-mission-code-red-failed",
+        "trace_id": "trace-mission-code-red-primary",
         "span_id": "span-human-intervention",
         "operation": "human.checkpoint_fork"
       }
@@ -375,11 +375,11 @@
       "source": "nullboiler",
       "level": "info",
       "title": "Recovered fork started",
-      "detail": "run-demo-recovered-fork replayed from cp-demo-before-test.",
+      "detail": "run-mission-code-red-recovered replayed from cp-mission-code-red-before-test.",
       "trace": {
         "kind": "span",
-        "run_id": "run-demo-recovered-fork",
-        "trace_id": "trace-demo-code-red-recovered",
+        "run_id": "run-mission-code-red-recovered",
+        "trace_id": "trace-mission-code-red-recovered",
         "span_id": "span-recovered-fork",
         "operation": "workflow.fork"
       }
@@ -393,8 +393,8 @@
       "detail": "tool_success eval changed from fail to pass.",
       "trace": {
         "kind": "eval",
-        "run_id": "run-demo-recovered-fork",
-        "trace_id": "trace-demo-code-red-recovered",
+        "run_id": "run-mission-code-red-recovered",
+        "trace_id": "trace-mission-code-red-recovered",
         "span_id": "span-recovered-tests",
         "eval_key": "tool_success",
         "operation": "tool.shell.zig_build_test"
@@ -409,8 +409,8 @@
       "detail": "Ticket moved to review-approved terminal stage.",
       "trace": {
         "kind": "span",
-        "run_id": "run-demo-recovered-fork",
-        "trace_id": "trace-demo-code-red-recovered",
+        "run_id": "run-mission-code-red-recovered",
+        "trace_id": "trace-mission-code-red-recovered",
         "span_id": "span-ticket-completed",
         "operation": "ticket.complete"
       }
@@ -490,16 +490,16 @@
   ],
   "failure": {
     "visible_from_phase": "failed",
-    "run_id": "run-demo-failed-test",
-    "checkpoint_id": "cp-demo-before-test",
+    "run_id": "run-mission-code-red-failed",
+    "checkpoint_id": "cp-mission-code-red-before-test",
     "failed_step": "test",
     "error_message": "zig build test exited with status 1",
     "suggested_intervention": "Fork from checkpoint and inject the missing validation guard."
   },
   "recovery": {
     "visible_from_phase": "forking",
-    "run_id": "run-demo-recovered-fork",
-    "forked_from": "cp-demo-before-test",
+    "run_id": "run-mission-code-red-recovered",
+    "forked_from": "cp-mission-code-red-before-test",
     "human_instruction": "apply missing validation guard"
   }
 }

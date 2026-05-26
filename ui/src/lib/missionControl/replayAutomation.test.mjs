@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import {
-  JUDGE_REPLAY_FAILURE_HOLD_MS,
-  JUDGE_REPLAY_TIMEOUT_MS,
-  nextJudgeReplayTransition,
-} from './judgeReplay.js';
+  REPLAY_AUTOMATION_FAILURE_HOLD_MS,
+  REPLAY_AUTOMATION_TIMEOUT_MS,
+  nextReplayAutomationTransition,
+} from './replayAutomation.js';
 
 const baseProgress = {
   active: true,
@@ -12,7 +12,7 @@ const baseProgress = {
   recoverAfterMs: 0,
 };
 
-const waiting = nextJudgeReplayTransition(
+const waiting = nextReplayAutomationTransition(
   { status: 'running', controls: { can_recover: false } },
   baseProgress,
   2000,
@@ -20,16 +20,16 @@ const waiting = nextJudgeReplayTransition(
 assert.equal(waiting.stage, 'waiting_failure');
 assert.equal(waiting.action, null);
 
-const holding = nextJudgeReplayTransition(
+const holding = nextReplayAutomationTransition(
   { status: 'intervention_required', controls: { can_recover: true } },
   baseProgress,
   3000,
 );
 assert.equal(holding.stage, 'holding_failure');
-assert.equal(holding.recoverAfterMs, 3000 + JUDGE_REPLAY_FAILURE_HOLD_MS);
+assert.equal(holding.recoverAfterMs, 3000 + REPLAY_AUTOMATION_FAILURE_HOLD_MS);
 assert.equal(holding.action, null);
 
-const recovering = nextJudgeReplayTransition(
+const recovering = nextReplayAutomationTransition(
   { status: 'intervention_required', controls: { can_recover: true } },
   { ...holding, recoverAfterMs: 3000 },
   3000,
@@ -37,7 +37,7 @@ const recovering = nextJudgeReplayTransition(
 assert.equal(recovering.stage, 'recovering');
 assert.equal(recovering.action, 'recover');
 
-const completed = nextJudgeReplayTransition(
+const completed = nextReplayAutomationTransition(
   { status: 'completed', controls: { can_recover: false } },
   baseProgress,
   4000,
@@ -45,10 +45,10 @@ const completed = nextJudgeReplayTransition(
 assert.equal(completed.active, false);
 assert.equal(completed.stage, 'idle');
 
-const timedOut = nextJudgeReplayTransition(
+const timedOut = nextReplayAutomationTransition(
   { status: 'running', controls: { can_recover: false } },
   baseProgress,
-  1000 + JUDGE_REPLAY_TIMEOUT_MS + 1,
+  1000 + REPLAY_AUTOMATION_TIMEOUT_MS + 1,
 );
 assert.equal(timedOut.active, false);
 assert.equal(timedOut.stage, 'idle');

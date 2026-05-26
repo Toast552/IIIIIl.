@@ -805,18 +805,18 @@ fn workflowEvidenceForTest() WorkflowEvidence {
     return .{
         .status = "available",
         .failed_run = .{
-            .run_id = "run-demo-failed-primary",
+            .run_id = "run-mission-code-red-primary",
             .status = "failed",
             .checkpoint_count = 1,
         },
         .recovered_run = .{
-            .run_id = "run-demo-recovered-fork",
+            .run_id = "run-mission-code-red-recovered",
             .status = "completed",
             .checkpoint_count = 1,
         },
         .checkpoint = .{
-            .id = "ckpt-demo-code-red-failed",
-            .run_id = "run-demo-failed-primary",
+            .id = "ckpt-mission-code-red-failed",
+            .run_id = "run-mission-code-red-primary",
             .step_id = "code.build",
         },
         .scanned_run_count = 2,
@@ -849,7 +849,7 @@ test "buildSnapshotView exposes failed mission and recover control" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"replay_comparison\": null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_role\": \"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_role\": \"recovered\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"trace_id\": \"trace-demo-code-red-primary\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"trace_id\": \"trace-mission-code-red-primary\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"eval_key\": \"tool_success\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "zig build test exited with status 1") != null);
 }
@@ -865,7 +865,7 @@ test "buildSnapshotView exposes recovered completed mission" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\": \"completed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"phase\": \"completed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"recovered_run_id\": \"run-demo-recovered-fork\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"recovered_run_id\": \"run-mission-code-red-recovered\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"verdict\": \"pass\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_role\": \"recovered\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"tokens_delta\": 1520") != null);
@@ -882,7 +882,7 @@ test "buildSnapshotView keeps recovered comparison hidden until completion" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\": \"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"phase\": \"forking\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"recovered_run_id\": \"run-demo-recovered-fork\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"recovered_run_id\": \"run-mission-code-red-recovered\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"replay_comparison\": null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_role\": \"recovered\"") == null);
 }

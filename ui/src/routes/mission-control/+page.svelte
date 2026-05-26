@@ -34,7 +34,7 @@
     primaryEvalText,
     spanCount,
     statusClass,
-    storyBeats,
+    phaseMilestones,
     tracePanelNote as missionTracePanelNote,
     traceSuffix,
     traceSourceLabel as missionTraceSourceLabel,
@@ -43,23 +43,23 @@
   } from '$lib/missionControl/display';
   import ReplayComparisonPanel from '$lib/missionControl/ReplayComparisonPanel.svelte';
   import {
-    JUDGE_REPLAY_PREROLL_MS,
-    nextJudgeReplayTransition,
-  } from '$lib/missionControl/judgeReplay.js';
+    REPLAY_AUTOMATION_PREROLL_MS,
+    nextReplayAutomationTransition,
+  } from '$lib/missionControl/replayAutomation.js';
   import { nullboilerUiRoutes } from '$lib/nullboiler/routes';
 
   type MissionAction = 'launch' | 'reset' | 'recover';
-  type JudgeReplayStage = 'idle' | 'resetting' | 'preroll' | 'launching' | 'waiting_failure' | 'holding_failure' | 'recovering' | 'watching';
+  type ReplayAutomationStage = 'idle' | 'resetting' | 'preroll' | 'launching' | 'waiting_failure' | 'holding_failure' | 'recovering' | 'watching';
 
   let mission = $state<MissionControlState | null>(null);
   let loading = $state(true);
   let acting = $state<MissionAction | null>(null);
   let exporting = $state(false);
-  let judgeReplayActive = $state(false);
-  let judgeReplayStage = $state<JudgeReplayStage>('idle');
-  let judgeReplayStartedAt = 0;
-  let judgeReplayRecoverAfterMs = 0;
-  let advancingJudgeReplay = false;
+  let replayAutomationActive = $state(false);
+  let replayAutomationStage = $state<ReplayAutomationStage>('idle');
+  let replayAutomationStartedAt = 0;
+  let replayAutomationRecoverAfterMs = 0;
+  let advancingReplayAutomation = false;
   let savedReplays = $state<MissionControlReplayRecord[]>([]);
   let savedReplaysLoading = $state(false);
   let savedReplaysError = $state<string | null>(null);
@@ -82,7 +82,7 @@
   const telemetry = $derived(mission?.telemetry || emptyTelemetry);
   const controls = $derived(mission?.controls || emptyControls);
   const modeLabel = $derived((mission?.mode || 'deterministic_local_replay').replaceAll('_', ' '));
-  const activePoll = $derived(judgeReplayActive || mission?.status === 'running' || mission?.status === 'intervention_required');
+  const activePoll = $derived(replayAutomationActive || mission?.status === 'running' || mission?.status === 'intervention_required');
   const failedRunId = $derived(mission?.failure?.run_id || mission?.failed_run_id || '');
   const recoveredRunId = $derived(mission?.recovery?.run_id || mission?.recovered_run_id || '');
   const failedTrace = $derived(failedRunId ? traceHydration[failedRunId] || null : null);
@@ -99,7 +99,7 @@
     workflowEvidence?.status === 'available' && Boolean(failedWorkflowRun || recoveredWorkflowRun || workflowCheckpoint),
   );
   const displayTelemetry = $derived(hydratedTelemetry(telemetry, [failedTrace, recoveredTrace]));
-  const pageBusy = $derived(loading || acting !== null || exporting || judgeReplayActive);
+  const pageBusy = $derived(loading || acting !== null || exporting || replayAutomationActive);
   const canSaveReplay = $derived(Boolean(mission?.status === 'completed' && mission?.replay_comparison));
 
   function schedulePoll() {
@@ -113,7 +113,7 @@
       const nextMission = await api.getMissionControlState();
       applyMissionState(nextMission);
       error = null;
-      await advanceJudgeReplay(nextMission);
+      await advanceReplayAutomation(nextMission);
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -127,8 +127,8 @@
       clearTimeout(pollTimer);
       pollTimer = null;
     }
-    judgeReplayActive = false;
-    judgeReplayStage = 'idle';
+    replayAutomationActive = false;
+    replayAutomationStage = 'idle';
     acting = name;
     try {
       let nextMission: MissionControlState | null = null;
@@ -147,75 +147,75 @@
     }
   }
 
-  async function runJudgeReplay() {
+  async function runReplayAutomation() {
     if (pollTimer) {
       clearTimeout(pollTimer);
       pollTimer = null;
     }
-    judgeReplayActive = true;
-    judgeReplayStage = 'resetting';
-    judgeReplayStartedAt = Date.now();
-    judgeReplayRecoverAfterMs = 0;
+    replayAutomationActive = true;
+    replayAutomationStage = 'resetting';
+    replayAutomationStartedAt = Date.now();
+    replayAutomationRecoverAfterMs = 0;
     try {
       applyMissionState(await api.resetMissionControl());
       error = null;
       if (disposed) return;
 
-      judgeReplayStage = 'preroll';
-      await sleep(JUDGE_REPLAY_PREROLL_MS);
+      replayAutomationStage = 'preroll';
+      await sleep(REPLAY_AUTOMATION_PREROLL_MS);
       if (disposed) return;
 
-      judgeReplayStage = 'launching';
+      replayAutomationStage = 'launching';
       applyMissionState(await api.launchMissionControl());
-      judgeReplayStage = 'waiting_failure';
+      replayAutomationStage = 'waiting_failure';
       error = null;
     } catch (e) {
-      judgeReplayActive = false;
-      judgeReplayStage = 'idle';
+      replayAutomationActive = false;
+      replayAutomationStage = 'idle';
       error = (e as Error).message;
     } finally {
       schedulePoll();
     }
   }
 
-  async function advanceJudgeReplay(snapshot: MissionControlState) {
-    if (!judgeReplayActive || advancingJudgeReplay) return;
+  async function advanceReplayAutomation(snapshot: MissionControlState) {
+    if (!replayAutomationActive || advancingReplayAutomation) return;
 
     const now = Date.now();
-    const transition = nextJudgeReplayTransition(
+    const transition = nextReplayAutomationTransition(
       snapshot,
       {
-        active: judgeReplayActive,
-        stage: judgeReplayStage,
-        startedAtMs: judgeReplayStartedAt,
-        recoverAfterMs: judgeReplayRecoverAfterMs,
+        active: replayAutomationActive,
+        stage: replayAutomationStage,
+        startedAtMs: replayAutomationStartedAt,
+        recoverAfterMs: replayAutomationRecoverAfterMs,
       },
       now,
     );
-    judgeReplayActive = transition.active;
-    judgeReplayStage = transition.stage;
-    judgeReplayRecoverAfterMs = transition.recoverAfterMs;
+    replayAutomationActive = transition.active;
+    replayAutomationStage = transition.stage;
+    replayAutomationRecoverAfterMs = transition.recoverAfterMs;
     if (transition.error) error = transition.error;
     if (transition.action !== 'recover') return;
 
-    advancingJudgeReplay = true;
-    judgeReplayStage = 'recovering';
+    advancingReplayAutomation = true;
+    replayAutomationStage = 'recovering';
     try {
       const recoveredMission = await api.recoverMissionControl();
       applyMissionState(recoveredMission);
       if (recoveredMission.status === 'completed') {
-        judgeReplayActive = false;
-        judgeReplayStage = 'idle';
+        replayAutomationActive = false;
+        replayAutomationStage = 'idle';
       } else {
-        judgeReplayStage = 'watching';
+        replayAutomationStage = 'watching';
       }
       error = null;
     } catch (e) {
-      judgeReplayActive = false;
-      judgeReplayStage = 'idle';
+      replayAutomationActive = false;
+      replayAutomationStage = 'idle';
       error = (e as Error).message;
     } finally {
-      advancingJudgeReplay = false;
+      advancingReplayAutomation = false;
     }
   }
 
@@ -382,14 +382,14 @@
     return `nullhub-${scenario}-${phase}-replay.json`;
   }
 
-  function judgeReplayButtonLabel(): string {
-    if (!judgeReplayActive) return 'Judge Replay';
-    if (judgeReplayStage === 'resetting') return 'Resetting...';
-    if (judgeReplayStage === 'preroll') return 'Cueing...';
-    if (judgeReplayStage === 'launching') return 'Launching...';
-    if (judgeReplayStage === 'waiting_failure') return 'Waiting Failure...';
-    if (judgeReplayStage === 'holding_failure') return 'Holding Failure...';
-    if (judgeReplayStage === 'recovering') return 'Forking...';
+  function replayAutomationButtonLabel(): string {
+    if (!replayAutomationActive) return 'Replay Mission';
+    if (replayAutomationStage === 'resetting') return 'Resetting...';
+    if (replayAutomationStage === 'preroll') return 'Preparing...';
+    if (replayAutomationStage === 'launching') return 'Launching...';
+    if (replayAutomationStage === 'waiting_failure') return 'Waiting Failure...';
+    if (replayAutomationStage === 'holding_failure') return 'Holding Failure...';
+    if (replayAutomationStage === 'recovering') return 'Forking...';
     return 'Watching...';
   }
 
@@ -484,17 +484,17 @@
       <p>{mission?.headline || 'Loading mission state...'}</p>
     </div>
     <div class="actions">
-      <button onclick={() => runAction('reset')} disabled={acting !== null || loading || judgeReplayActive}>Reset</button>
-      <button class="primary" onclick={() => runJudgeReplay()} disabled={loading || acting !== null || exporting || judgeReplayActive}>
-        {judgeReplayButtonLabel()}
+      <button onclick={() => runAction('reset')} disabled={acting !== null || loading || replayAutomationActive}>Reset</button>
+      <button class="primary" onclick={() => runReplayAutomation()} disabled={loading || acting !== null || exporting || replayAutomationActive}>
+        {replayAutomationButtonLabel()}
       </button>
-      <button onclick={() => runAction('launch')} disabled={!controls.can_launch || acting !== null || loading || judgeReplayActive}>
+      <button onclick={() => runAction('launch')} disabled={!controls.can_launch || acting !== null || loading || replayAutomationActive}>
         {acting === 'launch' ? 'Launching...' : 'Launch Mission'}
       </button>
-      <button class="danger" onclick={() => runAction('recover')} disabled={!controls.can_recover || acting !== null || loading || judgeReplayActive}>
+      <button class="danger" onclick={() => runAction('recover')} disabled={!controls.can_recover || acting !== null || loading || replayAutomationActive}>
         {acting === 'recover' ? 'Forking...' : 'Fork From Checkpoint'}
       </button>
-      <button onclick={() => exportReplay()} disabled={!canSaveReplay || exporting || loading || judgeReplayActive}>
+      <button onclick={() => exportReplay()} disabled={!canSaveReplay || exporting || loading || replayAutomationActive}>
         {exporting ? 'Saving...' : 'Save Replay'}
       </button>
     </div>
@@ -571,8 +571,8 @@
       </section>
     {/if}
 
-    <section class="story-strip" aria-label="Three minute mission story">
-      {#each storyBeats as beat}
+    <section class="story-strip" aria-label="Mission phase milestones">
+      {#each phaseMilestones as beat}
         <div class="story-beat {storyClass(beat.phase, beat.tone)}">
           <span>{beat.time}</span>
           <strong>{beat.title}</strong>

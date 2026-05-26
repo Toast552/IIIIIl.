@@ -1,6 +1,18 @@
-# Mission Control Replay Artifact
+# Mission Control
 
-Mission Control exposes the current deterministic replay as JSON:
+Mission Control is a local replay and recovery workspace for NullHub. It keeps
+a deterministic mission scenario available without requiring hosted services,
+then hydrates that scenario with live NullWatch and NullBoiler evidence when
+matching local instances are running.
+
+The built-in scenario fixture is intentionally versioned and checked by tests.
+It gives `/mission-control` a stable baseline state while still allowing live
+trace and workflow panels to replace fixture-only evidence when real local
+services are available.
+
+## Replay API
+
+Mission Control exposes the current replay as JSON:
 
 ```text
 GET /api/mission-control/replay
@@ -14,12 +26,10 @@ GET /api/mission-control/replays
 GET /api/mission-control/replays/{id}
 ```
 
-The artifact is intended for local debugging, PR review, and hackathon
-submission evidence. It does not mutate runtime state and does not require
-NullTickets, NullBoiler, NullClaw, or NullWatch to be running. When matching
-local NullBoiler evidence is available, the artifact includes real workflow run
-ids and checkpoint metadata; when a local NullWatch instance is running, the UI
-hydrates the failed/recovered trace panels before export/save.
+Replay export does not mutate NullTickets, NullBoiler, NullClaw, or NullWatch.
+When matching local NullBoiler evidence is available, the artifact includes real
+workflow run ids and checkpoint metadata. When a local NullWatch instance is
+running, the UI hydrates failed and recovered trace panels before export/save.
 Saved artifacts are written to `~/.nullhub/mission-control/replays/` as
 self-contained JSON files so they survive process restarts.
 
@@ -91,5 +101,5 @@ Or use the UI button:
 /mission-control -> Save Replay
 ```
 
-The exported JSON can be attached to PR discussion or used as a compact record
-of the local demo state at the moment it was captured.
+The exported JSON is a compact local record of the replay state at the moment
+it was captured.

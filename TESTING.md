@@ -52,7 +52,7 @@ The snapshot below is based on the current `src/` tree and the committed test di
 | Service install/uninstall/status | Light | `src/service.zig` | add stronger platform-specific generation and failure-path tests |
 | Product proxies | Light | `src/api/nullboiler.zig`, `src/api/nulltickets.zig`, `src/api/nullwatch.zig` | add upstream error mapping and token/header forwarding tests |
 | Discovery, mDNS, and compat layers | Light | `src/discovery.zig`, `src/mdns.zig`, `src/compat/*` | add degraded-mode and missing-tool fallback coverage |
-| Frontend UI logic | Light | `ui/src/lib/missionControl/judgeReplay.test.mjs` covers the judge replay helper | add broader component and route-level coverage |
+| Frontend UI logic | Light | `ui/src/lib/missionControl/replayAutomation.test.mjs` covers the replay automation helper | add broader component and route-level coverage |
 | Structured backend integration tests | Light | shell smoke only in `tests/test_e2e.sh` | add a real HTTP/integration harness with fixtures |
 | Browser end-to-end | Missing | no Playwright or equivalent suite | add a very small critical-flow suite after UI unit tests land |
 

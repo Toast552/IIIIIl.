@@ -36,7 +36,7 @@ export const phaseOrder: MissionControlPhase[] = [
   'completed',
 ];
 
-export const storyBeats: {
+export const phaseMilestones: {
   phase: MissionControlPhase;
   time: string;
   title: string;

@@ -294,7 +294,7 @@ test "handle supports reset launch and recovery after failure" {
     const recovered = handleForTest(std.testing.allocator, "POST", "/api/mission-control/recover", &store);
     defer std.testing.allocator.free(recovered.body);
     try std.testing.expectEqualStrings("200 OK", recovered.status);
-    try std.testing.expect(std.mem.indexOf(u8, recovered.body, "\"recovered_run_id\": \"run-demo-recovered-fork\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, recovered.body, "\"recovered_run_id\": \"run-mission-code-red-recovered\"") != null);
 }
 
 test "handle rejects invalid mission transitions" {
