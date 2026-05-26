@@ -1,6 +1,7 @@
 const std = @import("std");
 const std_compat = @import("compat");
 const access = @import("../access.zig");
+const durable_file = @import("durable_file.zig");
 const paths_mod = @import("paths.zig");
 const state_mod = @import("state.zig");
 const test_helpers = @import("../test_helpers.zig");
@@ -26,7 +27,6 @@ pub const NullBoilerWorkflowConfig = struct {
 };
 
 pub const managed_workflow_file_name = "nullhub-tracker-workflow.json";
-pub const legacy_workflow_file_name = "tracker-workflow.json";
 pub const default_tracker_prompt_template =
     "Task {{task.id}}: {{task.title}}\n\n{{task.description}}\n\nMetadata:\n{{task.metadata}}";
 
@@ -436,7 +436,6 @@ pub fn linkNullBoilerToNullTickets(
 
     ensureNullBoilerTrackerWorkflowFile(
         allocator,
-        config_path,
         workflows_dir,
         options.pipeline_id,
         options.claim_role,
@@ -614,7 +613,6 @@ fn ensurePath(path: []const u8) !void {
 
 fn ensureNullBoilerTrackerWorkflowFile(
     allocator: std.mem.Allocator,
-    config_path: []const u8,
     workflows_dir: []const u8,
     pipeline_id: []const u8,
     claim_role: []const u8,
@@ -643,33 +641,9 @@ fn ensureNullBoilerTrackerWorkflowFile(
     });
     defer allocator.free(rendered);
 
-    try writeTextFileAtomically(allocator, workflow_path, rendered);
+    try durable_file.writeTextFileAtomically(allocator, workflow_path, rendered);
 
     deleteStaleNullHubManagedWorkflows(allocator, workflows_dir) catch {};
-
-    const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
-    const legacy_path = try std.fs.path.join(allocator, &.{ config_dir, legacy_workflow_file_name });
-    defer allocator.free(legacy_path);
-    std_compat.fs.deleteFileAbsolute(legacy_path) catch {};
-
-    const legacy_workflows_path = try std.fs.path.join(allocator, &.{ workflows_dir, legacy_workflow_file_name });
-    defer allocator.free(legacy_workflows_path);
-    std_compat.fs.deleteFileAbsolute(legacy_workflows_path) catch {};
-}
-
-fn writeTextFileAtomically(allocator: std.mem.Allocator, path: []const u8, contents: []const u8) !void {
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
-    defer allocator.free(tmp_path);
-    errdefer std_compat.fs.deleteFileAbsolute(tmp_path) catch {};
-
-    {
-        const file_out = try std_compat.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
-        defer file_out.close();
-        try file_out.writeAll(contents);
-        try file_out.writeAll("\n");
-    }
-
-    try std_compat.fs.renameAbsolute(tmp_path, path);
 }
 
 fn deleteStaleNullHubManagedWorkflows(allocator: std.mem.Allocator, workflows_dir: []const u8) !void {

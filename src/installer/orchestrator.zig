@@ -12,11 +12,14 @@ const local_binary = @import("../core/local_binary.zig");
 const fs_compat = @import("../fs_compat.zig");
 const launch_args_mod = @import("../core/launch_args.zig");
 const nullclaw_web_channel = @import("../core/nullclaw_web_channel.zig");
+const nullclaw_gateway_config = @import("../core/nullclaw_gateway_config.zig");
 const manager_mod = @import("../supervisor/manager.zig");
 const ui_modules_mod = @import("ui_modules.zig");
 const managed_skills = @import("../managed_skills.zig");
 const test_helpers = @import("../test_helpers.zig");
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
+const min_gateway_body_size = nullclaw_gateway_config.min_body_size;
+const min_gateway_timeout_secs = nullclaw_gateway_config.min_timeout_secs;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -206,7 +209,7 @@ pub fn install(
         ) catch null;
         break :blk owned_launch_command orelse comp.default_launch_command;
     } else comp.default_launch_command;
-    const launch_command = registry.normalizeLaunchCommand(opts.component, raw_launch_command);
+    const launch_command = raw_launch_command;
     const health_endpoint = if (parsed_manifest) |pm| pm.value.health.endpoint else comp.default_health_endpoint;
     const default_port = if (parsed_manifest) |pm| (if (pm.value.ports.len > 0) pm.value.ports[0].default else comp.default_port) else comp.default_port;
     defer if (parsed_manifest) |pm| pm.deinit();
@@ -222,12 +225,20 @@ pub fn install(
     // If any selected provider is openai-compatible (has a base_url), strip only those
     // entries before passing answers to the binary. The binary only knows standard
     // provider names; custom credentials and fallback order are restored afterwards.
-    const custom_provider_result = extractCustomProviders(allocator, opts.answers_json) catch |err| blk: {
+    const nullclaw_runtime_profile = parseNullclawRuntimeProfile(allocator, opts.component, opts.answers_json);
+    const answers_without_nullhub_hints = stripNullhubRuntimeProfileHints(allocator, opts.component, opts.answers_json, nullclaw_runtime_profile) catch |err| {
+        std.log.warn("stripNullhubRuntimeProfileHints failed: {s}", .{@errorName(err)});
+        setLastErrorDetail("failed to prepare nullclaw runtime profile answers");
+        return error.ConfigGenerationFailed;
+    };
+    defer if (answers_without_nullhub_hints.ptr != opts.answers_json.ptr) allocator.free(answers_without_nullhub_hints);
+
+    const custom_provider_result = extractCustomProviders(allocator, answers_without_nullhub_hints) catch |err| blk: {
         std.log.warn("extractCustomProviders failed: {s}", .{@errorName(err)});
         break :blk null;
     };
     defer if (custom_provider_result) |cp| cp.deinit(allocator);
-    const answers_for_binary = if (custom_provider_result) |cp| cp.stripped_json else opts.answers_json;
+    const answers_for_binary = if (custom_provider_result) |cp| cp.stripped_json else answers_without_nullhub_hints;
 
     const answers_with_port = injectPortFields(allocator, answers_for_binary, port, managed_port) catch answers_for_binary;
     defer if (answers_with_port.ptr != answers_for_binary.ptr) allocator.free(answers_with_port);
@@ -267,6 +278,18 @@ pub fn install(
             };
         }
     }
+
+    patchNullclawRuntimeProfileIntoConfig(
+        allocator,
+        p,
+        opts.component,
+        opts.instance_name,
+        nullclaw_runtime_profile,
+    ) catch |err| {
+        std.log.warn("failed to patch nullclaw runtime profile config: {s}", .{@errorName(err)});
+        setLastErrorDetail("failed to patch nullclaw runtime profile config");
+        return error.ConfigGenerationFailed;
+    };
 
     _ = nullclaw_web_channel.ensureNullclawWebChannelConfig(
         allocator,
@@ -728,6 +751,16 @@ const ProviderSelection = struct {
     model: []const u8,
 };
 
+const NullclawRuntimeProfile = struct {
+    requested: bool = false,
+    stateless: bool = false,
+    gateway_require_pairing: bool = true,
+    gateway_max_body_size_bytes: i64 = min_gateway_body_size,
+    gateway_request_timeout_secs: i64 = min_gateway_timeout_secs,
+    a2a_enabled: bool = true,
+    a2a_multi_modal: bool = true,
+};
+
 const CustomProvidersRewrite = struct {
     custom_providers: []CustomProvider,
     selections: []ProviderSelection,
@@ -784,6 +817,28 @@ fn stringField(obj: *std.json.ObjectMap, key: []const u8) []const u8 {
     return switch (obj.get(key) orelse .null) {
         .string => |s| s,
         else => "",
+    };
+}
+
+fn boolField(obj: *std.json.ObjectMap, key: []const u8) ?bool {
+    return switch (obj.get(key) orelse .null) {
+        .bool => |value| value,
+        .string => |value| if (std.ascii.eqlIgnoreCase(value, "true"))
+            true
+        else if (std.ascii.eqlIgnoreCase(value, "false"))
+            false
+        else
+            null,
+        else => null,
+    };
+}
+
+fn integerField(obj: *std.json.ObjectMap, key: []const u8) ?i64 {
+    return switch (obj.get(key) orelse .null) {
+        .integer => |value| value,
+        .number_string => |value| std.fmt.parseInt(i64, value, 10) catch null,
+        .string => |value| std.fmt.parseInt(i64, value, 10) catch null,
+        else => null,
     };
 }
 
@@ -921,6 +976,111 @@ fn extractCustomProviders(allocator: std.mem.Allocator, json: []const u8) !?Cust
     };
 }
 
+fn parseNullclawRuntimeProfile(
+    allocator: std.mem.Allocator,
+    component: []const u8,
+    answers_json: []const u8,
+) NullclawRuntimeProfile {
+    if (!std.mem.eql(u8, component, "nullclaw")) return .{};
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, answers_json, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch return .{};
+    defer parsed.deinit();
+    if (parsed.value != .object) return .{};
+
+    const root = &parsed.value.object;
+    var profile: NullclawRuntimeProfile = .{};
+
+    const profile_name = blk: {
+        const nullhub_profile = stringField(root, "nullhub_profile");
+        if (nullhub_profile.len > 0) break :blk nullhub_profile;
+        const runtime_profile = stringField(root, "nullhub_runtime_profile");
+        if (runtime_profile.len > 0) break :blk runtime_profile;
+        break :blk stringField(root, "runtime_profile");
+    };
+    if (std.ascii.eqlIgnoreCase(profile_name, "stateless") or std.ascii.eqlIgnoreCase(profile_name, "minimal_none")) {
+        profile.requested = true;
+        profile.stateless = true;
+    }
+    if (boolField(root, "stateless") == true) {
+        profile.requested = true;
+        profile.stateless = true;
+    }
+
+    if (std.ascii.eqlIgnoreCase(stringField(root, "memory_profile"), "minimal_none") or
+        std.ascii.eqlIgnoreCase(stringField(root, "memory_backend"), "none") or
+        boolField(root, "memory_auto_save") == false)
+    {
+        profile.requested = true;
+        profile.stateless = true;
+    }
+
+    if (root.get("memory")) |memory_value| {
+        if (memory_value == .object) {
+            var memory = memory_value.object;
+            if (std.ascii.eqlIgnoreCase(stringField(&memory, "profile"), "minimal_none") or
+                std.ascii.eqlIgnoreCase(stringField(&memory, "backend"), "none") or
+                boolField(&memory, "auto_save") == false)
+            {
+                profile.requested = true;
+                profile.stateless = true;
+            }
+        }
+    }
+
+    if (boolField(root, "gateway_require_pairing")) |value| {
+        profile.requested = true;
+        profile.gateway_require_pairing = value;
+    }
+    if (integerField(root, "gateway_max_body_size_bytes")) |value| {
+        profile.requested = true;
+        profile.gateway_max_body_size_bytes = @max(value, min_gateway_body_size);
+    }
+    if (integerField(root, "gateway_request_timeout_secs")) |value| {
+        profile.requested = true;
+        profile.gateway_request_timeout_secs = @max(value, min_gateway_timeout_secs);
+    }
+    if (boolField(root, "a2a_enabled")) |value| {
+        profile.requested = true;
+        profile.a2a_enabled = value;
+    }
+    if (boolField(root, "a2a_multi_modal")) |value| {
+        profile.requested = true;
+        profile.a2a_multi_modal = value;
+    }
+
+    return profile;
+}
+
+fn stripNullhubRuntimeProfileHints(allocator: std.mem.Allocator, component: []const u8, answers_json: []const u8, profile: NullclawRuntimeProfile) ![]const u8 {
+    if (!std.mem.eql(u8, component, "nullclaw") or !profile.requested) return answers_json;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, answers_json, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    if (parsed.value != .object) return answers_json;
+
+    var root = &parsed.value.object;
+    _ = root.orderedRemove("nullhub_profile");
+    _ = root.orderedRemove("nullhub_runtime_profile");
+    _ = root.orderedRemove("runtime_profile");
+    _ = root.orderedRemove("stateless");
+    _ = root.orderedRemove("memory_profile");
+    _ = root.orderedRemove("memory_backend");
+    _ = root.orderedRemove("memory_auto_save");
+    _ = root.orderedRemove("gateway_require_pairing");
+    _ = root.orderedRemove("gateway_max_body_size_bytes");
+    _ = root.orderedRemove("gateway_request_timeout_secs");
+    _ = root.orderedRemove("a2a_enabled");
+    _ = root.orderedRemove("a2a_multi_modal");
+
+    return std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+}
+
 fn selectionContainsProvider(selections: []const ProviderSelection, provider: []const u8) bool {
     for (selections) |selection| {
         if (std.mem.eql(u8, selection.provider, provider)) return true;
@@ -1036,6 +1196,26 @@ fn patchCustomProvidersIntoConfig(
     defer out.close();
     try out.writeAll(rendered);
     try out.writeAll("\n");
+}
+
+fn patchNullclawRuntimeProfileIntoConfig(
+    allocator: std.mem.Allocator,
+    p: paths_mod.Paths,
+    component: []const u8,
+    name: []const u8,
+    profile: NullclawRuntimeProfile,
+) !void {
+    if (!std.mem.eql(u8, component, "nullclaw") or !profile.requested) return;
+
+    var access = try nullclaw_gateway_config.ensureConfig(allocator, p, component, name, .{
+        .require_pairing = profile.gateway_require_pairing,
+        .max_body_size_bytes = profile.gateway_max_body_size_bytes,
+        .request_timeout_secs = profile.gateway_request_timeout_secs,
+        .a2a_enabled = profile.a2a_enabled,
+        .a2a_multi_modal = profile.a2a_multi_modal,
+        .stateless_memory = profile.stateless,
+    });
+    defer access.deinit(allocator);
 }
 
 fn ensureObjectInMap(
@@ -1764,4 +1944,89 @@ test "patchCustomProvidersIntoConfig restores primary custom and keeps standard 
     const fallbacks = parsed.value.object.get("reliability").?.object.get("fallback_providers").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), fallbacks.len);
     try std.testing.expectEqualStrings("openrouter", fallbacks[0].string);
+}
+
+test "stripNullhubRuntimeProfileHints removes nullhub-only fields before component config generation" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"instance_name":"nullhat","provider":"openrouter","nullhub_profile":"stateless","memory_backend":"none","gateway_max_body_size_bytes":33554432,"a2a_multi_modal":true}
+    ;
+    const profile = parseNullclawRuntimeProfile(allocator, "nullclaw", body);
+    try std.testing.expect(profile.requested);
+    try std.testing.expect(profile.stateless);
+    try std.testing.expect(profile.gateway_max_body_size_bytes >= 33_554_432);
+
+    const stripped = try stripNullhubRuntimeProfileHints(allocator, "nullclaw", body, profile);
+    defer allocator.free(stripped);
+    try std.testing.expect(std.mem.indexOf(u8, stripped, "nullhub_profile") == null);
+    try std.testing.expect(std.mem.indexOf(u8, stripped, "memory_backend") == null);
+    try std.testing.expect(std.mem.indexOf(u8, stripped, "gateway_max_body_size_bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, stripped, "\"provider\":\"openrouter\"") != null);
+}
+
+test "patchNullclawRuntimeProfileIntoConfig prepares stateless gateway config for NullHat-style instances" {
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const comp_dir = try std.fs.path.join(allocator, &.{ fixture.paths.root, "instances", "nullclaw" });
+    defer allocator.free(comp_dir);
+    std_compat.fs.makeDirAbsolute(comp_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nullclaw", "nullhat");
+    defer allocator.free(inst_dir);
+    std_compat.fs.makeDirAbsolute(inst_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const config_path = try fixture.paths.instanceConfig(allocator, "nullclaw", "nullhat");
+    defer allocator.free(config_path);
+    try writeFile(config_path,
+        \\{"gateway":{"port":43123,"max_body_size_bytes":1024},"a2a":{"enabled":false},"memory":{"profile":"hybrid_keyword","backend":"hybrid","auto_save":true}}
+    );
+
+    const profile = parseNullclawRuntimeProfile(allocator, "nullclaw",
+        \\{"nullhub_profile":"stateless"}
+    );
+    try patchNullclawRuntimeProfileIntoConfig(allocator, fixture.paths, "nullclaw", "nullhat", profile);
+
+    const file = try std_compat.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const contents = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(contents);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const gateway = root.get("gateway").?.object;
+    const a2a = root.get("a2a").?.object;
+    const memory = root.get("memory").?.object;
+    try std.testing.expect(gateway.get("require_pairing").?.bool);
+    try std.testing.expect(gateway.get("max_body_size_bytes").?.integer >= min_gateway_body_size);
+    try std.testing.expect(gateway.get("request_timeout_secs").?.integer >= min_gateway_timeout_secs);
+    try std.testing.expect(a2a.get("enabled").?.bool);
+    try std.testing.expect(a2a.get("multi_modal").?.bool);
+    try std.testing.expectEqualStrings("minimal_none", memory.get("profile").?.string);
+    try std.testing.expectEqualStrings("none", memory.get("backend").?.string);
+    try std.testing.expect(!memory.get("auto_save").?.bool);
+
+    const token_path = try nullclaw_gateway_config.gatewayTokenPath(allocator, fixture.paths, "nullclaw", "nullhat");
+    defer allocator.free(token_path);
+    const token_file = try std_compat.fs.openFileAbsolute(token_path, .{});
+    defer token_file.close();
+    const token_bytes = try token_file.readToEndAlloc(allocator, 16 * 1024);
+    defer allocator.free(token_bytes);
+    const token = std.mem.trim(u8, token_bytes, " \t\r\n");
+    try std.testing.expect(nullclaw_gateway_config.isNullhubGatewayToken(token));
+
+    const expected_hash = try nullclaw_gateway_config.hashGatewayTokenAlloc(allocator, token);
+    defer allocator.free(expected_hash);
+    const paired_tokens = gateway.get("paired_tokens").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), paired_tokens.len);
+    try std.testing.expectEqualStrings(expected_hash, paired_tokens[0].string);
+    try std.testing.expect(!nullclaw_gateway_config.isNullhubGatewayToken(paired_tokens[0].string));
 }

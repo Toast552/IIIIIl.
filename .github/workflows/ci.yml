@@ -17,6 +17,7 @@ jobs:
     with:
       binary_name: nullhub
       artifact_prefix: nullhub
+      zig_version: "0.16.0"
       node_version: "22"
       node_cache_dependency_path: ui/package-lock.json
       targets_json: >-
@@ -24,7 +25,7 @@ jobs:
           {"os":"ubuntu-latest","target":"linux-x86_64","zig_target":"x86_64-linux-musl"},
           {"os":"ubuntu-latest","target":"linux-aarch64","zig_target":"aarch64-linux-musl"},
           {"os":"macos-latest","target":"macos-aarch64","zig_target":"aarch64-macos"},
-          {"os":"windows-latest","target":"windows-x86_64","zig_target":"x86_64-windows"}
+          {"os":"windows-2025-vs2026","target":"windows-x86_64","zig_target":"x86_64-windows"}
         ]
       test_command: bash tests/test_backend.sh
       pre_build_command: |

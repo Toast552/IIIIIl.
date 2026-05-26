@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { api } from "$lib/api/client";
-  import { orchestrationUiRoutes } from "$lib/orchestration/routes";
-  import GraphViewer from "$lib/components/orchestration/GraphViewer.svelte";
-  import StateInspector from "$lib/components/orchestration/StateInspector.svelte";
-  import RunEventLog from "$lib/components/orchestration/RunEventLog.svelte";
-  import CheckpointTimeline from "$lib/components/orchestration/CheckpointTimeline.svelte";
-  import type { RunStreamHandle } from "$lib/api/orchestration";
+  import { nullBoilerApi } from "$lib/api/client";
+  import { nullboilerUiRoutes } from "$lib/nullboiler/routes";
+  import GraphViewer from "$lib/components/nullboiler/GraphViewer.svelte";
+  import StateInspector from "$lib/components/nullboiler/StateInspector.svelte";
+  import RunEventLog from "$lib/components/nullboiler/RunEventLog.svelte";
+  import CheckpointTimeline from "$lib/components/nullboiler/CheckpointTimeline.svelte";
+  import type { RunStreamHandle } from "$lib/api/nullboiler";
 
   type Workflow = {
     id?: string;
@@ -351,7 +351,7 @@
     streamRunId = id;
     if (resetEvents) runEvents = [];
     try {
-      runStream = api.streamRun(
+      runStream = nullBoilerApi.streamRun(
         id,
         (event: any) => {
           if (selectedRunId !== id) return;
@@ -398,7 +398,7 @@
   async function loadWorkflows() {
     if (component !== "nullboiler" || !running) return;
     try {
-      workflows = (await api.listWorkflows(boilerOptions())) || [];
+      workflows = (await nullBoilerApi.listWorkflows(boilerOptions())) || [];
       if (!selectedWorkflowId || !workflows.some((workflow) => workflowId(workflow) === selectedWorkflowId)) {
         selectedWorkflowId = workflowId(workflows[0] || {});
       }
@@ -415,7 +415,7 @@
     detailLoading = true;
     error = "";
     try {
-      const workflow = await api.getWorkflow(id, boilerOptions());
+      const workflow = await nullBoilerApi.getWorkflow(id, boilerOptions());
       selectedWorkflowId = workflowId(workflow) || id;
       workflowEditorMode = "edit";
       validationResult = null;
@@ -454,7 +454,7 @@
     try {
       const payload = parseJsonField(workflowJson, {});
       if (workflowEditorMode === "create") {
-        const result = await api.createWorkflow(payload, boilerOptions());
+        const result = await nullBoilerApi.createWorkflow(payload, boilerOptions());
         const id = String(result?.id || payload?.id || "");
         message = `Workflow ${id || payload?.name || ""} created`.trim();
         await loadWorkflows();
@@ -462,7 +462,7 @@
       } else {
         const id = selectedWorkflowId || String(payload?.id || "");
         if (!id) throw new Error("Workflow id is required");
-        await api.updateWorkflow(id, payload, boilerOptions());
+        await nullBoilerApi.updateWorkflow(id, payload, boilerOptions());
         message = "Workflow saved";
         await loadWorkflows();
         await loadWorkflowForEdit(id);
@@ -486,7 +486,7 @@
     error = "";
     message = "";
     try {
-      await api.deleteWorkflow(id, boilerOptions());
+      await nullBoilerApi.deleteWorkflow(id, boilerOptions());
       message = "Workflow deleted";
       selectedWorkflowId = "";
       workflowDeleteConfirm = "";
@@ -509,7 +509,7 @@
     message = "";
     validationResult = null;
     try {
-      validationResult = await api.validateWorkflow(selectedWorkflowId, boilerOptions());
+      validationResult = await nullBoilerApi.validateWorkflow(selectedWorkflowId, boilerOptions());
       message = validationResult?.valid ? "Workflow is valid" : "Workflow has validation errors";
     } catch (e) {
       error = (e as Error).message;
@@ -526,7 +526,7 @@
     message = "";
     try {
       const input = parseJsonField(inputRaw, {});
-      const result = await api.runWorkflow(id, { input }, boilerOptions());
+      const result = await nullBoilerApi.runWorkflow(id, { input }, boilerOptions());
       const runIdValue = String(result?.id || "");
       message = `Run ${runIdValue || ""} started`.trim();
       await loadRuns({ keepSelection: false });
@@ -554,7 +554,7 @@
     try {
       const queryKey = runFiltersKey();
       const canAppend = append && runsQueryKey === queryKey && runsNextOffset !== null;
-      const page = await api.listRunsPage(runQueryParams(canAppend ? runsNextOffset || 0 : 0));
+      const page = await nullBoilerApi.listRunsPage(runQueryParams(canAppend ? runsNextOffset || 0 : 0));
       const nextItems = page?.items || [];
       if (canAppend) {
         const seen = new Set(runs.map(runId));
@@ -595,7 +595,7 @@
     try {
       const sameRun = selectedRunId === id;
       const previous = sameRun ? selectedRun?.state || null : null;
-      const data = await api.getRun(id, boilerOptions());
+      const data = await nullBoilerApi.getRun(id, boilerOptions());
       if (requestSeq !== runDetailRequestSeq) return;
       selectedRunId = id;
       previousRunState = previous;
@@ -605,7 +605,7 @@
         selectedRunWorkflow = data.workflow;
       } else if (data?.workflow_id) {
         try {
-          const workflow = await api.getWorkflow(data.workflow_id, boilerOptions());
+          const workflow = await nullBoilerApi.getWorkflow(data.workflow_id, boilerOptions());
           if (requestSeq !== runDetailRequestSeq) return;
           selectedRunWorkflow = workflow;
         } catch {
@@ -632,7 +632,7 @@
     error = "";
     message = "";
     try {
-      await api.cancelRun(selectedRunId, boilerOptions());
+      await nullBoilerApi.cancelRun(selectedRunId, boilerOptions());
       message = "Run cancelled";
       await loadRunDetail(selectedRunId, false);
       await loadRuns({ keepSelection: true, refreshDetail: false });
@@ -649,7 +649,7 @@
     error = "";
     message = "";
     try {
-      const result = await api.retryRun(selectedRunId, boilerOptions());
+      const result = await nullBoilerApi.retryRun(selectedRunId, boilerOptions());
       message = `Retry ${result?.id || selectedRunId} started`;
       await loadRunDetail(String(result?.id || selectedRunId), false);
       await loadRuns({ keepSelection: true, refreshDetail: false });
@@ -667,7 +667,7 @@
     message = "";
     try {
       const updates = parseJsonField(resumeUpdates, {});
-      await api.resumeRun(selectedRunId, updates, boilerOptions());
+      await nullBoilerApi.resumeRun(selectedRunId, updates, boilerOptions());
       message = "Run resumed";
       resumeUpdates = "{}";
       await loadRunDetail(selectedRunId, false);
@@ -686,7 +686,7 @@
     message = "";
     try {
       const updates = parseJsonField(stateUpdates, {});
-      const result = await api.injectState(
+      const result = await nullBoilerApi.injectState(
         selectedRunId,
         updates,
         stateApplyAfterStep.trim() || undefined,
@@ -714,7 +714,7 @@
     selectedCheckpointId = "";
     selectedCheckpointState = null;
     try {
-      const nextCheckpoints = (await api.listCheckpoints(runIdValue, boilerOptions())) || [];
+      const nextCheckpoints = (await nullBoilerApi.listCheckpoints(runIdValue, boilerOptions())) || [];
       if (!isCurrentRunRequest(runIdValue, requestSeq)) return;
       checkpoints = nextCheckpoints;
       const latestCheckpointId = String(nextCheckpoints[nextCheckpoints.length - 1]?.id || "");
@@ -734,7 +734,7 @@
     if (!isCurrentRunRequest(runIdValue, requestSeq)) return;
     selectedCheckpointId = id;
     try {
-      const checkpoint = await api.getCheckpoint(runIdValue, id, boilerOptions());
+      const checkpoint = await nullBoilerApi.getCheckpoint(runIdValue, id, boilerOptions());
       if (!isCurrentRunRequest(runIdValue, requestSeq) || selectedCheckpointId !== id) return;
       selectedCheckpointState = checkpoint?.state || checkpoint;
     } catch (e) {
@@ -751,7 +751,7 @@
     message = "";
     try {
       const overrides = parseJsonField(checkpointOverrides, {});
-      const result = await api.forkRun(
+      const result = await nullBoilerApi.forkRun(
         selectedCheckpointId,
         Object.keys(overrides).length > 0 ? overrides : undefined,
         boilerOptions(),
@@ -773,7 +773,7 @@
     error = "";
     message = "";
     try {
-      await api.replayRun(selectedRunId, selectedCheckpointId, boilerOptions());
+      await nullBoilerApi.replayRun(selectedRunId, selectedCheckpointId, boilerOptions());
       message = "Run replay started";
       await loadRunDetail(selectedRunId, false);
       await loadRuns({ keepSelection: true, refreshDetail: false });
@@ -787,7 +787,7 @@
   async function loadWorkers() {
     if (component !== "nullboiler" || !running) return;
     try {
-      workers = (await api.listWorkers(boilerOptions())) || [];
+      workers = (await nullBoilerApi.listWorkers(boilerOptions())) || [];
       if (!selectedWorkerId || !workers.some((worker) => workerId(worker) === selectedWorkerId)) {
         selectedWorkerId = workerId(workers[0] || {});
       }
@@ -814,7 +814,7 @@
         max_concurrent: boundedInt(workerMaxConcurrentValue, 1, 1, 1_000_000),
       };
       if (workerModelValue.trim()) payload.model = workerModelValue.trim();
-      const result = await api.registerWorker(payload, boilerOptions());
+      const result = await nullBoilerApi.registerWorker(payload, boilerOptions());
       const id = String(result?.id || workerIdValue.trim());
       message = `Worker ${id} registered`;
       workerIdValue = "";
@@ -842,7 +842,7 @@
     error = "";
     message = "";
     try {
-      await api.deleteWorker(selectedWorkerId, boilerOptions());
+      await nullBoilerApi.deleteWorker(selectedWorkerId, boilerOptions());
       message = "Worker deleted";
       workerDeleteConfirm = "";
       selectedWorkerId = "";
@@ -857,17 +857,17 @@
   async function loadTracker() {
     if (component !== "nullboiler" || !running) return;
     try {
-      const status = await api.getBoilerTrackerStatus(boilerOptions());
+      const status = await nullBoilerApi.getBoilerTrackerStatus(boilerOptions());
       trackerStatus = status;
       trackerTasks = Array.isArray(status?.running) ? status.running : [];
       try {
-        const tasks = await api.getBoilerTrackerTasks(boilerOptions());
+        const tasks = await nullBoilerApi.getBoilerTrackerTasks(boilerOptions());
         if (Array.isArray(tasks)) trackerTasks = tasks;
       } catch {
         /* keep status.running as fallback */
       }
       try {
-        trackerStats = await api.getBoilerTrackerStats(boilerOptions());
+        trackerStats = await nullBoilerApi.getBoilerTrackerStats(boilerOptions());
       } catch {
         trackerStats = null;
       }
@@ -889,7 +889,7 @@
     error = "";
     message = "";
     try {
-      const result = await api.refreshBoilerTracker(boilerOptions());
+      const result = await nullBoilerApi.refreshBoilerTracker(boilerOptions());
       message = result?.message || "Tracker refresh requested";
       await loadTracker();
     } catch (e) {
@@ -994,7 +994,7 @@
               {workflowDeleteConfirm === selectedWorkflowId ? "Confirm Delete" : "Delete"}
             </button>
           </div>
-          <a class="btn subtle" href={orchestrationUiRoutes.workflows({ boilerInstance: name })}>
+          <a class="btn subtle" href={nullboilerUiRoutes.workflows({ boilerInstance: name })}>
             Open Full Page
           </a>
         </section>
@@ -1205,7 +1205,7 @@
                 <button class="btn" onclick={retryRun} disabled={actionLoading || selectedRun.status !== "failed"}>
                   Retry
                 </button>
-                <a class="btn subtle" href={orchestrationUiRoutes.run(runId(selectedRun), { boilerInstance: name })}>
+                <a class="btn subtle" href={nullboilerUiRoutes.run(runId(selectedRun), { boilerInstance: name })}>
                   Open Full Page
                 </a>
               </div>

@@ -52,7 +52,7 @@ const nullboilerSections: GenericSectionDef[] = [
   {
     key: "engine",
     label: "Engine",
-    description: "Push-mode orchestration timing, retries, and worker health controls.",
+    description: "Push-mode workflow timing, retries, and worker health controls.",
     fields: [
       { key: "engine.poll_interval_ms", label: "Poll Interval", type: "number", default: 500, min: 1 },
       { key: "engine.default_timeout_ms", label: "Default Timeout", type: "number", default: 300000, min: 1 },
@@ -165,7 +165,7 @@ const nullwatchSections: GenericSectionDef[] = [
   {
     key: "service",
     label: "Service",
-    description: "Core observability API and local storage settings.",
+    description: "Core NullWatch tracing API and local storage settings.",
     fields: [
       { key: "host", label: "Bind Host", type: "text", default: "127.0.0.1" },
       { key: "port", label: "API Port", type: "number", default: 7710, min: 1, max: 65535 },

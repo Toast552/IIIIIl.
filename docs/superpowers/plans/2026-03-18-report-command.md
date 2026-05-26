@@ -145,7 +145,7 @@ pub const ReportOptions = struct {
 
 - [ ] **Step 4: Add `report` to Command union**
 
-Add `report: ReportOptions,` after `add_source: AddSourceOptions,` in the `Command` union.
+Add `report: ReportOptions,` to the `Command` union near the other CLI commands.
 
 - [ ] **Step 5: Add parseReport function and wire into parse()**
 
@@ -1345,7 +1345,7 @@ git commit -m "Add report API endpoints for preview and submit"
 
 - [ ] **Step 1: Add API methods to client.ts**
 
-Add before the `...createOrchestrationApi(request, withQuery)` line:
+Add before the `...createNullBoilerApi(request, withQuery)` line:
 
 ```typescript
   reportPreview: (data: { repo: string; type: string; message: string }) =>

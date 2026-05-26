@@ -15,14 +15,16 @@ NullTickets, NullWatch).
 - **Process supervision** -- start, stop, restart, crash recovery with backoff
 - **Health monitoring** -- periodic HTTP health checks, dashboard status cards
 - **Cross-component linking** -- auto-connect `NullTickets -> NullBoiler`, generate native tracker config, and inspect queue/orchestrator status from one UI
-- **Config management** -- structured editors for `NullClaw`, `NullBoiler`, `NullTickets`, and `NullWatch`, with raw JSON fallback when needed
+- **Config management** -- structured editors for `NullClaw`, `NullBoiler`, `NullTickets`, and `NullWatch`, plus direct raw JSON editing when needed
 - **Log viewing** -- tail and live SSE streaming per instance
 - **One-click updates** -- download, migrate config, rollback on failure
 - **Multi-instance** -- run multiple instances of the same component side by side
 - **Web UI + CLI** -- browser dashboard for humans, CLI for automation
 - **Managed instance admin API** -- instance-scoped status, config, models, cron, channels, and skills routes for managed NullClaw installs
-- **Orchestration UI** -- workflow editor, poll-based run monitoring, checkpoint forking, encoded workflow/run/store links, and key-value store browser (proxied to NullTickets through NullHub)
-- **Observability cockpit** -- local NullWatch run summaries, span timelines, eval results, token usage, cost, and error context through a NullHub proxy
+- **NullBoiler UI** -- workflow editor, poll-based run monitoring, checkpoint forking, and encoded workflow/run links
+- **NullTickets Store** -- key-value store browser proxied to NullTickets through NullHub
+- **NullWatch Flight Recorder** -- local NullWatch run summaries, span timelines, eval results, token usage, cost, and error context through a NullHub proxy
+- **Mission Control** -- local-first agent mission replay with workflow execution, role-based agents, failure, checkpoint recovery, durable replay storage, and live telemetry in one screen
 
 ## Quick Start
 
@@ -114,17 +116,19 @@ UI modules. NullHub is a generic engine that interprets manifests.
 **Storage** -- all state lives under `~/.nullhub/` (config, instances, binaries,
 logs, cached manifests).
 
-**Orchestration proxy** -- requests to `/api/orchestration/*` are reverse-proxied
-to the local orchestration stack. Most routes go to NullBoiler's REST API via
+**NullBoiler proxy** -- requests to `/api/nullboiler/*` are reverse-proxied
+to NullBoiler's REST API via
 `NULLBOILER_URL` (e.g. `http://localhost:8080`) and optional `NULLBOILER_TOKEN`.
-`/api/orchestration/store/*` is proxied to NullTickets via `NULLTICKETS_URL` and
+
+**NullTickets store proxy** -- requests to `/api/nulltickets/store/*` are
+proxied to NullTickets via `NULLTICKETS_URL` and
 optional `NULLTICKETS_TOKEN`.
 
-**Observability proxy** -- requests to `/api/observability/*` are reverse-proxied
+**NullWatch proxy** -- requests to `/api/nullwatch/*` are reverse-proxied
 to the managed NullWatch instance installed in NullHub. `NULLWATCH_URL` can
 still override the target for an external NullWatch instance, and
 `NULLWATCH_TOKEN` overrides the managed instance token when set. The built-in
-Observability page uses this proxy to display run summaries, spans, evals,
+NullWatch page uses this proxy to display run summaries, spans, evals,
 latency, cost, and failure context without sending data to hosted services.
 
 Local NullWatch setup:
@@ -137,29 +141,65 @@ Local NullWatch setup:
 
 2. In the web UI, open **Install Component**, select **NullWatch**, keep or set
    the API port to `7710`, and finish the wizard. The installer starts the
-   NullWatch instance and the observability proxy discovers it automatically.
+   NullWatch instance and the NullWatch proxy discovers it automatically.
 
-3. Optional demo data can be ingested through the NullHub proxy:
+**Mission Control API** -- requests to `/api/mission-control/*` drive a
+deterministic local replay scenario for the `/mission-control` page. It does
+not require hosted infrastructure or model secrets, and it hydrates with real
+NullBoiler workflow evidence and NullWatch trace detail when matching local
+instances are available. Responses include a schema version, scenario id,
+deterministic replay mode, controls, graph, timeline, telemetry, NullWatch-style
+run/span/eval trace references, and structured conflict errors for invalid
+actions. The scenario lives in a versioned embedded replay fixture at
+`src/core/mission_control/code_red.v1.json`; `zig build test` validates fixture
+schema, references, ordering, required phases, graph links, and telemetry phase
+coverage. Mission timeline trace links deep-link to `/nullwatch?run_id=...`.
+When a managed NullWatch instance is running, `/mission-control` hydrates the
+failure and recovery trace panels from live run detail through the NullWatch
+proxy and preserves the selected watch in trace links. When a managed
+NullBoiler instance has matching workflow evidence, the Mission Control API
+includes that instance name with real workflow run links and checkpoint metadata
+resolved through the NullBoiler proxy.
+`GET /api/mission-control/replay` exports the current snapshot, source fixture,
+the side-by-side failed/recovered replay artifact comparison once the recovered
+run completes, and ecosystem mapping metadata as a portable JSON artifact for
+debugging and review. `POST /api/mission-control/replay/save` stores that
+artifact under `~/.nullhub/mission-control/replays/`; `GET
+/api/mission-control/replays` lists saved replay records and `GET
+/api/mission-control/replays/{id}` reads the durable artifact back.
 
-   ```bash
-   curl -X POST http://127.0.0.1:19800/api/observability/v1/spans \
-     -H 'Content-Type: application/json' \
-     -d '{"run_id":"demo-run-1","trace_id":"trace-demo-1","span_id":"span-1","source":"nullclaw","operation":"tool.call","status":"error","started_at_ms":1710000000000,"ended_at_ms":1710000001500,"tool_name":"shell","error_message":"tool call failed: command timed out","attributes_json":"{\"exit_code\":124}"}'
+### Mission Control Replay
 
-   curl -X POST http://127.0.0.1:19800/api/observability/v1/evals \
-     -H 'Content-Type: application/json' \
-     -d '{"run_id":"demo-run-1","eval_key":"tool_success","scorer":"deterministic","score":0.0,"verdict":"fail","dataset":"demo","notes":"The tool call timed out."}'
-   ```
+Start NullHub locally and open `/mission-control`:
 
-### Observability Screenshots
+```bash
+zig build run -- serve --host 127.0.0.1 --port 19802 --no-open
+```
 
-Flight Recorder overview:
+The page provides `Replay Mission`, `Reset`, `Launch Mission`, and
+`Fork From Checkpoint` controls. `Replay Mission` runs the deterministic reset,
+launch, failure hold, checkpoint fork, and recovered replay sequence from one
+click. Timeline events include trace chips that map the replay back to local
+NullWatch-style run ids, span ids, operations, and eval keys. The page also
+includes phase milestones and a failed-vs-recovered replay artifact comparison
+panel.
 
-![NullHub Observability overview](docs/screenshots/nullhub-observability-overview.png)
+Export the current replay artifact:
 
-Failure detail with tool-call error context:
+```bash
+curl -fsS http://127.0.0.1:19802/api/mission-control/replay \
+  -o mission-control-replay.json
+```
 
-![NullHub Observability failure detail](docs/screenshots/nullhub-observability-failure.png)
+The same export is available from the `Save Replay` button in Mission Control,
+which also writes a durable server-side copy.
+See `docs/mission-control.md` for the artifact shape and ecosystem mapping.
+
+Run the live API smoke test against a started server:
+
+```bash
+NULLHUB_URL=http://127.0.0.1:19802 ./tests/test_mission_control_smoke.sh
+```
 
 ## Development
 
@@ -182,6 +222,7 @@ End-to-end:
 
 ```bash
 ./tests/test_e2e.sh
+NULLHUB_URL=http://127.0.0.1:19802 ./tests/test_mission_control_smoke.sh
 ```
 
 `zig build test-integration` runs structured backend HTTP integration tests
@@ -193,7 +234,7 @@ against a real `nullhub` process started in a temporary home directory.
 - Svelte 5 + SvelteKit (static adapter)
 - JSON over HTTP/1.1
 - SSE for instance log streaming
-- Poll-based orchestration run updates over the `/orchestration/runs/{id}/stream` API
+- Poll-based NullBoiler run updates over the `/api/nullboiler/runs/{id}/stream` API
 
 ## Project Layout
 
@@ -204,19 +245,30 @@ src/
   server.zig            # HTTP server (API + static UI)
   auth.zig              # Optional bearer token auth
   api/                  # REST endpoints (components, instances, wizard, ...)
-    orchestration.zig   # Reverse proxy to NullBoiler orchestration API
-    observability.zig   # Reverse proxy to NullWatch tracing/eval API
+    nullboiler.zig      # Reverse proxy to NullBoiler workflow/run API
+    nulltickets.zig     # Reverse proxy to NullTickets store API
+    nullwatch.zig       # Reverse proxy to NullWatch tracing/eval API
+    mission_control.zig # HTTP adapter for local mission replay commands
   core/                 # Manifest parser, state, platform, paths
+    mission_control.zig # Local deterministic agent mission domain model
+    mission_control_replay.zig # Typed replay fixture parser and validator
+    mission_control/    # Embedded Mission Control replay fixtures
   installer/            # Download, build, UI module fetching
   supervisor/           # Process spawn, health checks, manager
 ui/src/
   routes/               # SvelteKit pages
-    orchestration/      # Orchestration pages (dashboard, workflows, runs, store)
-    observability/      # NullWatch flight recorder page
+    nullboiler/         # NullBoiler pages (dashboard, workflows, runs)
+    nulltickets/        # NullTickets pages (store)
+    nullwatch/          # NullWatch Flight Recorder page
+    mission-control/    # Local agent mission control room
   lib/components/       # Reusable Svelte components
-    orchestration/      # GraphViewer, StateInspector, RunEventLog, InterruptPanel,
+    nullboiler/         # GraphViewer, StateInspector, RunEventLog, InterruptPanel,
                         # CheckpointTimeline, WorkflowJsonEditor, NodeCard, SendProgressBar
+    nulltickets/        # NullTickets store selectors and controls
   lib/api/              # Typed API client
+  lib/missionControl/   # Mission Control feature helpers
 tests/
   test_e2e.sh           # End-to-end test script
+docs/
+  mission-control.md    # Mission Control replay and artifact contract
 ```
