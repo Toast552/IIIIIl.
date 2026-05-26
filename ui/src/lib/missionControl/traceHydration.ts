@@ -75,10 +75,10 @@ type ObservabilityRunDetail = {
   evals?: NullWatchEval[];
 };
 
-export async function findAvailableNullWatchName(api: TraceHydrationApi): Promise<string | null> {
+export async function findRunningNullWatchName(api: TraceHydrationApi): Promise<string | null> {
   try {
     const status = await api.getStatus();
-    return preferredTraceWatchName(status);
+    return runningTraceWatchName(status);
   } catch {
     return null;
   }
@@ -98,12 +98,10 @@ export async function hydrateMissionTracePanels(
   );
 }
 
-function preferredTraceWatchName(status: StatusPayload): string | null {
+function runningTraceWatchName(status: StatusPayload): string | null {
   const watches = extractNullWatchOptions(status);
   const running = watches.find((watch) => watch.status === 'running');
-  if (running) return running.name;
-  const starting = watches.find((watch) => watch.status === 'starting' || watch.status === 'restarting');
-  return starting?.name || null;
+  return running?.name || null;
 }
 
 function extractNullWatchOptions(status: StatusPayload): NullWatchOption[] {

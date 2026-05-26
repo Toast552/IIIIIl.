@@ -82,7 +82,6 @@ Day 3 - Add observability affordances.
 - Add Flight Recorder deep links via `/observability?run_id=...`.
 - Hydrate failure/recovery trace panels from live NullWatch run detail when a
   managed instance is running.
-- Keep mission trace links available without requiring NullWatch to be running.
 
 Day 4 - Strengthen demo automation.
 

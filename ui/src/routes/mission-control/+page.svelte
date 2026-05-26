@@ -11,7 +11,7 @@
     MissionControlTraceRef,
   } from '$lib/api/missionControl';
   import {
-    findAvailableNullWatchName,
+    findRunningNullWatchName,
     hydrateMissionTracePanels,
     missionTracePanelRunIds,
     type TraceHydration,
@@ -200,7 +200,7 @@
     }
 
     traceHydrating = true;
-    const watch = await availableNullWatchName();
+    const watch = await runningNullWatchName();
     if (disposed || requestId !== traceHydrationRequest) return;
     const traces = await hydrateMissionTracePanels(api, snapshot, watch);
     if (disposed || requestId !== traceHydrationRequest) return;
@@ -209,12 +209,12 @@
     traceHydrating = false;
   }
 
-  async function availableNullWatchName(): Promise<string | null> {
+  async function runningNullWatchName(): Promise<string | null> {
     const now = Date.now();
     if (now - traceWatchCheckedAt < 5000) return traceWatchName;
     traceWatchCheckedAt = now;
 
-    traceWatchName = await findAvailableNullWatchName(api);
+    traceWatchName = await findRunningNullWatchName(api);
     return traceWatchName;
   }
 
@@ -313,24 +313,23 @@
     return trace ? ` · ${spanCount(trace)} spans · ${evalCount(trace)} evals` : '';
   }
 
-  function traceSourceLabel(trace: TraceHydration | null, runId: string | null | undefined): string {
-    if (!runId) return 'Pending';
+  function traceSourceLabel(trace: TraceHydration | null): string {
     if (trace) return 'Live NullWatch';
     if (traceHydrating) return 'Checking NullWatch';
-    return 'Trace refs';
+    return 'NullWatch unavailable';
   }
 
   function traceSourceSummary(): string {
     if (liveTraceAvailable) return 'Live NullWatch';
     if (traceHydrating && (failedRunId || recoveredRunId)) return 'Checking NullWatch';
-    return 'Trace refs';
+    return 'NullWatch unavailable';
   }
 
   function tracePanelNote(): string {
     if (liveTraceAvailable) return 'Hydrated run detail';
     if (traceHydrating && (failedRunId || recoveredRunId)) return 'Looking for live traces';
-    if (failedRunId || recoveredRunId) return 'Linked run ids';
-    return 'Run panels pending';
+    if (failedRunId || recoveredRunId) return 'No running instance';
+    return 'No run ids';
   }
 
   function primaryErrorText(trace: TraceHydration | null): string {
@@ -522,13 +521,21 @@
             <strong>{traceSourceSummary()}</strong>
             <em>{tracePanelNote()}</em>
           </div>
-          {#if mission.failed_run_id || mission.failure}
+          {#if failedTrace}
             <a href={observabilityHref(failedRunId)}>Failed run{traceSuffix(failedTrace)}</a>
+          {:else if failedRunId && traceHydrating}
+            <span class="trace-placeholder">Checking failed run</span>
+          {:else if failedRunId}
+            <span class="trace-placeholder">Failed run unavailable</span>
           {:else}
             <span class="trace-placeholder">Failed pending</span>
           {/if}
-          {#if mission.recovered_run_id || mission.recovery}
+          {#if recoveredTrace}
             <a href={observabilityHref(recoveredRunId)}>Recovered run{traceSuffix(recoveredTrace)}</a>
+          {:else if recoveredRunId && traceHydrating}
+            <span class="trace-placeholder">Checking recovered run</span>
+          {:else if recoveredRunId}
+            <span class="trace-placeholder">Recovered run unavailable</span>
           {:else}
             <span class="trace-placeholder">Recovery pending</span>
           {/if}
@@ -540,10 +547,13 @@
             <strong>{mission.failure.failed_step}</strong>
             <p>{mission.failure.error_message}</p>
             <code>{mission.failure.checkpoint_id}</code>
-            <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
-            <div class="trace-detail {failedTrace ? 'live' : 'trace-ref'}">
+            {#if failedTrace}
+              <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
+            {/if}
+            {#if failedTrace || traceHydrating}
+            <div class="trace-detail {failedTrace ? 'live' : 'loading'}">
               <div class="trace-detail-top">
-                <span>{traceSourceLabel(failedTrace, mission.failure.run_id)}</span>
+                <span>{traceSourceLabel(failedTrace)}</span>
                 <strong>{traceVerdict(failedTrace) || runVerdict('failed')}</strong>
               </div>
               {#if failedTrace}
@@ -560,6 +570,7 @@
                 {/if}
               {/if}
             </div>
+            {/if}
           </div>
         {/if}
 
@@ -569,10 +580,13 @@
             <strong>{mission.recovery.status}</strong>
             <p>{mission.recovery.human_instruction}</p>
             <code>{mission.recovery.run_id}</code>
-            <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
-            <div class="trace-detail {recoveredTrace ? 'live' : 'trace-ref'}">
+            {#if recoveredTrace}
+              <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
+            {/if}
+            {#if recoveredTrace || traceHydrating}
+            <div class="trace-detail {recoveredTrace ? 'live' : 'loading'}">
               <div class="trace-detail-top">
-                <span>{traceSourceLabel(recoveredTrace, mission.recovery.run_id)}</span>
+                <span>{traceSourceLabel(recoveredTrace)}</span>
                 <strong>{traceVerdict(recoveredTrace) || runVerdict('recovered')}</strong>
               </div>
               {#if recoveredTrace}
@@ -589,6 +603,7 @@
                 {/if}
               {/if}
             </div>
+            {/if}
           </div>
         {/if}
       </section>
