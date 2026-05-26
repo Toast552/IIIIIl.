@@ -57,7 +57,7 @@ instances are available.
 - Added `src/core/mission_control_replay.zig` to parse and validate replay
   fixtures before serving mission state.
 - Added validated trace references in mission events so the demo can deep-link
-  from Mission Control to `/observability?run_id=...` without requiring
+  from Mission Control to `/nullwatch?run_id=...` without requiring
   NullWatch to be running for the local replay.
 - Added live trace panel hydration from a running managed NullWatch instance,
   keeping the discovery/hydration logic outside the Svelte route component.
@@ -72,7 +72,7 @@ instances are available.
   metadata.
 - Added typed frontend client methods for mission state and actions.
 - Added a sidebar entry and `/mission-control` Svelte page with adaptive
-  polling, retry handling, trace chips, observability deep links, and responsive
+  polling, retry handling, trace chips, NullWatch deep links, and responsive
   mission panels.
 - Added in-screen three-minute story beats and a failed-vs-recovered comparison
   panel so the demo narrative remains visible during judging and PR review.
@@ -94,7 +94,6 @@ instances are available.
 
 ## Files Changed
 
-- `docs/plans/mission-control.md`
 - `src/core/mission_control.zig`
 - `src/api/mission_control.zig`
 - `src/core/mission_control_replay.zig`
@@ -106,7 +105,7 @@ instances are available.
 - `ui/src/lib/api/missionControl.ts`
 - `ui/src/lib/missionControl/traceHydration.ts`
 - `ui/src/lib/components/Sidebar.svelte`
-- `ui/src/routes/observability/+page.svelte`
+- `ui/src/routes/nullwatch/+page.svelte`
 - `ui/src/routes/mission-control/+page.svelte`
 - `tests/test_mission_control_smoke.sh`
 - `scripts/mission_control_demo.sh`

@@ -35,11 +35,11 @@ What changed:
   comparison.
 - Added a one-click `Judge Replay` button that runs reset, launch, failure
   hold, checkpoint recovery, and recovered validation from the UI.
-- Added deep links from mission events to `/observability?run_id=...`.
+- Added deep links from mission events to `/nullwatch?run_id=...`.
 - Hydrates failure/recovery trace panels from a running NullWatch instance via
-  the existing observability proxy when live run detail is available.
+  the existing NullWatch proxy when live run detail is available.
 - Resolves real NullBoiler workflow run ids and checkpoint metadata server-side
-  through the existing orchestration proxy when matching workflow evidence is
+  through the existing NullBoiler proxy when matching workflow evidence is
   available.
 - Stores saved replay artifacts under
   `~/.nullhub/mission-control/replays/` using atomic durable writes.

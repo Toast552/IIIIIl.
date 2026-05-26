@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import { api } from "$lib/api/client";
-  import { orchestrationUiRoutes } from "$lib/orchestration/routes";
+  import { nullboilerUiRoutes } from "$lib/orchestration/routes";
   import GraphViewer from "$lib/components/orchestration/GraphViewer.svelte";
   import StateInspector from "$lib/components/orchestration/StateInspector.svelte";
   import RunEventLog from "$lib/components/orchestration/RunEventLog.svelte";
@@ -994,7 +994,7 @@
               {workflowDeleteConfirm === selectedWorkflowId ? "Confirm Delete" : "Delete"}
             </button>
           </div>
-          <a class="btn subtle" href={orchestrationUiRoutes.workflows({ boilerInstance: name })}>
+          <a class="btn subtle" href={nullboilerUiRoutes.workflows({ boilerInstance: name })}>
             Open Full Page
           </a>
         </section>
@@ -1205,7 +1205,7 @@
                 <button class="btn" onclick={retryRun} disabled={actionLoading || selectedRun.status !== "failed"}>
                   Retry
                 </button>
-                <a class="btn subtle" href={orchestrationUiRoutes.run(runId(selectedRun), { boilerInstance: name })}>
+                <a class="btn subtle" href={nullboilerUiRoutes.run(runId(selectedRun), { boilerInstance: name })}>
                   Open Full Page
                 </a>
               </div>

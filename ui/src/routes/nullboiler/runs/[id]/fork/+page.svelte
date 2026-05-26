@@ -3,7 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
-  import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
   import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
   import CheckpointTimeline from '$lib/components/orchestration/CheckpointTimeline.svelte';
   import StateInspector from '$lib/components/orchestration/StateInspector.svelte';
@@ -69,7 +69,7 @@
       const overrides = JSON.parse(overridesJson);
       const result = await api.forkRun(selectedCp, Object.keys(overrides).length > 0 ? overrides : undefined);
       if (result?.id) {
-        await goto(orchestrationUiRoutes.run(result.id));
+        await goto(nullboilerUiRoutes.run(result.id));
       }
     } catch (e) {
       error = (e as Error).message;
@@ -79,7 +79,7 @@
   }
 
   function runHref(id: string): string {
-    return orchestrationUiRoutes.run(id);
+    return nullboilerUiRoutes.run(id);
   }
 </script>
 

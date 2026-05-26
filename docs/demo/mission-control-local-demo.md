@@ -76,8 +76,8 @@ rerun the command.
 3. Pause at the failure: the test tool fails, errors increment, and recovery is
    blocked until the failure phase.
 4. Click or let the script trigger checkpoint recovery.
-5. Show the recovered run, passing eval verdict, and trace links into Flight
-   Recorder via `/observability?run_id=...`.
+5. Show the recovered run, passing eval verdict, and trace links into NullWatch
+   Flight Recorder via `/nullwatch?run_id=...`.
 6. Export the replay artifact to show the scenario can be reviewed after the
    live demo.
 

@@ -193,8 +193,8 @@
 <div class="flight-recorder">
   <div class="header">
     <div>
-      <h1>Flight Recorder</h1>
-      <p class="subtitle">NullWatch traces, evals, cost, and failure context</p>
+      <h1>NullWatch</h1>
+      <p class="subtitle">Flight Recorder traces, evals, cost, and failure context</p>
     </div>
     <div class="header-actions">
       {#if watchOptions.length > 1}
@@ -251,7 +251,7 @@
   </div>
 
   {#if loading && runs.length === 0}
-    <div class="loading">Loading observability data...</div>
+    <div class="loading">Loading NullWatch data...</div>
   {:else}
     <div class="workspace">
       <section class="runs-panel">

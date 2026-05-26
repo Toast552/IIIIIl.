@@ -9,7 +9,7 @@ export function encodePathSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
-type OrchestrationRouteOptions = {
+type StackRouteOptions = {
   boilerInstance?: string;
   ticketsInstance?: string;
 };
@@ -45,21 +45,25 @@ export function withTicketsInstance(path: string, ticketsInstance?: string): str
   return setQueryParam(path, TICKETS_INSTANCE_QUERY_PARAM, value);
 }
 
-const uiRoot = '/orchestration';
+const nullboilerUiRoot = '/nullboiler';
+const nullticketsUiRoot = '/nulltickets';
 const apiRoot = '/orchestration';
-const workflowsBase = `${uiRoot}/workflows`;
-const runsBase = `${uiRoot}/runs`;
+const workflowsBase = `${nullboilerUiRoot}/workflows`;
+const runsBase = `${nullboilerUiRoot}/runs`;
 const storeBase = `${apiRoot}/store`;
 
-export const orchestrationUiRoutes = {
-  dashboard: (options?: OrchestrationRouteOptions) => withBoilerInstance(uiRoot, options?.boilerInstance),
-  workflows: (options?: OrchestrationRouteOptions) => withBoilerInstance(workflowsBase, options?.boilerInstance),
-  newWorkflow: (options?: OrchestrationRouteOptions) => withBoilerInstance(`${workflowsBase}/new`, options?.boilerInstance),
-  workflow: (id: string, options?: OrchestrationRouteOptions) => withBoilerInstance(`${workflowsBase}/${encodePathSegment(id)}`, options?.boilerInstance),
-  runs: (options?: OrchestrationRouteOptions) => withBoilerInstance(runsBase, options?.boilerInstance),
-  run: (id: string, options?: OrchestrationRouteOptions) => withBoilerInstance(`${runsBase}/${encodePathSegment(id)}`, options?.boilerInstance),
-  runFork: (id: string, options?: OrchestrationRouteOptions) => withBoilerInstance(`${runsBase}/${encodePathSegment(id)}/fork`, options?.boilerInstance),
-  store: (options?: OrchestrationRouteOptions) => withTicketsInstance(`${uiRoot}/store`, options?.ticketsInstance),
+export const nullboilerUiRoutes = {
+  dashboard: (options?: StackRouteOptions) => withBoilerInstance(nullboilerUiRoot, options?.boilerInstance),
+  workflows: (options?: StackRouteOptions) => withBoilerInstance(workflowsBase, options?.boilerInstance),
+  newWorkflow: (options?: StackRouteOptions) => withBoilerInstance(`${workflowsBase}/new`, options?.boilerInstance),
+  workflow: (id: string, options?: StackRouteOptions) => withBoilerInstance(`${workflowsBase}/${encodePathSegment(id)}`, options?.boilerInstance),
+  runs: (options?: StackRouteOptions) => withBoilerInstance(runsBase, options?.boilerInstance),
+  run: (id: string, options?: StackRouteOptions) => withBoilerInstance(`${runsBase}/${encodePathSegment(id)}`, options?.boilerInstance),
+  runFork: (id: string, options?: StackRouteOptions) => withBoilerInstance(`${runsBase}/${encodePathSegment(id)}/fork`, options?.boilerInstance),
+};
+
+export const nullticketsUiRoutes = {
+  store: (options?: StackRouteOptions) => withTicketsInstance(`${nullticketsUiRoot}/store`, options?.ticketsInstance),
 };
 
 export const orchestrationApiPaths = {

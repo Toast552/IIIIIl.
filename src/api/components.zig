@@ -62,7 +62,7 @@ fn buildListJson(allocator: std.mem.Allocator, s: *state_mod.State) ![]const u8 
         // Count managed instances from state
         const instance_count = countInstancesFromState(s, comp.name);
 
-        // standalone = has dot-dir config but not yet imported into nullhub
+        // standalone = dot-dir config exists without a managed NullHub instance
         const has_dot_dir = hasStandaloneInstall(allocator, comp.name);
         const standalone = has_dot_dir and instance_count == 0;
         const installed = has_dot_dir or instance_count > 0;

@@ -131,7 +131,7 @@
 
 <div class="page">
   <div class="header">
-    <h1>Store</h1>
+    <h1>NullTickets</h1>
   </div>
 
   {#if error}

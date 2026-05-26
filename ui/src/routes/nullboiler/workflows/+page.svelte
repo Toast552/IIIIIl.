@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
-  import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
   import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
 
   let workflows = $state<any[]>([]);
@@ -39,7 +39,7 @@
   }
 
   function workflowHref(id: string): string {
-    return orchestrationUiRoutes.workflow(id);
+    return nullboilerUiRoutes.workflow(id);
   }
 </script>
 
@@ -48,7 +48,7 @@
     <h1>Workflows</h1>
     <div class="header-actions">
       <BoilerInstanceSelector onChange={() => { loading = true; error = null; void loadWorkflows(); }} />
-      <a href={orchestrationUiRoutes.newWorkflow()} class="action-btn">+ New Workflow</a>
+      <a href={nullboilerUiRoutes.newWorkflow()} class="action-btn">+ New Workflow</a>
     </div>
   </div>
 
@@ -61,7 +61,7 @@
   {:else if workflows.length === 0}
     <div class="empty-state">
       <p>> No workflows defined yet.</p>
-      <a href={orchestrationUiRoutes.newWorkflow()} class="btn">Create Workflow</a>
+      <a href={nullboilerUiRoutes.newWorkflow()} class="btn">Create Workflow</a>
     </div>
   {:else}
     <div class="workflow-grid">

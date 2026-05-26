@@ -143,6 +143,6 @@ assert(artifactResponse.body?.snapshot?.status === 'completed', 'replay export d
 console.log('completed    recovered mission passed');
 console.log(`failed run:  ${state.failed_run_id}`);
 console.log(`recovered:   ${state.recovered_run_id}`);
-console.log(`trace link:  ${base}/observability?run_id=${encodeURIComponent(state.recovered_run_id)}`);
+console.log(`trace link:  ${base}/nullwatch?run_id=${encodeURIComponent(state.recovered_run_id)}`);
 console.log(`export:      ${base}/api/mission-control/replay`);
 NODE

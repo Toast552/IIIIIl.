@@ -21,8 +21,9 @@ NullTickets, NullWatch).
 - **Multi-instance** -- run multiple instances of the same component side by side
 - **Web UI + CLI** -- browser dashboard for humans, CLI for automation
 - **Managed instance admin API** -- instance-scoped status, config, models, cron, channels, and skills routes for managed NullClaw installs
-- **Orchestration UI** -- workflow editor, poll-based run monitoring, checkpoint forking, encoded workflow/run/store links, and key-value store browser (proxied to NullTickets through NullHub)
-- **Observability cockpit** -- local NullWatch run summaries, span timelines, eval results, token usage, cost, and error context through a NullHub proxy
+- **NullBoiler UI** -- workflow editor, poll-based run monitoring, checkpoint forking, and encoded workflow/run links
+- **NullTickets Store** -- key-value store browser proxied to NullTickets through NullHub
+- **NullWatch Flight Recorder** -- local NullWatch run summaries, span timelines, eval results, token usage, cost, and error context through a NullHub proxy
 - **Mission Control demo** -- local-first agent mission replay with orchestration, role-based agents, failure, checkpoint recovery, and live telemetry in one screen
 
 ## Quick Start
@@ -115,17 +116,17 @@ UI modules. NullHub is a generic engine that interprets manifests.
 **Storage** -- all state lives under `~/.nullhub/` (config, instances, binaries,
 logs, cached manifests).
 
-**Orchestration proxy** -- requests to `/api/orchestration/*` are reverse-proxied
+**NullBoiler and NullTickets proxy** -- requests to `/api/orchestration/*` are reverse-proxied
 to the local orchestration stack. Most routes go to NullBoiler's REST API via
 `NULLBOILER_URL` (e.g. `http://localhost:8080`) and optional `NULLBOILER_TOKEN`.
 `/api/orchestration/store/*` is proxied to NullTickets via `NULLTICKETS_URL` and
 optional `NULLTICKETS_TOKEN`.
 
-**Observability proxy** -- requests to `/api/observability/*` are reverse-proxied
+**NullWatch proxy** -- requests to `/api/observability/*` are reverse-proxied
 to the managed NullWatch instance installed in NullHub. `NULLWATCH_URL` can
 still override the target for an external NullWatch instance, and
 `NULLWATCH_TOKEN` overrides the managed instance token when set. The built-in
-Observability page uses this proxy to display run summaries, spans, evals,
+NullWatch page uses this proxy to display run summaries, spans, evals,
 latency, cost, and failure context without sending data to hosted services.
 
 Local NullWatch setup:
@@ -138,7 +139,7 @@ Local NullWatch setup:
 
 2. In the web UI, open **Install Component**, select **NullWatch**, keep or set
    the API port to `7710`, and finish the wizard. The installer starts the
-   NullWatch instance and the observability proxy discovers it automatically.
+   NullWatch instance and the NullWatch proxy discovers it automatically.
 
 3. Optional demo data can be ingested through the NullHub proxy:
 
@@ -163,13 +164,13 @@ structured conflict errors for invalid actions. The scenario lives in a
 versioned embedded replay fixture at
 `src/core/mission_control/code_red.v1.json`; `zig build test` validates fixture
 schema, references, ordering, required phases, graph links, and telemetry phase
-coverage. Mission timeline trace links deep-link to `/observability?run_id=...`.
+coverage. Mission timeline trace links deep-link to `/nullwatch?run_id=...`.
 When a managed NullWatch instance is running, `/mission-control` hydrates the
 failure and recovery trace panels from live run detail through the observability
 proxy and preserves the selected watch in trace links. When a managed
 NullBoiler instance has matching workflow evidence, the Mission Control API
 includes that instance name with real workflow run links and checkpoint metadata
-resolved through the orchestration proxy.
+resolved through the NullBoiler proxy.
 `GET /api/mission-control/replay` exports the current snapshot, source fixture,
 the side-by-side failed/recovered replay artifact comparison once the recovered
 run completes, and ecosystem mapping metadata as a portable JSON artifact for
@@ -239,15 +240,15 @@ Recovered mission:
 
 ![NullHub Mission Control recovered workflow](docs/screenshots/nullhub-mission-control-recovered.png)
 
-### Observability Screenshots
+### NullWatch Screenshots
 
 Flight Recorder overview:
 
-![NullHub Observability overview](docs/screenshots/nullhub-observability-overview.png)
+![NullHub NullWatch overview](docs/screenshots/nullhub-observability-overview.png)
 
 Failure detail with tool-call error context:
 
-![NullHub Observability failure detail](docs/screenshots/nullhub-observability-failure.png)
+![NullHub NullWatch failure detail](docs/screenshots/nullhub-observability-failure.png)
 
 ## Development
 
@@ -283,7 +284,7 @@ against a real `nullhub` process started in a temporary home directory.
 - Svelte 5 + SvelteKit (static adapter)
 - JSON over HTTP/1.1
 - SSE for instance log streaming
-- Poll-based orchestration run updates over the `/orchestration/runs/{id}/stream` API
+- Poll-based NullBoiler run updates over the `/api/orchestration/runs/{id}/stream` API
 
 ## Project Layout
 
@@ -305,8 +306,9 @@ src/
   supervisor/           # Process spawn, health checks, manager
 ui/src/
   routes/               # SvelteKit pages
-    orchestration/      # Orchestration pages (dashboard, workflows, runs, store)
-    observability/      # NullWatch flight recorder page
+    nullboiler/         # NullBoiler pages (dashboard, workflows, runs)
+    nulltickets/        # NullTickets pages (store)
+    nullwatch/          # NullWatch Flight Recorder page
     mission-control/    # Local agent mission control room demo
   lib/components/       # Reusable Svelte components
     orchestration/      # GraphViewer, StateInspector, RunEventLog, InterruptPanel,

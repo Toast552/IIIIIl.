@@ -46,7 +46,7 @@
     JUDGE_REPLAY_PREROLL_MS,
     nextJudgeReplayTransition,
   } from '$lib/missionControl/judgeReplay.js';
-  import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
 
   type MissionAction = 'launch' | 'reset' | 'recover';
   type JudgeReplayStage = 'idle' | 'resetting' | 'preroll' | 'launching' | 'waiting_failure' | 'holding_failure' | 'recovering' | 'watching';
@@ -364,12 +364,12 @@
     return 'done';
   }
 
-  function observabilityHref(runId: string | null | undefined): string {
+  function nullwatchHref(runId: string | null | undefined): string {
     const params = new URLSearchParams();
     if (runId) params.set('run_id', runId);
     if (traceWatchName) params.set('watch', traceWatchName);
     const query = params.toString();
-    return query ? `/observability?${query}` : '/observability';
+    return query ? `/nullwatch?${query}` : '/nullwatch';
   }
 
   function traceLabel(trace: MissionControlTraceRef): string {
@@ -427,7 +427,7 @@
   }
 
   function workflowRunHref(runId: string): string {
-    return orchestrationUiRoutes.run(runId, { boilerInstance: workflowEvidence?.boiler_instance || undefined });
+    return nullboilerUiRoutes.run(runId, { boilerInstance: workflowEvidence?.boiler_instance || undefined });
   }
 
   function workflowSourceSummary(): string {
@@ -587,7 +587,7 @@
 
     <section class="graph-panel">
       <div class="panel-heading">
-        <h2>Live Orchestration</h2>
+        <h2>Live NullBoiler</h2>
         <span>{mission.progress}%</span>
       </div>
       <div class="graph-row">
@@ -646,7 +646,7 @@
             <em>{tracePanelNote()}</em>
           </div>
           {#if failedTraceAvailable}
-            <a href={observabilityHref(failedRunId)}>Failed run{traceSuffix(failedTrace)}</a>
+            <a href={nullwatchHref(failedRunId)}>Failed run{traceSuffix(failedTrace)}</a>
           {:else if failedRunId && traceHydrating}
             <span class="trace-placeholder">Checking failed run</span>
           {:else if failedTrace?.message}
@@ -657,7 +657,7 @@
             <span class="trace-placeholder">Failed pending</span>
           {/if}
           {#if recoveredTraceAvailable}
-            <a href={observabilityHref(recoveredRunId)}>Recovered run{traceSuffix(recoveredTrace)}</a>
+            <a href={nullwatchHref(recoveredRunId)}>Recovered run{traceSuffix(recoveredTrace)}</a>
           {:else if recoveredRunId && traceHydrating}
             <span class="trace-placeholder">Checking recovered run</span>
           {:else if recoveredTrace?.message}
@@ -709,7 +709,7 @@
               {/if}
             {/if}
             {#if failedTraceAvailable}
-              <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
+              <a href={nullwatchHref(mission.failure.run_id)}>Open failed trace</a>
             {/if}
             {#if failedTrace || traceHydrating}
             <div class="trace-detail {failedTraceAvailable ? 'live' : 'loading'}">
@@ -748,7 +748,7 @@
                 <a href={workflowRunHref(recoveredWorkflowRun.run_id)}>Open recovered workflow</a>
             {/if}
             {#if recoveredTraceAvailable}
-              <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
+              <a href={nullwatchHref(mission.recovery.run_id)}>Open recovered trace</a>
             {/if}
             {#if recoveredTrace || traceHydrating}
             <div class="trace-detail {recoveredTraceAvailable ? 'live' : 'loading'}">
@@ -804,7 +804,7 @@
                 <span>{event.source}</span>
                 <span>{event.level}</span>
                 {#if event.trace}
-                  <a href={observabilityHref(event.trace.run_id)} title={event.trace.operation}>
+                  <a href={nullwatchHref(event.trace.run_id)} title={event.trace.operation}>
                     {event.trace.kind}: {traceLabel(event.trace)}
                   </a>
                 {/if}

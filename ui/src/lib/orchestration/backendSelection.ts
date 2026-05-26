@@ -56,7 +56,7 @@ function getUrlQueryParam(param: string): string {
 function syncCurrentBoilerUrl(value: string) {
   const location = currentLocation();
   const history = currentHistory();
-  if (!location || !history || !location.pathname.startsWith("/orchestration")) return;
+  if (!location || !history || !location.pathname.startsWith("/nullboiler")) return;
 
   const url = new URL(location.href);
   if (value) url.searchParams.set(BOILER_INSTANCE_QUERY_PARAM, value);
@@ -67,7 +67,7 @@ function syncCurrentBoilerUrl(value: string) {
 function syncCurrentTicketsUrl(value: string) {
   const location = currentLocation();
   const history = currentHistory();
-  if (!location || !history || !location.pathname.startsWith("/orchestration/store")) return;
+  if (!location || !history || !location.pathname.startsWith("/nulltickets/store")) return;
 
   const url = new URL(location.href);
   if (value) url.searchParams.set(TICKETS_INSTANCE_QUERY_PARAM, value);

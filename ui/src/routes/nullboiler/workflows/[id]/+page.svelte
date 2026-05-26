@@ -3,7 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
-  import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
   import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
   import GraphViewer from '$lib/components/orchestration/GraphViewer.svelte';
   import WorkflowJsonEditor from '$lib/components/orchestration/WorkflowJsonEditor.svelte';
@@ -93,7 +93,7 @@
     try {
       if (isNew) {
         const result = await api.createWorkflow(parsedWorkflow);
-        await goto(orchestrationUiRoutes.workflow(result.id || parsedWorkflow.id));
+        await goto(nullboilerUiRoutes.workflow(result.id || parsedWorkflow.id));
       } else {
         await api.updateWorkflow(id, parsedWorkflow);
       }
@@ -109,7 +109,7 @@
     try {
       const result = await api.runWorkflow(id, {});
       if (result?.id) {
-        await goto(orchestrationUiRoutes.run(result.id));
+        await goto(nullboilerUiRoutes.run(result.id));
       }
     } catch (e) {
       error = (e as Error).message;
@@ -120,7 +120,7 @@
 <div class="editor-page">
   <div class="toolbar">
     <div class="toolbar-left">
-      <a href={orchestrationUiRoutes.workflows()} class="back-link">Workflows</a>
+      <a href={nullboilerUiRoutes.workflows()} class="back-link">Workflows</a>
       <span class="sep">/</span>
       <span class="page-title">{isNew ? 'New Workflow' : (parsedWorkflow?.name || id)}</span>
     </div>

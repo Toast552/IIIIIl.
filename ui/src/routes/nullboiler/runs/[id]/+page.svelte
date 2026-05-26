@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { api } from '$lib/api/client';
-  import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
   import GraphViewer from '$lib/components/orchestration/GraphViewer.svelte';
   import StateInspector from '$lib/components/orchestration/StateInspector.svelte';
   import RunEventLog from '$lib/components/orchestration/RunEventLog.svelte';
@@ -119,14 +119,14 @@
   };
 
   function runForkHref(runId: string): string {
-    return orchestrationUiRoutes.runFork(runId);
+    return nullboilerUiRoutes.runFork(runId);
   }
 </script>
 
 <div class="run-detail">
   <div class="toolbar">
     <div class="toolbar-left">
-      <a href={orchestrationUiRoutes.runs()} class="back-link">Runs</a>
+      <a href={nullboilerUiRoutes.runs()} class="back-link">Runs</a>
       <span class="sep">/</span>
       <span class="run-id">{(id || '').slice(0, 8)}</span>
       {#if run}

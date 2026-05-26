@@ -1,38 +1,80 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
-  import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
   import BoilerInstanceSelector from '$lib/components/orchestration/BoilerInstanceSelector.svelte';
 
   let runs = $state<any[]>([]);
+  let workflows = $state<any[]>([]);
   let loading = $state(true);
+  let loadingMore = $state(false);
   let error = $state<string | null>(null);
-  let stats = $state({ active: 0, completed: 0, failed: 0, interrupted: 0 });
 
-  async function loadRuns() {
+  let filterStatus = $state('');
+  let filterWorkflow = $state('');
+  let runLimit = $state('50');
+  let hasMore = $state(false);
+  let nextOffset = $state<number | null>(null);
+  let runsQueryKey = $state('');
+
+  const statuses = ['', 'running', 'pending', 'completed', 'failed', 'interrupted', 'cancelled'];
+
+  function boundedInt(raw: string, fallback: number, min: number, max: number): number {
+    const value = Number.parseInt(raw || String(fallback), 10);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function queryKey(): string {
+    return JSON.stringify({
+      status: filterStatus || '',
+      workflow: filterWorkflow || '',
+      limit: boundedInt(runLimit, 50, 1, 250),
+    });
+  }
+
+  async function loadData(append = false) {
+    if (append) loadingMore = true;
+    else loading = true;
     try {
-      runs = await api.listRuns() || [];
-      stats = {
-        active: runs.filter((r: any) => r.status === 'running' || r.status === 'pending').length,
-        completed: runs.filter((r: any) => r.status === 'completed').length,
-        failed: runs.filter((r: any) => r.status === 'failed').length,
-        interrupted: runs.filter((r: any) => r.status === 'interrupted').length,
-      };
+      const key = queryKey();
+      const canAppend = append && runsQueryKey === key && nextOffset !== null;
+      const [page, w] = await Promise.all([
+        api.listRunsPage({
+          status: filterStatus || undefined,
+          workflow_id: filterWorkflow || undefined,
+          limit: boundedInt(runLimit, 50, 1, 250),
+          offset: canAppend ? nextOffset || 0 : 0,
+        }),
+        api.listWorkflows(),
+      ]);
+      const nextItems = page?.items || [];
+      if (canAppend) {
+        const seen = new Set(runs.map((run: any) => run.id));
+        runs = [...runs, ...nextItems.filter((run: any) => !seen.has(run.id))];
+      } else {
+        runs = nextItems;
+      }
+      runsQueryKey = key;
+      hasMore = Boolean(page?.hasMore && typeof page?.nextOffset === 'number');
+      nextOffset = hasMore ? page.nextOffset || 0 : null;
+      workflows = w || [];
       error = null;
     } catch (e) {
       error = (e as Error).message;
     } finally {
-      loading = false;
+      if (append) loadingMore = false;
+      else loading = false;
     }
   }
 
-  let interval: ReturnType<typeof setInterval>;
-  onMount(() => {
-    void loadRuns();
-    interval = setInterval(loadRuns, 5000);
+  $effect(() => {
+    // Re-load when filters change (also runs on initial mount)
+    filterStatus;
+    filterWorkflow;
+    runLimit;
+    void loadData();
   });
-  onDestroy(() => clearInterval(interval));
 
   const statusColors: Record<string, string> = {
     running: 'var(--accent)',
@@ -59,52 +101,52 @@
   }
 
   function runHref(id: string): string {
-    return orchestrationUiRoutes.run(id);
+    return nullboilerUiRoutes.run(id);
   }
 </script>
 
-<div class="dashboard">
+<div class="page">
   <div class="header">
-    <h1>Orchestration</h1>
-    <div class="header-actions">
-      <BoilerInstanceSelector onChange={() => { loading = true; error = null; void loadRuns(); }} />
-      <a href={orchestrationUiRoutes.workflows()} class="action-btn">New Run</a>
-    </div>
+    <h1>Runs</h1>
+    <BoilerInstanceSelector onChange={() => { loading = true; error = null; void loadData(); }} />
   </div>
 
   {#if error}
     <div class="error-banner">ERR: {error}</div>
   {/if}
 
-  <div class="cards">
-    <div class="card">
-      <div class="card-label">Active</div>
-      <div class="card-value" style="color: var(--accent); text-shadow: 0 0 8px var(--accent);">{stats.active}</div>
+  <div class="filter-bar">
+    <div class="filter-group">
+      <label class="filter-label" for="status-filter">Status</label>
+      <select id="status-filter" class="filter-select" bind:value={filterStatus}>
+        {#each statuses as s}
+          <option value={s}>{s || 'All'}</option>
+        {/each}
+      </select>
     </div>
-    <div class="card">
-      <div class="card-label">Completed</div>
-      <div class="card-value" style="color: var(--success); text-shadow: 0 0 8px var(--success);">{stats.completed}</div>
+    <div class="filter-group">
+      <label class="filter-label" for="workflow-filter">Workflow</label>
+      <select id="workflow-filter" class="filter-select" bind:value={filterWorkflow}>
+        <option value="">All</option>
+        {#each workflows as wf}
+          <option value={wf.id}>{wf.name || wf.id}</option>
+        {/each}
+      </select>
     </div>
-    <div class="card">
-      <div class="card-label">Failed</div>
-      <div class="card-value" style="color: var(--error); text-shadow: 0 0 8px var(--error);">{stats.failed}</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Interrupted</div>
-      <div class="card-value" style="color: var(--warning); text-shadow: 0 0 8px var(--warning);">{stats.interrupted}</div>
+    <div class="filter-group">
+      <label class="filter-label" for="limit-filter">Limit</label>
+      <input id="limit-filter" class="filter-input" bind:value={runLimit} inputmode="numeric" />
     </div>
   </div>
 
-  {#if loading && runs.length === 0}
+  {#if loading}
     <div class="loading">Loading runs...</div>
   {:else if runs.length === 0}
     <div class="empty-state">
-      <p>> No orchestration runs yet.</p>
-      <a href={orchestrationUiRoutes.workflows()} class="btn">Create a Workflow</a>
+      <p>> No runs match the current filter.</p>
     </div>
   {:else}
     <div class="table-section">
-      <h2>Recent Runs</h2>
       <div class="table-wrap">
         <table>
           <thead>
@@ -117,7 +159,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each runs.slice(0, 20) as run}
+            {#each runs as run}
               <tr onclick={() => goto(runHref(run.id))} class="clickable">
                 <td class="mono">{(run.id || '').slice(0, 8)}</td>
                 <td>{run.workflow_name || run.workflow_id || '-'}</td>
@@ -134,9 +176,11 @@
           </tbody>
         </table>
       </div>
-      {#if runs.length > 20}
-        <div class="more-link">
-          <a href={orchestrationUiRoutes.runs()}>View all {runs.length} runs</a>
+      {#if hasMore}
+        <div class="table-actions">
+          <button class="load-more" onclick={() => loadData(true)} disabled={loadingMore}>
+            {loadingMore ? 'Loading...' : 'Load More'}
+          </button>
         </div>
       {/if}
     </div>
@@ -144,7 +188,7 @@
 </div>
 
 <style>
-  .dashboard {
+  .page {
     padding: 2rem;
     max-width: 1400px;
     margin: 0 auto;
@@ -157,11 +201,6 @@
     padding-bottom: 1rem;
     border-bottom: 1px solid var(--border);
   }
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
   h1 {
     font-size: 1.75rem;
     font-weight: 700;
@@ -169,63 +208,83 @@
     text-transform: uppercase;
     letter-spacing: 2px;
   }
-  h2 {
-    font-size: 1rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 1rem;
-    color: var(--fg-dim);
-  }
-  .action-btn {
-    padding: 0.5rem 1rem;
-    background: var(--bg-surface);
-    color: var(--accent);
-    border: 1px solid var(--accent-dim);
-    border-radius: var(--radius);
-    font-size: 0.875rem;
-    font-weight: bold;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    transition: all 0.2s ease;
-    text-shadow: var(--text-glow);
-  }
-  .action-btn:hover {
-    text-decoration: none;
-    background: var(--bg-hover);
-    border-color: var(--accent);
-    box-shadow: 0 0 10px var(--border-glow);
-    text-shadow: 0 0 8px var(--accent);
-  }
-  .cards {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
+  .filter-bar {
+    display: flex;
     gap: 1rem;
-    margin-bottom: 2rem;
-  }
-  .card {
+    margin-bottom: 1.5rem;
+    padding: 0.75rem 1rem;
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 4px;
-    padding: 1.25rem;
   }
-  .card-label {
-    font-size: 0.75rem;
+  .filter-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .filter-label {
+    font-size: 0.6875rem;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 1px;
     color: var(--fg-dim);
-    margin-bottom: 0.5rem;
   }
-  .card-value {
-    font-size: 2rem;
-    font-weight: 700;
+  .filter-select {
+    padding: 0.375rem 0.625rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    font-size: 0.8125rem;
     font-family: var(--font-mono);
+    outline: none;
+    cursor: pointer;
+  }
+  .filter-select:focus {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 4px var(--border-glow);
+  }
+  .filter-input {
+    width: 6rem;
+    padding: 0.375rem 0.625rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    font-size: 0.8125rem;
+    font-family: var(--font-mono);
+    outline: none;
+  }
+  .filter-input:focus {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 4px var(--border-glow);
   }
   .table-section {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 4px;
-    padding: 1.5rem;
+    padding: 1rem;
+  }
+  .table-actions {
+    display: flex;
+    justify-content: center;
+    padding-top: 1rem;
+  }
+  .load-more {
+    padding: 0.5rem 1rem;
+    background: var(--bg-surface);
+    color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    border-radius: 2px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    cursor: pointer;
+  }
+  .load-more:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .table-wrap {
     overflow-x: auto;
@@ -300,7 +359,6 @@
     text-align: center;
     padding: 4rem 2rem;
     color: var(--fg-dim);
-    font-size: 1rem;
   }
   .empty-state {
     text-align: center;
@@ -311,45 +369,6 @@
     border-radius: 4px;
   }
   .empty-state p {
-    margin-bottom: 1.5rem;
-    font-size: 1.125rem;
     font-family: var(--font-mono);
-  }
-  .empty-state .btn {
-    display: inline-block;
-    padding: 0.75rem 1.5rem;
-    background: var(--bg-surface);
-    color: var(--accent);
-    border: 1px solid var(--accent-dim);
-    border-radius: var(--radius);
-    font-size: 0.875rem;
-    font-weight: bold;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    transition: all 0.2s ease;
-    text-shadow: var(--text-glow);
-  }
-  .empty-state .btn:hover {
-    text-decoration: none;
-    background: var(--bg-hover);
-    border-color: var(--accent);
-    box-shadow: 0 0 10px var(--border-glow);
-    text-shadow: 0 0 8px var(--accent);
-  }
-  .more-link {
-    text-align: center;
-    padding: 0.75rem;
-  }
-  .more-link a {
-    color: var(--accent);
-    font-size: 0.8125rem;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-  }
-  .more-link a:hover {
-    text-shadow: var(--text-glow);
-  }
-  @media (max-width: 900px) {
-    .cards { grid-template-columns: repeat(2, 1fr); }
   }
 </style>

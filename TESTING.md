@@ -8,7 +8,7 @@ The aim is not a single large testing rewrite. The aim is to improve confidence 
 
 - make the existing backend test suite a reliable daily gate
 - expand coverage into the highest-risk backend areas
-- add the missing frontend unit-test layer
+- expand frontend unit coverage beyond the current targeted UI helper tests
 - replace shell-only smoke reliance with structured integration coverage
 - keep browser E2E small and focused
 - adopt NullClaw-style expectations: every behavior change gets tests, every bug fix gets a regression test
@@ -20,7 +20,8 @@ As of the current `main` branch:
 - NullHub already has substantial Zig unit-test coverage in parts of the backend.
 - Coverage is concentrated heavily in API and routing code.
 - The project has a shell smoke script at `tests/test_e2e.sh`.
-- The project does not yet have a committed frontend unit-test harness.
+- The project has a targeted Mission Control UI helper test; broader component
+  and route-level frontend coverage is still light.
 - CI currently runs backend tests, the shell smoke test on Linux, and ReleaseSmall binary builds.
 
 This means the main gap is not "no tests". The gap is uneven coverage and missing layers.
@@ -51,7 +52,7 @@ The snapshot below is based on the current `src/` tree and the committed test di
 | Service install/uninstall/status | Light | `src/service.zig` | add stronger platform-specific generation and failure-path tests |
 | Orchestration proxy | Light | `src/api/orchestration.zig` | add upstream error mapping, token/header forwarding, and store-vs-boiler routing tests |
 | Discovery, mDNS, and compat layers | Light | `src/discovery.zig`, `src/mdns.zig`, `src/compat/*` | add degraded-mode and missing-tool fallback coverage |
-| Frontend UI logic | Missing | no committed UI test harness in `ui/` | add Vitest and Testing Library first |
+| Frontend UI logic | Light | `ui/src/lib/missionControl/judgeReplay.test.mjs` covers the judge replay helper | add broader component and route-level coverage |
 | Structured backend integration tests | Light | shell smoke only in `tests/test_e2e.sh` | add a real HTTP/integration harness with fixtures |
 | Browser end-to-end | Missing | no Playwright or equivalent suite | add a very small critical-flow suite after UI unit tests land |
 
@@ -275,15 +276,15 @@ Dependencies:
 
 - Phase 4 strongly recommended
 
-### Phase 7: Frontend Unit-Test Harness
+### Phase 7: Frontend Unit Coverage
 
 Purpose:
 
-- add the missing UI logic test layer
+- expand the UI logic test layer
 
 Suggested PRs:
 
-- `test(ui): add Vitest and Testing Library harness`
+- `test(ui): add component-level Svelte test coverage`
 - `test(ui): cover API client and config-form helpers`
 - `test(ui): cover orchestration helpers and key components`
 
@@ -358,7 +359,7 @@ zig build test -Dembed-ui=false -Dbuild-ui=false --summary all
 bash tests/test_e2e.sh
 ```
 
-Future UI test changes after the harness exists:
+Frontend logic changes:
 
 ```bash
 npm --prefix ui test -- --run

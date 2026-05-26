@@ -3,7 +3,7 @@
     MissionControlReplayArtifactPanel,
     MissionControlReplayComparison,
   } from '$lib/api/missionControl';
-  import { orchestrationUiRoutes } from '$lib/orchestration/routes';
+  import { nullboilerUiRoutes } from '$lib/orchestration/routes';
   import {
     formatTokens,
     signedMetric,
@@ -20,16 +20,16 @@
     boilerInstance?: string | null;
   } = $props();
 
-  function observabilityHref(runId: string | null | undefined): string {
+  function nullwatchHref(runId: string | null | undefined): string {
     const params = new URLSearchParams();
     if (runId) params.set('run_id', runId);
     if (traceWatchName) params.set('watch', traceWatchName);
     const query = params.toString();
-    return query ? `/observability?${query}` : '/observability';
+    return query ? `/nullwatch?${query}` : '/nullwatch';
   }
 
   function workflowRunHref(runId: string): string {
-    return orchestrationUiRoutes.run(runId, { boilerInstance: boilerInstance || undefined });
+    return nullboilerUiRoutes.run(runId, { boilerInstance: boilerInstance || undefined });
   }
 
   function artifactWorkflowLabel(artifact: MissionControlReplayArtifactPanel): string {
@@ -68,7 +68,7 @@
       <code>{replayComparison.failed.trace_id || '-'}</code>
       <p class="trace-evidence">Workflow {artifactWorkflowLabel(replayComparison.failed)}</p>
       <p class="trace-evidence">Checkpoint {artifactAnchorLabel(replayComparison.failed)}</p>
-      <a href={observabilityHref(replayComparison.failed.run_id)}>Open failed trace</a>
+      <a href={nullwatchHref(replayComparison.failed.run_id)}>Open failed trace</a>
       {#if replayComparison.failed.workflow_run_id}
         <a href={workflowRunHref(replayComparison.failed.workflow_run_id)}>Open failed workflow</a>
       {/if}
@@ -87,7 +87,7 @@
       <code>{replayComparison.recovered.trace_id || '-'}</code>
       <p class="trace-evidence">Workflow {artifactWorkflowLabel(replayComparison.recovered)}</p>
       <p class="trace-evidence">Forked from {artifactAnchorLabel(replayComparison.recovered)}</p>
-      <a href={observabilityHref(replayComparison.recovered.run_id)}>Open recovered trace</a>
+      <a href={nullwatchHref(replayComparison.recovered.run_id)}>Open recovered trace</a>
       {#if replayComparison.recovered.workflow_run_id}
         <a href={workflowRunHref(replayComparison.recovered.workflow_run_id)}>Open recovered workflow</a>
       {/if}
