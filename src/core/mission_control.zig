@@ -112,6 +112,41 @@ pub const RecoveryPanel = struct {
     status: []const u8,
 };
 
+pub const ReplayArtifactPanel = struct {
+    artifact_kind: []const u8,
+    artifact_role: []const u8,
+    run_id: []const u8,
+    workflow_run_id: ?[]const u8,
+    workflow_status: ?[]const u8,
+    phase: []const u8,
+    status: []const u8,
+    headline: []const u8,
+    verdict: []const u8,
+    trace_id: ?[]const u8,
+    checkpoint_id: ?[]const u8,
+    checkpoint_step: ?[]const u8,
+    forked_from: ?[]const u8,
+    human_instruction: ?[]const u8,
+    failure_message: ?[]const u8,
+    telemetry: MissionTelemetry,
+};
+
+pub const ReplayArtifactDelta = struct {
+    verdict_changed: bool,
+    checkpoint_reused: bool,
+    spans_delta: i64,
+    evals_delta: i64,
+    errors_delta: i64,
+    tokens_delta: i64,
+    cost_delta_usd: f64,
+};
+
+pub const ReplayArtifactComparison = struct {
+    failed: ReplayArtifactPanel,
+    recovered: ReplayArtifactPanel,
+    delta: ReplayArtifactDelta,
+};
+
 pub const MissionSnapshot = struct {
     schema_version: u8,
     mode: []const u8,
@@ -134,6 +169,7 @@ pub const MissionSnapshot = struct {
     events: []const MissionEvent,
     telemetry: MissionTelemetry,
     workflow_evidence: WorkflowEvidence,
+    replay_comparison: ?ReplayArtifactComparison,
     failure: ?FailurePanel,
     recovery: ?RecoveryPanel,
 };
@@ -281,6 +317,66 @@ pub fn workflowEvidenceUnavailable(reason: []const u8) WorkflowEvidence {
     };
 }
 
+/// Returns an allocator-owned copy of workflow evidence for request/serialization lifetimes.
+pub fn cloneWorkflowEvidence(allocator: std.mem.Allocator, evidence: WorkflowEvidence) !WorkflowEvidence {
+    return .{
+        .status = try allocator.dupe(u8, evidence.status),
+        .source = try allocator.dupe(u8, evidence.source),
+        .boiler_instance = try cloneOptionalString(allocator, evidence.boiler_instance),
+        .failed_run = if (evidence.failed_run) |run| try cloneWorkflowEvidenceRun(allocator, run) else null,
+        .recovered_run = if (evidence.recovered_run) |run| try cloneWorkflowEvidenceRun(allocator, run) else null,
+        .checkpoint = if (evidence.checkpoint) |checkpoint| try cloneWorkflowEvidenceCheckpoint(allocator, checkpoint) else null,
+        .scanned_run_count = evidence.scanned_run_count,
+        .reason = try cloneOptionalString(allocator, evidence.reason),
+    };
+}
+
+pub fn cloneJsonValue(allocator: std.mem.Allocator, value: std.json.Value) !std.json.Value {
+    const rendered = try std.json.Stringify.valueAlloc(allocator, value, .{});
+    defer allocator.free(rendered);
+    return try std.json.parseFromSliceLeaky(std.json.Value, allocator, rendered, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+}
+
+fn cloneWorkflowEvidenceRun(allocator: std.mem.Allocator, run: WorkflowEvidenceRun) !WorkflowEvidenceRun {
+    return .{
+        .run_id = try allocator.dupe(u8, run.run_id),
+        .status = try allocator.dupe(u8, run.status),
+        .created_at_ms = run.created_at_ms,
+        .updated_at_ms = run.updated_at_ms,
+        .checkpoint_count = run.checkpoint_count,
+    };
+}
+
+fn cloneWorkflowEvidenceCheckpoint(allocator: std.mem.Allocator, checkpoint: WorkflowEvidenceCheckpoint) !WorkflowEvidenceCheckpoint {
+    return .{
+        .id = try allocator.dupe(u8, checkpoint.id),
+        .run_id = try allocator.dupe(u8, checkpoint.run_id),
+        .step_id = try allocator.dupe(u8, checkpoint.step_id),
+        .parent_id = try cloneOptionalString(allocator, checkpoint.parent_id),
+        .version = checkpoint.version,
+        .created_at_ms = checkpoint.created_at_ms,
+        .completed_nodes = try cloneStringSlice(allocator, checkpoint.completed_nodes),
+        .metadata = if (checkpoint.metadata) |metadata| try cloneJsonValue(allocator, metadata) else null,
+    };
+}
+
+fn cloneOptionalString(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
+    if (value) |text| return try allocator.dupe(u8, text);
+    return null;
+}
+
+fn cloneStringSlice(allocator: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
+    if (values.len == 0) return &.{};
+    const out = try allocator.alloc([]const u8, values.len);
+    for (values, 0..) |value, i| {
+        out[i] = try allocator.dupe(u8, value);
+    }
+    return out;
+}
+
 pub fn buildSnapshotViewWithEvidence(allocator: std.mem.Allocator, runtime: RuntimeState, now_ms: i64, workflow_evidence: WorkflowEvidence) !SnapshotView {
     const parsed = try parseReplay(allocator);
     return buildSnapshotViewFromParsed(allocator, parsed, runtime, now_ms, workflow_evidence);
@@ -417,6 +513,7 @@ fn buildSnapshot(
 ) MissionSnapshot {
     const failed_visible = isAtOrAfter(fixture, phase, fixture.failure.visible_from_phase);
     const recovered_visible = runtime.recovered;
+    const recovered_artifact_visible = recovered_visible and std.mem.eql(u8, phase, "completed");
     const phase_def = replay.phaseById(fixture, phase).?;
 
     return .{
@@ -448,6 +545,7 @@ fn buildSnapshot(
         .events = events,
         .telemetry = telemetryForPhase(fixture, phase),
         .workflow_evidence = workflow_evidence,
+        .replay_comparison = if (failed_visible and recovered_artifact_visible) buildReplayArtifactComparison(fixture, workflow_evidence) else null,
         .failure = if (failed_visible) FailurePanel{
             .run_id = fixture.failure.run_id,
             .checkpoint_id = fixture.failure.checkpoint_id,
@@ -462,6 +560,68 @@ fn buildSnapshot(
             .status = if (std.mem.eql(u8, phase, "completed")) "passed" else "replaying",
         } else null,
     };
+}
+
+fn buildReplayArtifactComparison(fixture: replay.ReplayFixture, workflow_evidence: WorkflowEvidence) ReplayArtifactComparison {
+    const failed = replayArtifactPanel(fixture, workflow_evidence, "failed");
+    const recovered = replayArtifactPanel(fixture, workflow_evidence, "recovered");
+    return .{
+        .failed = failed,
+        .recovered = recovered,
+        .delta = .{
+            .verdict_changed = !std.mem.eql(u8, failed.verdict, recovered.verdict),
+            .checkpoint_reused = std.mem.eql(u8, fixture.failure.checkpoint_id, fixture.recovery.forked_from),
+            .spans_delta = signedDelta(recovered.telemetry.spans, failed.telemetry.spans),
+            .evals_delta = signedDelta(recovered.telemetry.evals, failed.telemetry.evals),
+            .errors_delta = signedDelta(recovered.telemetry.errors, failed.telemetry.errors),
+            .tokens_delta = signedDelta(recovered.telemetry.total_tokens, failed.telemetry.total_tokens),
+            .cost_delta_usd = recovered.telemetry.total_cost_usd - failed.telemetry.total_cost_usd,
+        },
+    };
+}
+
+fn replayArtifactPanel(fixture: replay.ReplayFixture, workflow_evidence: WorkflowEvidence, role: []const u8) ReplayArtifactPanel {
+    const is_failed = std.mem.eql(u8, role, "failed");
+    const run_id = if (is_failed) fixture.failure.run_id else fixture.recovery.run_id;
+    const phase = if (is_failed) "failed" else "completed";
+    const phase_def = replay.phaseById(fixture, phase).?;
+    const telemetry = telemetryForPhase(fixture, phase);
+    const workflow_run = if (is_failed) workflow_evidence.failed_run else workflow_evidence.recovered_run;
+    const checkpoint = workflow_evidence.checkpoint;
+
+    return .{
+        .artifact_kind = "nullhub.mission_control.run_replay",
+        .artifact_role = role,
+        .run_id = run_id,
+        .workflow_run_id = if (workflow_run) |run| run.run_id else null,
+        .workflow_status = if (workflow_run) |run| run.status else null,
+        .phase = phase,
+        .status = phase_def.status,
+        .headline = phase_def.headline,
+        .verdict = telemetry.verdict,
+        .trace_id = traceIdForRun(fixture, run_id),
+        .checkpoint_id = if (is_failed) (if (checkpoint) |value| value.id else fixture.failure.checkpoint_id) else null,
+        .checkpoint_step = if (is_failed) (if (checkpoint) |value| value.step_id else fixture.failure.failed_step) else null,
+        .forked_from = if (is_failed) null else fixture.recovery.forked_from,
+        .human_instruction = if (is_failed) null else fixture.recovery.human_instruction,
+        .failure_message = if (is_failed) fixture.failure.error_message else null,
+        .telemetry = telemetry,
+    };
+}
+
+fn traceIdForRun(fixture: replay.ReplayFixture, run_id: []const u8) ?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (fixture.events) |event| {
+        const trace = event.trace orelse continue;
+        const trace_run_id = trace.run_id orelse continue;
+        if (!std.mem.eql(u8, trace_run_id, run_id)) continue;
+        if (trace.trace_id) |trace_id| found = trace_id;
+    }
+    return found;
+}
+
+fn signedDelta(after: usize, before: usize) i64 {
+    return @as(i64, @intCast(after)) - @as(i64, @intCast(before));
 }
 
 fn elapsedSince(start_ms: i64, now_ms: i64) i64 {
@@ -686,6 +846,9 @@ test "buildSnapshotView exposes failed mission and recover control" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\": \"intervention_required\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"phase\": \"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"can_recover\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"replay_comparison\": null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_role\": \"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_role\": \"recovered\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trace_id\": \"trace-demo-code-red-primary\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"eval_key\": \"tool_success\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "zig build test exited with status 1") != null);
@@ -704,6 +867,24 @@ test "buildSnapshotView exposes recovered completed mission" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"phase\": \"completed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"recovered_run_id\": \"run-demo-recovered-fork\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"verdict\": \"pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_role\": \"recovered\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"tokens_delta\": 1520") != null);
+}
+
+test "buildSnapshotView keeps recovered comparison hidden until completion" {
+    const json = try snapshotJsonForTest(std.testing.allocator, .{
+        .launched = true,
+        .started_at_ms = 1_000,
+        .recovered = true,
+        .recovery_started_at_ms = 11_000,
+    }, 12_000);
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\": \"running\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"phase\": \"forking\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"recovered_run_id\": \"run-demo-recovered-fork\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"replay_comparison\": null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_role\": \"recovered\"") == null);
 }
 
 test "buildReplayArtifactView exports fixture snapshot and ecosystem mapping" {
@@ -718,6 +899,9 @@ test "buildReplayArtifactView exports fixture snapshot and ecosystem mapping" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_kind\": \"nullhub.mission_control.replay\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"replay_fixture_path\": \"src/core/mission_control/code_red.v1.json\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"snapshot\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"replay_comparison\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"artifact_kind\": \"nullhub.mission_control.run_replay\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"checkpoint_reused\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"replay_fixture\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"workflow_evidence\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"scanned_run_count\": 2") != null);

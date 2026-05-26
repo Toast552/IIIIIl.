@@ -19,11 +19,68 @@ pub const ForwardOptions = struct {
     content_type: []const u8 = "application/json",
     accept: ?[]const u8 = null,
     unreachable_body: []const u8 = "{\"error\":\"upstream unreachable\"}",
+    max_response_bytes: ?usize = null,
 };
 
-const LocalBaseUrl = struct {
-    host: []const u8,
-    port: u16,
+const LimitedResponseBody = struct {
+    body: std.Io.Writer.Allocating,
+    writer: std.Io.Writer,
+    limit: usize,
+    written: usize = 0,
+    too_large: bool = false,
+
+    fn init(allocator: Allocator, max_response_bytes: ?usize) LimitedResponseBody {
+        return .{
+            .body = .init(allocator),
+            .writer = .{
+                .vtable = &vtable,
+                .buffer = &.{},
+            },
+            .limit = max_response_bytes orelse std.math.maxInt(usize),
+        };
+    }
+
+    fn deinit(self: *LimitedResponseBody) void {
+        self.body.deinit();
+    }
+
+    fn toOwnedSlice(self: *LimitedResponseBody) Allocator.Error![]u8 {
+        return try self.body.toOwnedSlice();
+    }
+
+    const vtable: std.Io.Writer.VTable = .{
+        .drain = drain,
+        .flush = flush,
+    };
+
+    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *LimitedResponseBody = @fieldParentPtr("writer", writer);
+        if (data.len == 0) return 0;
+        const total = std.Io.Writer.countSplat(data, splat);
+        const next_written = std.math.add(usize, self.written, total) catch {
+            self.too_large = true;
+            return error.WriteFailed;
+        };
+        if (next_written > self.limit) {
+            self.too_large = true;
+            return error.WriteFailed;
+        }
+
+        for (data[0 .. data.len - 1]) |bytes| {
+            self.body.writer.writeAll(bytes) catch return error.WriteFailed;
+        }
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| {
+            self.body.writer.writeAll(pattern) catch return error.WriteFailed;
+        }
+        self.written = next_written;
+        return total;
+    }
+
+    fn flush(writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const self: *LimitedResponseBody = @fieldParentPtr("writer", writer);
+        try self.body.writer.flush();
+    }
 };
 
 pub fn isPathInNamespace(target: []const u8, prefix: []const u8) bool {
@@ -64,7 +121,7 @@ pub fn forward(allocator: Allocator, opts: ForwardOptions) Response {
     var client: std.http.Client = .{ .allocator = allocator, .io = std_compat.io() };
     defer client.deinit();
 
-    var response_body: std.Io.Writer.Allocating = .init(allocator);
+    var response_body = LimitedResponseBody.init(allocator, opts.max_response_bytes);
     defer response_body.deinit();
 
     const result = client.fetch(.{
@@ -73,8 +130,12 @@ pub fn forward(allocator: Allocator, opts: ForwardOptions) Response {
         .payload = if (opts.body.len > 0) opts.body else null,
         .response_writer = &response_body.writer,
         .extra_headers = extra_headers,
-    }) catch {
-        return .{ .status = "502 Bad Gateway", .content_type = "application/json", .body = opts.unreachable_body };
+    }) catch |err| switch (err) {
+        error.WriteFailed => if (response_body.too_large)
+            return .{ .status = "502 Bad Gateway", .content_type = "application/json", .body = "{\"error\":\"upstream response too large\"}" }
+        else
+            return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" },
+        else => return .{ .status = "502 Bad Gateway", .content_type = "application/json", .body = opts.unreachable_body },
     };
 
     const resp_body = response_body.toOwnedSlice() catch
@@ -88,131 +149,97 @@ pub fn forward(allocator: Allocator, opts: ForwardOptions) Response {
 }
 
 pub fn forwardStream(allocator: Allocator, opts: ForwardOptions, downstream: std_compat.net.Stream, cors_headers: []const u8) !void {
-    _ = parseMethod(opts.method) orelse {
+    const http_method = parseMethod(opts.method) orelse {
         try writeDirectResponse(downstream, "405 Method Not Allowed", "application/json", "{\"error\":\"method not allowed\"}", cors_headers);
         return;
     };
-    const base = parseLocalHttpBaseUrl(opts.base_url) orelse {
+    const url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ opts.base_url, opts.path });
+    defer allocator.free(url);
+    const uri = std.Uri.parse(url) catch {
         try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", opts.unreachable_body, cors_headers);
         return;
     };
 
-    const upstream = std_compat.net.tcpConnectToHost(allocator, base.host, base.port) catch {
-        try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", opts.unreachable_body, cors_headers);
-        return;
-    };
-    defer upstream.close();
-
-    var auth_line: ?[]u8 = null;
-    defer if (auth_line) |line| allocator.free(line);
-    if (opts.bearer_token) |token| {
-        auth_line = try std.fmt.allocPrint(allocator, "Authorization: Bearer {s}\r\n", .{token});
+    var auth_header: ?[]const u8 = null;
+    defer if (auth_header) |value| allocator.free(value);
+    var header_buf: [3]std.http.Header = undefined;
+    var header_count: usize = 0;
+    if (opts.body.len > 0 and opts.content_type.len > 0) {
+        header_buf[header_count] = .{ .name = "Content-Type", .value = opts.content_type };
+        header_count += 1;
     }
-
-    var accept_line: ?[]u8 = null;
-    defer if (accept_line) |line| allocator.free(line);
     if (opts.accept) |accept| {
-        accept_line = try std.fmt.allocPrint(allocator, "Accept: {s}\r\n", .{accept});
+        header_buf[header_count] = .{ .name = "Accept", .value = accept };
+        header_count += 1;
     }
+    const extra_headers: []const std.http.Header = if (opts.bearer_token) |token| blk: {
+        auth_header = try std.fmt.allocPrint(allocator, "Bearer {s}", .{token});
+        header_buf[header_count] = .{ .name = "Authorization", .value = auth_header.? };
+        header_count += 1;
+        break :blk header_buf[0..header_count];
+    } else header_buf[0..header_count];
 
-    const content_type_line = if (opts.body.len > 0 and opts.content_type.len > 0)
-        try std.fmt.allocPrint(allocator, "Content-Type: {s}\r\n", .{opts.content_type})
-    else
-        try allocator.dupe(u8, "");
-    defer allocator.free(content_type_line);
+    var client: std.http.Client = .{ .allocator = allocator, .io = std_compat.io() };
+    defer client.deinit();
 
-    const header = try std.fmt.allocPrint(
-        allocator,
-        "{s} {s} HTTP/1.1\r\nHost: {s}:{d}\r\n{s}{s}{s}Content-Length: {d}\r\nConnection: close\r\n\r\n",
-        .{
-            opts.method,
-            opts.path,
-            base.host,
-            base.port,
-            content_type_line,
-            accept_line orelse "",
-            auth_line orelse "",
-            opts.body.len,
+    var request = client.request(http_method, uri, .{
+        .redirect_behavior = .unhandled,
+        .keep_alive = false,
+        .headers = .{
+            .accept_encoding = .omit,
+            .connection = .{ .override = "close" },
         },
-    );
-    defer allocator.free(header);
+        .extra_headers = extra_headers,
+    }) catch {
+        try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", opts.unreachable_body, cors_headers);
+        return;
+    };
+    defer request.deinit();
 
-    try net_compat.streamWriteAll(upstream, header);
-    if (opts.body.len > 0) try net_compat.streamWriteAll(upstream, opts.body);
-
-    var header_buf: [64 * 1024]u8 = undefined;
-    var header_len: usize = 0;
-    var header_end: ?usize = null;
-    while (header_end == null) {
-        if (header_len == header_buf.len) {
-            try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", "{\"error\":\"upstream response headers too large\"}", cors_headers);
-            return;
-        }
-        const n = net_compat.streamRead(upstream, header_buf[header_len..]) catch {
+    if (http_method.requestHasBody()) {
+        request.transfer_encoding = .{ .content_length = opts.body.len };
+        var body_buffer: [8192]u8 = undefined;
+        var body_writer = request.sendBodyUnflushed(&body_buffer) catch {
             try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", opts.unreachable_body, cors_headers);
             return;
         };
-        if (n == 0) {
+        body_writer.writer.writeAll(opts.body) catch {
             try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", opts.unreachable_body, cors_headers);
             return;
-        }
-        header_len += n;
-        if (std.mem.indexOf(u8, header_buf[0..header_len], "\r\n\r\n")) |pos| {
-            header_end = pos;
-        }
+        };
+        body_writer.end() catch {
+            try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", opts.unreachable_body, cors_headers);
+            return;
+        };
+        request.connection.?.flush() catch {
+            try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", opts.unreachable_body, cors_headers);
+            return;
+        };
+    } else {
+        request.sendBodiless() catch {
+            try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", opts.unreachable_body, cors_headers);
+            return;
+        };
     }
 
-    const end = header_end.?;
-    const upstream_headers = header_buf[0..end];
-    const body_start = end + 4;
-    const status_code = parseHttpStatusCode(upstream_headers) orelse 502;
-    const status = mapStatus(@intCast(@min(status_code, 999)));
-    const content_type = extractHttpHeader(upstream_headers, "Content-Type") orelse
+    var response = request.receiveHead(&.{}) catch {
+        try writeDirectResponse(downstream, "502 Bad Gateway", "application/json", opts.unreachable_body, cors_headers);
+        return;
+    };
+    const status_code = @intFromEnum(response.head.status);
+    const content_type = response.head.content_type orelse
         if (status_code >= 200 and status_code < 300) (opts.accept orelse "application/octet-stream") else "application/json";
 
-    try writeStreamingResponseHeaders(downstream, status, content_type, cors_headers);
-    if (header_len > body_start) {
-        try net_compat.streamWriteAll(downstream, header_buf[body_start..header_len]);
-    }
+    try writeStreamingResponseHeaders(downstream, mapStatus(status_code), content_type, cors_headers);
 
-    var buf: [16 * 1024]u8 = undefined;
+    var transfer_buffer: [64]u8 = undefined;
+    const reader = response.reader(&transfer_buffer);
+    var read_buf: [16 * 1024]u8 = undefined;
     while (true) {
-        const n = net_compat.streamRead(upstream, &buf) catch return;
+        const n = reader.readSliceShort(&read_buf) catch return;
         if (n == 0) return;
-        try net_compat.streamWriteAll(downstream, buf[0..n]);
+        try net_compat.streamWriteAll(downstream, read_buf[0..n]);
     }
-}
-
-fn parseLocalHttpBaseUrl(base_url: []const u8) ?LocalBaseUrl {
-    const prefix = "http://";
-    if (!std.mem.startsWith(u8, base_url, prefix)) return null;
-    const rest = base_url[prefix.len..];
-    const host_port = if (std.mem.indexOfScalar(u8, rest, '/')) |slash| rest[0..slash] else rest;
-    const colon = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return null;
-    const host = host_port[0..colon];
-    if (host.len == 0) return null;
-    const port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch return null;
-    return .{ .host = host, .port = port };
-}
-
-fn parseHttpStatusCode(headers: []const u8) ?u16 {
-    const line_end = std.mem.indexOf(u8, headers, "\r\n") orelse headers.len;
-    const status_line = headers[0..line_end];
-    var parts = std.mem.splitScalar(u8, status_line, ' ');
-    _ = parts.next() orelse return null;
-    const code_text = parts.next() orelse return null;
-    return std.fmt.parseInt(u16, code_text, 10) catch null;
-}
-
-fn extractHttpHeader(headers: []const u8, name: []const u8) ?[]const u8 {
-    var lines = std.mem.splitSequence(u8, headers, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
-        return std_compat.mem.trimLeft(u8, line[colon + 1 ..], " \t");
-    }
-    return null;
 }
 
 fn writeDirectResponse(stream: std_compat.net.Stream, status: []const u8, content_type: []const u8, body: []const u8, cors_headers: []const u8) !void {

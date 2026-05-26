@@ -16,6 +16,7 @@ const managed_skills = @import("../managed_skills.zig");
 const manifest_mod = @import("../core/manifest.zig");
 const managed_cli = @import("managed_cli.zig");
 const nullclaw_web_channel = @import("../core/nullclaw_web_channel.zig");
+const nullclaw_gateway_config = @import("../core/nullclaw_gateway_config.zig");
 const query_api = @import("query.zig");
 const test_helpers = @import("../test_helpers.zig");
 const instance_runtime = @import("instance_runtime.zig");
@@ -26,23 +27,12 @@ const jsonOk = helpers.jsonOk;
 const notFound = helpers.notFound;
 const badRequest = helpers.badRequest;
 const methodNotAllowed = helpers.methodNotAllowed;
-const nullhub_gateway_token_prefix = "nullhub-local-";
-const nullhub_gateway_token_file = ".nullhub-gateway-token";
-const min_gateway_body_size: i64 = 25 * 1024 * 1024;
-const min_gateway_timeout_secs: i64 = 120;
-const gateway_ready_timeout_ms: i64 = 15_000;
-const gateway_ready_poll_ms: u64 = 100;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn defaultLaunchModeForComponent(component: []const u8) []const u8 {
     if (registry.findKnownComponent(component)) |known| return known.default_launch_command;
     return "gateway";
-}
-
-fn isLegacyDefaultLaunchMode(component: []const u8, launch_mode: []const u8) bool {
-    const default_launch = defaultLaunchModeForComponent(component);
-    return !std.mem.eql(u8, default_launch, "gateway") and std.mem.eql(u8, launch_mode, "gateway");
 }
 
 const StartBinary = struct {
@@ -488,24 +478,6 @@ const NullclawOnboardingStatus = struct {
     }
 };
 
-const NullclawBootstrapMemoryProbe = struct {
-    exists: bool = false,
-    timestamp: ?[]u8 = null,
-
-    fn deinit(self: *NullclawBootstrapMemoryProbe, allocator: std.mem.Allocator) void {
-        if (self.timestamp) |value| allocator.free(value);
-        self.* = .{};
-    }
-
-    fn takeTimestamp(self: *NullclawBootstrapMemoryProbe) ?[]u8 {
-        const value = self.timestamp;
-        self.timestamp = null;
-        return value;
-    }
-};
-
-const nullclaw_bootstrap_memory_key = "__bootstrap.prompt.BOOTSTRAP.md";
-
 fn fileExistsAbsolute(path: []const u8) bool {
     std_compat.fs.accessAbsolute(path, .{}) catch return false;
     return true;
@@ -515,46 +487,8 @@ fn nullclawWorkspaceStatePath(allocator: std.mem.Allocator, workspace_dir: []con
     return std.fs.path.join(allocator, &.{ workspace_dir, ".nullclaw", "workspace-state.json" });
 }
 
-fn probeNullclawBootstrapInMemory(
-    allocator: std.mem.Allocator,
-    s: *state_mod.State,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-) NullclawBootstrapMemoryProbe {
-    const args = [_][]const u8{
-        "memory",
-        "get",
-        nullclaw_bootstrap_memory_key,
-        "--json",
-    };
-    const stdout = managed_cli.tryRunJsonSuccess(allocator, s, paths, component, name, &args) orelse return .{};
-    defer allocator.free(stdout);
-
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, stdout, .{
-        .allocate = .alloc_if_needed,
-        .ignore_unknown_fields = true,
-    }) catch return .{};
-    defer parsed.deinit();
-
-    switch (parsed.value) {
-        .null => return .{},
-        .object => |obj| {
-            var probe = NullclawBootstrapMemoryProbe{ .exists = true };
-            if (obj.get("timestamp")) |timestamp_value| {
-                if (timestamp_value == .string and timestamp_value.string.len > 0) {
-                    probe.timestamp = allocator.dupe(u8, timestamp_value.string) catch null;
-                }
-            }
-            return probe;
-        },
-        else => return .{},
-    }
-}
-
 fn readNullclawOnboardingStatus(
     allocator: std.mem.Allocator,
-    s: *state_mod.State,
     paths: paths_mod.Paths,
     component: []const u8,
     name: []const u8,
@@ -608,17 +542,7 @@ fn readNullclawOnboardingStatus(
     }
 
     status.completed = status.onboarding_completed_at != null and !status.bootstrap_exists;
-
-    var bootstrap_probe = NullclawBootstrapMemoryProbe{};
-    if (!status.completed and !status.bootstrap_exists) {
-        bootstrap_probe = probeNullclawBootstrapInMemory(allocator, s, paths, component, name);
-        if (status.bootstrap_seeded_at == null) {
-            status.bootstrap_seeded_at = bootstrap_probe.takeTimestamp();
-        }
-    }
-    defer bootstrap_probe.deinit(allocator);
-
-    status.pending = !status.completed and (status.bootstrap_exists or status.bootstrap_seeded_at != null or bootstrap_probe.exists);
+    status.pending = !status.completed and (status.bootstrap_exists or status.bootstrap_seeded_at != null);
     return status;
 }
 
@@ -890,15 +814,6 @@ fn writeJsonConfigValue(allocator: std.mem.Allocator, config_path: []const u8, v
     try out.writeAll("\n");
 }
 
-const GatewayAccess = struct {
-    token: []u8,
-    changed: bool,
-
-    fn deinit(self: GatewayAccess, allocator: std.mem.Allocator) void {
-        allocator.free(self.token);
-    }
-};
-
 pub const GatewayProxyUpstream = struct {
     port: u16,
     token: []u8,
@@ -919,244 +834,6 @@ pub const GatewayProxyPrepareResult = union(enum) {
     upstream: GatewayProxyUpstream,
 };
 
-fn ensureJsonObjectField(
-    allocator: std.mem.Allocator,
-    obj: *std.json.ObjectMap,
-    key: []const u8,
-    changed: *bool,
-) !*std.json.ObjectMap {
-    const gop = try obj.getOrPut(allocator, key);
-    if (!gop.found_existing or gop.value_ptr.* != .object) {
-        gop.value_ptr.* = .{ .object = .empty };
-        changed.* = true;
-    }
-    return &gop.value_ptr.object;
-}
-
-fn setBoolField(
-    allocator: std.mem.Allocator,
-    obj: *std.json.ObjectMap,
-    key: []const u8,
-    value: bool,
-    changed: *bool,
-) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .bool and existing.bool == value) return;
-    }
-    try obj.put(allocator, key, .{ .bool = value });
-    changed.* = true;
-}
-
-fn setIntegerAtLeast(
-    allocator: std.mem.Allocator,
-    obj: *std.json.ObjectMap,
-    key: []const u8,
-    minimum: i64,
-    changed: *bool,
-) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .integer and existing.integer >= minimum) return;
-    }
-    try obj.put(allocator, key, .{ .integer = minimum });
-    changed.* = true;
-}
-
-fn generateNullhubGatewayToken(allocator: std.mem.Allocator) ![]u8 {
-    var random_bytes: [24]u8 = undefined;
-    std_compat.crypto.random.bytes(&random_bytes);
-    const hex = "0123456789abcdef";
-    var token = try allocator.alloc(u8, nullhub_gateway_token_prefix.len + random_bytes.len * 2);
-    @memcpy(token[0..nullhub_gateway_token_prefix.len], nullhub_gateway_token_prefix);
-    for (random_bytes, 0..) |b, i| {
-        token[nullhub_gateway_token_prefix.len + i * 2] = hex[b >> 4];
-        token[nullhub_gateway_token_prefix.len + i * 2 + 1] = hex[b & 0x0f];
-    }
-    return token;
-}
-
-fn isNullhubGatewayToken(token: []const u8) bool {
-    return std.mem.startsWith(u8, token, nullhub_gateway_token_prefix);
-}
-
-fn gatewayTokenPath(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-) ![]u8 {
-    const instance_dir = try paths.instanceDir(allocator, component, name);
-    defer allocator.free(instance_dir);
-    return std.fs.path.join(allocator, &.{ instance_dir, nullhub_gateway_token_file });
-}
-
-fn readStoredGatewayToken(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-) !?[]u8 {
-    const token_path = try gatewayTokenPath(allocator, paths, component, name);
-    defer allocator.free(token_path);
-
-    const file = std_compat.fs.openFileAbsolute(token_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return err,
-    };
-    defer file.close();
-
-    const contents = try file.readToEndAlloc(allocator, 16 * 1024);
-    errdefer allocator.free(contents);
-    const trimmed = std.mem.trim(u8, contents, " \t\r\n");
-    if (!isNullhubGatewayToken(trimmed)) {
-        allocator.free(contents);
-        return null;
-    }
-    if (trimmed.len == contents.len) return contents;
-    const token = try allocator.dupe(u8, trimmed);
-    allocator.free(contents);
-    return token;
-}
-
-fn writeStoredGatewayToken(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-    token: []const u8,
-) !void {
-    const token_path = try gatewayTokenPath(allocator, paths, component, name);
-    defer allocator.free(token_path);
-
-    const file = try std_compat.fs.createFileAbsolute(token_path, .{ .truncate = true });
-    defer file.close();
-    restrictGatewayTokenFile(file);
-    try file.writeAll(token);
-    try file.writeAll("\n");
-}
-
-fn restrictGatewayTokenFile(file: anytype) void {
-    if (comptime std_compat.fs.has_executable_bit) file.chmod(0o600) catch {};
-}
-
-fn hashGatewayTokenAlloc(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(token, &digest, .{});
-    const hex = "0123456789abcdef";
-    var out = try allocator.alloc(u8, digest.len * 2);
-    for (digest, 0..) |b, i| {
-        out[i * 2] = hex[b >> 4];
-        out[i * 2 + 1] = hex[b & 0x0f];
-    }
-    return out;
-}
-
-fn ensureGatewayPairedToken(
-    allocator: std.mem.Allocator,
-    json_allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-    gateway_obj: *std.json.ObjectMap,
-    changed: *bool,
-) ![]u8 {
-    const token = blk: {
-        if (try readStoredGatewayToken(allocator, paths, component, name)) |stored| {
-            break :blk stored;
-        }
-        const generated = try generateNullhubGatewayToken(allocator);
-        errdefer allocator.free(generated);
-        try writeStoredGatewayToken(allocator, paths, component, name, generated);
-        break :blk generated;
-    };
-    errdefer allocator.free(token);
-
-    const token_hash = try hashGatewayTokenAlloc(allocator, token);
-    defer allocator.free(token_hash);
-
-    if (gateway_obj.getPtr("paired_tokens")) |tokens_value| {
-        if (tokens_value.* == .array) {
-            var has_hash = false;
-            var has_plaintext_nullhub_token = false;
-            for (tokens_value.array.items) |item| {
-                if (item == .string and std.mem.eql(u8, item.string, token_hash)) {
-                    has_hash = true;
-                } else if (item == .string and isNullhubGatewayToken(item.string)) {
-                    has_plaintext_nullhub_token = true;
-                }
-            }
-
-            if (has_hash and !has_plaintext_nullhub_token) return token;
-
-            var tokens = std.json.Array.init(json_allocator);
-            var inserted_hash = false;
-            for (tokens_value.array.items) |item| {
-                if (item == .string and isNullhubGatewayToken(item.string)) continue;
-                if (item == .string and std.mem.eql(u8, item.string, token_hash)) {
-                    if (inserted_hash) continue;
-                    inserted_hash = true;
-                }
-                try tokens.append(item);
-            }
-            if (!inserted_hash) {
-                try tokens.append(.{ .string = try json_allocator.dupe(u8, token_hash) });
-            }
-            tokens_value.* = .{ .array = tokens };
-            changed.* = true;
-            return token;
-        }
-    }
-
-    var tokens = std.json.Array.init(json_allocator);
-    try tokens.append(.{ .string = try json_allocator.dupe(u8, token_hash) });
-    try gateway_obj.put(json_allocator, "paired_tokens", .{ .array = tokens });
-    changed.* = true;
-    return token;
-}
-
-fn ensureNullclawGatewayConfig(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-) !GatewayAccess {
-    if (!std.mem.eql(u8, component, "nullclaw")) return error.UnsupportedComponent;
-
-    const config_path = try paths.instanceConfig(allocator, component, name);
-    defer allocator.free(config_path);
-    const file = try std_compat.fs.openFileAbsolute(config_path, .{});
-    defer file.close();
-    const contents = try file.readToEndAlloc(allocator, 4 * 1024 * 1024);
-    defer allocator.free(contents);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    });
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidConfig;
-
-    const json_allocator = parsed.arena.allocator();
-    var changed = false;
-    const root = &parsed.value.object;
-    const gateway_obj = try ensureJsonObjectField(json_allocator, root, "gateway", &changed);
-    const a2a_obj = try ensureJsonObjectField(json_allocator, root, "a2a", &changed);
-
-    try setBoolField(json_allocator, gateway_obj, "require_pairing", true, &changed);
-    try setIntegerAtLeast(json_allocator, gateway_obj, "max_body_size_bytes", min_gateway_body_size, &changed);
-    try setIntegerAtLeast(json_allocator, gateway_obj, "request_timeout_secs", min_gateway_timeout_secs, &changed);
-    try setBoolField(json_allocator, a2a_obj, "enabled", true, &changed);
-    try setBoolField(json_allocator, a2a_obj, "multi_modal", true, &changed);
-
-    const token = try ensureGatewayPairedToken(allocator, json_allocator, paths, component, name, gateway_obj, &changed);
-    errdefer allocator.free(token);
-
-    if (changed) {
-        try writeJsonConfigValue(allocator, config_path, parsed.value);
-    }
-
-    return .{ .token = token, .changed = changed };
-}
-
 fn resolveGatewayPort(
     allocator: std.mem.Allocator,
     paths: paths_mod.Paths,
@@ -1170,70 +847,20 @@ fn resolveGatewayPort(
     return instance_runtime.readPortFromConfig(allocator, paths, component, name, "gateway.port");
 }
 
-fn isRuntimeRunning(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    manager: *manager_mod.Manager,
-    component: []const u8,
-    name: []const u8,
-    entry: state_mod.InstanceEntry,
-) bool {
-    const snapshot = instance_runtime.resolve(allocator, paths, manager, component, name, entry);
-    return snapshot.status == .running;
-}
-
-fn waitForRuntimeRunning(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    manager: *manager_mod.Manager,
-    component: []const u8,
-    name: []const u8,
-    entry: state_mod.InstanceEntry,
-) bool {
-    const deadline = std_compat.time.milliTimestamp() + gateway_ready_timeout_ms;
-    while (true) {
-        manager.tick();
-        const snapshot = instance_runtime.resolve(allocator, paths, manager, component, name, entry);
-        switch (snapshot.status) {
-            .running => return true,
-            .failed, .stopped => return false,
-            else => {},
-        }
-        if (std_compat.time.milliTimestamp() >= deadline) return false;
-        std_compat.thread.sleep(gateway_ready_poll_ms * std.time.ns_per_ms);
-    }
-}
-
 fn gatewayNotReady() ApiResponse {
     return .{
         .status = "503 Service Unavailable",
         .content_type = "application/json",
-        .body = "{\"error\":\"nullclaw gateway is not ready\"}",
+        .body = "{\"error\":\"nullclaw gateway is not running\"}",
     };
 }
 
-fn ensureInstanceRunning(
-    allocator: std.mem.Allocator,
-    s: *state_mod.State,
-    manager: *manager_mod.Manager,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-    entry: state_mod.InstanceEntry,
-    config_changed: bool,
-) ?ApiResponse {
-    if (config_changed and isRuntimeRunning(allocator, paths, manager, component, name, entry)) {
-        const restart_resp = handleRestart(allocator, s, manager, paths, component, name, "");
-        if (!std.mem.eql(u8, restart_resp.status, "200 OK")) return restart_resp;
-        if (!waitForRuntimeRunning(allocator, paths, manager, component, name, entry)) return gatewayNotReady();
-        return null;
-    }
-    if (!isRuntimeRunning(allocator, paths, manager, component, name, entry)) {
-        const start_resp = handleStart(allocator, s, manager, paths, component, name, "");
-        if (!std.mem.eql(u8, start_resp.status, "200 OK")) return start_resp;
-        if (!waitForRuntimeRunning(allocator, paths, manager, component, name, entry)) return gatewayNotReady();
-    }
-    return null;
+fn gatewayNotPrepared() ApiResponse {
+    return .{
+        .status = "409 Conflict",
+        .content_type = "application/json",
+        .body = "{\"error\":\"nullclaw gateway pairing is not configured\"}",
+    };
 }
 
 const GatewayProxyRoute = struct {
@@ -1339,16 +966,21 @@ pub fn prepareGatewayProxy(
     defer if (proxy_body_owned and !proxy_body_transferred) allocator.free(proxy_body);
 
     const entry = s.getInstance(parsed.component, parsed.name) orelse return .{ .response = notFound() };
-    const access = ensureNullclawGatewayConfig(allocator, paths, parsed.component, parsed.name) catch |err| switch (err) {
+    var access = nullclaw_gateway_config.loadAccess(allocator, paths, parsed.component, parsed.name) catch |err| switch (err) {
         error.UnsupportedComponent => return .{ .response = badRequest("{\"error\":\"unsupported component\"}") },
-        error.FileNotFound => return .{ .response = .{ .status = "404 Not Found", .content_type = "application/json", .body = "{\"error\":\"config not found\"}" } },
+        error.FileNotFound,
+        error.GatewayConfigMissing,
+        error.GatewayTokenMissing,
+        error.GatewayPairingMissing,
+        => return .{ .response = gatewayNotPrepared() },
         else => return .{ .response = helpers.serverError() },
     };
     errdefer access.deinit(allocator);
 
-    if (ensureInstanceRunning(allocator, s, manager, paths, parsed.component, parsed.name, entry, access.changed)) |resp| {
+    const snapshot = instance_runtime.resolve(allocator, paths, manager, parsed.component, parsed.name, entry);
+    if (snapshot.status != .running) {
         access.deinit(allocator);
-        return .{ .response = resp };
+        return .{ .response = gatewayNotReady() };
     }
 
     const port = resolveGatewayPort(allocator, paths, manager, parsed.component, parsed.name, entry) orelse {
@@ -1356,10 +988,15 @@ pub fn prepareGatewayProxy(
         return .{ .response = .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = "{\"error\":\"gateway port unavailable\"}" } };
     };
 
+    const token = access.token orelse {
+        access.deinit(allocator);
+        return .{ .response = gatewayNotPrepared() };
+    };
+    access.token = null;
     proxy_body_transferred = true;
     return .{ .upstream = .{
         .port = port,
-        .token = access.token,
+        .token = token,
         .upstream_path = route.upstream_path,
         .body = proxy_body,
         .body_owned = proxy_body_owned,
@@ -1702,7 +1339,6 @@ pub const UsageAggregate = struct {
 };
 
 pub const TOKEN_USAGE_LEDGER_FILENAME = "llm_token_usage.jsonl";
-pub const LEGACY_USAGE_LEDGER_FILENAME = "llm_usage.jsonl";
 pub const USAGE_CACHE_VERSION: u32 = 1;
 pub const USAGE_CACHE_MAX_LEDGER_BYTES: usize = 128 * 1024 * 1024;
 pub const USAGE_HOURLY_RETENTION_SECS: i64 = 14 * 24 * 60 * 60;
@@ -1757,16 +1393,7 @@ pub fn isShortUsageWindow(window: []const u8) bool {
 }
 
 pub fn resolveUsageLedgerPath(allocator: std.mem.Allocator, inst_dir: []const u8) ![]u8 {
-    const preferred = try std.fs.path.join(allocator, &.{ inst_dir, TOKEN_USAGE_LEDGER_FILENAME });
-    std_compat.fs.accessAbsolute(preferred, .{}) catch {
-        const legacy = try std.fs.path.join(allocator, &.{ inst_dir, LEGACY_USAGE_LEDGER_FILENAME });
-        if (std_compat.fs.accessAbsolute(legacy, .{})) |_| {
-            allocator.free(preferred);
-            return legacy;
-        } else |_| {}
-        allocator.free(legacy);
-    };
-    return preferred;
+    return std.fs.path.join(allocator, &.{ inst_dir, TOKEN_USAGE_LEDGER_FILENAME });
 }
 
 pub fn usageCachePath(allocator: std.mem.Allocator, paths: paths_mod.Paths, component: []const u8, name: []const u8) ![]u8 {
@@ -2845,10 +2472,9 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
     if (!launch_mode_overridden) {
         if (manifest_launch_mode) |mode| {
             const should_normalize_launch =
-                (std.mem.eql(u8, launch_cmd, manifest_launch_command) and !std.mem.eql(u8, launch_cmd, mode)) or
-                isLegacyDefaultLaunchMode(component, launch_cmd);
+                std.mem.eql(u8, launch_cmd, manifest_launch_command) and !std.mem.eql(u8, launch_cmd, mode);
             if (should_normalize_launch) {
-                launch_cmd = registry.normalizeLaunchCommand(component, mode);
+                launch_cmd = mode;
                 _ = s.updateInstance(component, name, .{
                     .version = current_version,
                     .auto_start = entry.auto_start,
@@ -2874,8 +2500,7 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
         }
     }
 
-    const normalized_launch_cmd = registry.normalizeLaunchCommand(component, launch_cmd);
-    var launch = launch_args_mod.resolve(allocator, normalized_launch_cmd, launch_verbose) catch return badRequest("{\"error\":\"invalid launch_mode\"}");
+    var launch = launch_args_mod.resolve(allocator, launch_cmd, launch_verbose) catch return badRequest("{\"error\":\"invalid launch_mode\"}");
     defer launch.deinit();
     // The launch-mode helper decides whether this mode should be supervised via
     // an HTTP health endpoint or process liveness only.
@@ -3278,7 +2903,7 @@ pub fn handleOnboarding(
 ) ApiResponse {
     if (s.getInstance(component, name) == null) return notFound();
 
-    var status = readNullclawOnboardingStatus(allocator, s, paths, component, name) catch
+    var status = readNullclawOnboardingStatus(allocator, paths, component, name) catch
         return helpers.serverError();
     defer status.deinit(allocator);
 
@@ -4480,7 +4105,7 @@ pub fn handlePatch(s: *state_mod.State, component: []const u8, name: []const u8,
     defer parsed.deinit();
 
     const new_auto_start = parsed.value.auto_start orelse entry.auto_start;
-    const new_launch_mode = registry.normalizeLaunchCommand(component, parsed.value.launch_mode orelse entry.launch_mode);
+    const new_launch_mode = parsed.value.launch_mode orelse entry.launch_mode;
     const new_verbose = parsed.value.verbose orelse entry.verbose;
 
     var validated_launch = launch_args_mod.resolve(s.allocator, new_launch_mode, new_verbose) catch
@@ -5235,9 +4860,6 @@ test "component default launch mode uses registry metadata" {
     try std.testing.expectEqualStrings("gateway", defaultLaunchModeForComponent("nullclaw"));
     try std.testing.expectEqualStrings("serve", defaultLaunchModeForComponent("nullwatch"));
     try std.testing.expectEqualStrings("gateway", defaultLaunchModeForComponent("unknown-component"));
-    try std.testing.expect(isLegacyDefaultLaunchMode("nullwatch", "gateway"));
-    try std.testing.expect(!isLegacyDefaultLaunchMode("nullwatch", "serve"));
-    try std.testing.expect(!isLegacyDefaultLaunchMode("nullclaw", "gateway"));
 }
 
 test "pipeline summaries accept wrapped lists and JSON string definitions" {
@@ -5298,7 +4920,7 @@ fn writeTestInstanceConfig(
     try file.writeAll("\n");
 }
 
-test "ensureNullclawGatewayConfig patches generic gateway capabilities" {
+test "nullclaw gateway config patches generic gateway capabilities" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
     defer fixture.deinit();
@@ -5311,9 +4933,10 @@ test "ensureNullclawGatewayConfig patches generic gateway capabilities" {
         "{\"gateway\":{\"port\":43123,\"max_body_size_bytes\":1024},\"a2a\":{\"enabled\":false},\"memory\":{\"profile\":\"minimal_none\",\"backend\":\"none\",\"auto_save\":false}}",
     );
 
-    const access = try ensureNullclawGatewayConfig(allocator, fixture.paths, "nullclaw", "hat");
+    var access = try nullclaw_gateway_config.ensureConfig(allocator, fixture.paths, "nullclaw", "hat", .{});
     defer access.deinit(allocator);
-    try std.testing.expect(std.mem.startsWith(u8, access.token, nullhub_gateway_token_prefix));
+    const token = access.token.?;
+    try std.testing.expect(std.mem.startsWith(u8, token, nullclaw_gateway_config.token_prefix));
     try std.testing.expect(access.changed);
 
     const config_path = try fixture.paths.instanceConfig(allocator, "nullclaw", "hat");
@@ -5328,30 +4951,34 @@ test "ensureNullclawGatewayConfig patches generic gateway capabilities" {
     const gateway = parsed.value.object.get("gateway").?.object;
     const a2a = parsed.value.object.get("a2a").?.object;
     try std.testing.expect(gateway.get("require_pairing").?.bool);
-    try std.testing.expect(gateway.get("max_body_size_bytes").?.integer >= min_gateway_body_size);
-    try std.testing.expect(gateway.get("request_timeout_secs").?.integer >= min_gateway_timeout_secs);
+    try std.testing.expect(gateway.get("max_body_size_bytes").?.integer >= nullclaw_gateway_config.min_body_size);
+    try std.testing.expect(gateway.get("request_timeout_secs").?.integer >= nullclaw_gateway_config.min_timeout_secs);
     try std.testing.expect(a2a.get("enabled").?.bool);
     try std.testing.expect(a2a.get("multi_modal").?.bool);
 
-    const expected_hash = try hashGatewayTokenAlloc(allocator, access.token);
+    const expected_hash = try nullclaw_gateway_config.hashGatewayTokenAlloc(allocator, token);
     defer allocator.free(expected_hash);
     const paired_tokens = gateway.get("paired_tokens").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), paired_tokens.len);
     try std.testing.expectEqualStrings(expected_hash, paired_tokens[0].string);
-    try std.testing.expect(!isNullhubGatewayToken(paired_tokens[0].string));
+    try std.testing.expect(!nullclaw_gateway_config.isNullhubGatewayToken(paired_tokens[0].string));
 
-    const token_path = try gatewayTokenPath(allocator, fixture.paths, "nullclaw", "hat");
+    const token_path = try nullclaw_gateway_config.gatewayTokenPath(allocator, fixture.paths, "nullclaw", "hat");
     defer allocator.free(token_path);
     const token_file = try std_compat.fs.openFileAbsolute(token_path, .{});
     defer token_file.close();
     const stored_token_bytes = try token_file.readToEndAlloc(allocator, 16 * 1024);
     defer allocator.free(stored_token_bytes);
-    try std.testing.expectEqualStrings(access.token, std.mem.trim(u8, stored_token_bytes, " \t\r\n"));
+    try std.testing.expectEqualStrings(token, std.mem.trim(u8, stored_token_bytes, " \t\r\n"));
 
-    const access2 = try ensureNullclawGatewayConfig(allocator, fixture.paths, "nullclaw", "hat");
+    var access2 = try nullclaw_gateway_config.ensureConfig(allocator, fixture.paths, "nullclaw", "hat", .{});
     defer access2.deinit(allocator);
-    try std.testing.expectEqualStrings(access.token, access2.token);
+    try std.testing.expectEqualStrings(token, access2.token.?);
     try std.testing.expect(!access2.changed);
+
+    var loaded = try nullclaw_gateway_config.loadAccess(allocator, fixture.paths, "nullclaw", "hat");
+    defer loaded.deinit(allocator);
+    try std.testing.expectEqualStrings(token, loaded.token.?);
 }
 
 test "buildAgentStreamA2aBody translates managed agent request to A2A message stream" {
@@ -5916,7 +5543,7 @@ test "handleStart normalizes manifest binary command to runnable launch args" {
     mctx.manager.stopInstance("nullwatch", "watch") catch {};
 }
 
-test "handleStart normalizes legacy default launch mode for nullwatch" {
+test "handleStart preserves explicit launch mode when it differs from manifest mode" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
@@ -5950,9 +5577,9 @@ test "handleStart normalizes legacy default launch mode for nullwatch" {
     try std.testing.expectEqualStrings("200 OK", resp.status);
 
     const entry = s.getInstance("nullwatch", "watch").?;
-    try std.testing.expectEqualStrings("serve", entry.launch_mode);
+    try std.testing.expectEqualStrings("gateway", entry.launch_mode);
     const inst = mctx.manager.instances.get("nullwatch/watch").?;
-    try std.testing.expectEqualStrings("serve", inst.launch_args[0]);
+    try std.testing.expectEqualStrings("gateway", inst.launch_args[0]);
 
     mctx.manager.stopInstance("nullwatch", "watch") catch {};
 }
@@ -6722,51 +6349,7 @@ test "handleOnboarding reports pending bootstrap from workspace state without di
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"bootstrap_seeded_at\":\"2026-03-13T01:17:17Z\"") != null);
 }
 
-test "handleOnboarding falls back to CLI bootstrap memory for legacy sqlite workspace" {
-    const allocator = std.testing.allocator;
-    var state_fixture = try test_helpers.TempPaths.init(allocator);
-    defer state_fixture.deinit();
-    const state_path = try state_fixture.paths.state(allocator);
-    defer allocator.free(state_path);
-    var s = state_mod.State.init(allocator, state_path);
-    defer s.deinit();
-    var mctx = TestManagerCtx.init(allocator);
-    defer mctx.deinit(allocator);
-
-    try s.addInstance("nullclaw", "legacy-agent", .{ .version = "1.0.3" });
-    const script =
-        \\#!/bin/sh
-        \\if [ "$1" = "memory" ] && [ "$2" = "get" ] && [ "$3" = "__bootstrap.prompt.BOOTSTRAP.md" ]; then
-        \\  if [ -z "$NULLCLAW_HOME" ]; then
-        \\    echo "missing home" >&2
-        \\    exit 1
-        \\  fi
-        \\  printf '%s\n' '{"key":"__bootstrap.prompt.BOOTSTRAP.md","category":"core","timestamp":"2026-03-13T02:37:27Z","content":"# bootstrap","session_id":null}'
-        \\  exit 0
-        \\fi
-        \\echo "unexpected args" >&2
-        \\exit 1
-        \\
-    ;
-    try writeTestBinary(allocator, mctx.paths, "nullclaw", "1.0.3", script);
-
-    const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "legacy-agent");
-    defer allocator.free(inst_dir);
-    const workspace_dir = try std.fs.path.join(allocator, &.{ inst_dir, "workspace" });
-    defer allocator.free(workspace_dir);
-    try ensurePath(workspace_dir);
-
-    const resp = handleOnboarding(allocator, &s, mctx.paths, "nullclaw", "legacy-agent");
-    defer allocator.free(resp.body);
-
-    try std.testing.expectEqualStrings("200 OK", resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"bootstrap_exists\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pending\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"completed\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"bootstrap_seeded_at\":\"2026-03-13T02:37:27Z\"") != null);
-}
-
-test "handleOnboarding stays idle when legacy sqlite bootstrap memory is absent" {
+test "handleOnboarding stays idle when workspace bootstrap state is absent" {
     const allocator = std.testing.allocator;
     var state_fixture = try test_helpers.TempPaths.init(allocator);
     defer state_fixture.deinit();
@@ -6778,17 +6361,6 @@ test "handleOnboarding stays idle when legacy sqlite bootstrap memory is absent"
     defer mctx.deinit(allocator);
 
     try s.addInstance("nullclaw", "empty-agent", .{ .version = "1.0.4" });
-    const script =
-        \\#!/bin/sh
-        \\if [ "$1" = "memory" ] && [ "$2" = "get" ] && [ "$3" = "__bootstrap.prompt.BOOTSTRAP.md" ]; then
-        \\  printf '%s\n' 'null'
-        \\  exit 0
-        \\fi
-        \\echo "unexpected args" >&2
-        \\exit 1
-        \\
-    ;
-    try writeTestBinary(allocator, mctx.paths, "nullclaw", "1.0.4", script);
 
     const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "empty-agent");
     defer allocator.free(inst_dir);
@@ -7183,10 +6755,6 @@ test "dispatch routes POST integration action for nullboiler" {
     try std.testing.expect(std.mem.indexOf(u8, workflow, "\"pipeline_id\": \"pipe-dev\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, workflow, "\"claim_roles\": [\n    \"reviewer\"\n  ]") != null);
     try std.testing.expect(std.mem.indexOf(u8, workflow, "\"transition_to\": \"complete\"") != null);
-
-    const legacy_workflow_path = try std.fs.path.join(allocator, &.{ mctx.paths.root, "instances", "nullboiler", "boiler-a", "tracker-workflow.json" });
-    defer allocator.free(legacy_workflow_path);
-    try std.testing.expectError(error.FileNotFound, std_compat.fs.openFileAbsolute(legacy_workflow_path, .{}));
 }
 
 test "dispatch integration relink preserves advanced tracker config and custom workflows" {
@@ -7493,7 +7061,7 @@ test "handleHistory returns CLI JSON and passes instance home" {
     try std.testing.expect(std.mem.indexOf(u8, show_resp.body, "\"role\":\"user\"") != null);
 }
 
-test "handleMemory wraps legacy CLI failures as JSON errors" {
+test "handleMemory wraps CLI failures as JSON errors" {
     const allocator = std.testing.allocator;
     var state_fixture = try test_helpers.TempPaths.init(allocator);
     defer state_fixture.deinit();

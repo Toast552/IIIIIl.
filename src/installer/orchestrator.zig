@@ -12,15 +12,14 @@ const local_binary = @import("../core/local_binary.zig");
 const fs_compat = @import("../fs_compat.zig");
 const launch_args_mod = @import("../core/launch_args.zig");
 const nullclaw_web_channel = @import("../core/nullclaw_web_channel.zig");
+const nullclaw_gateway_config = @import("../core/nullclaw_gateway_config.zig");
 const manager_mod = @import("../supervisor/manager.zig");
 const ui_modules_mod = @import("ui_modules.zig");
 const managed_skills = @import("../managed_skills.zig");
 const test_helpers = @import("../test_helpers.zig");
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
-const nullhub_gateway_token_prefix = "nullhub-local-";
-const nullhub_gateway_token_file = ".nullhub-gateway-token";
-const min_gateway_body_size: i64 = 25 * 1024 * 1024;
-const min_gateway_timeout_secs: i64 = 120;
+const min_gateway_body_size = nullclaw_gateway_config.min_body_size;
+const min_gateway_timeout_secs = nullclaw_gateway_config.min_timeout_secs;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -210,7 +209,7 @@ pub fn install(
         ) catch null;
         break :blk owned_launch_command orelse comp.default_launch_command;
     } else comp.default_launch_command;
-    const launch_command = registry.normalizeLaunchCommand(opts.component, raw_launch_command);
+    const launch_command = raw_launch_command;
     const health_endpoint = if (parsed_manifest) |pm| pm.value.health.endpoint else comp.default_health_endpoint;
     const default_port = if (parsed_manifest) |pm| (if (pm.value.ports.len > 0) pm.value.ports[0].default else comp.default_port) else comp.default_port;
     defer if (parsed_manifest) |pm| pm.deinit();
@@ -1199,177 +1198,6 @@ fn patchCustomProvidersIntoConfig(
     try out.writeAll("\n");
 }
 
-fn setStringField(allocator: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8, value: []const u8, changed: *bool) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .string and std.mem.eql(u8, existing.string, value)) return;
-    }
-    try obj.put(allocator, key, .{ .string = try allocator.dupe(u8, value) });
-    changed.* = true;
-}
-
-fn setBoolField(allocator: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8, value: bool, changed: *bool) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .bool and existing.bool == value) return;
-    }
-    try obj.put(allocator, key, .{ .bool = value });
-    changed.* = true;
-}
-
-fn setIntegerAtLeast(allocator: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8, minimum: i64, changed: *bool) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .integer and existing.integer >= minimum) return;
-    }
-    try obj.put(allocator, key, .{ .integer = minimum });
-    changed.* = true;
-}
-
-fn generateNullhubGatewayToken(allocator: std.mem.Allocator) ![]u8 {
-    var random_bytes: [24]u8 = undefined;
-    std_compat.crypto.random.bytes(&random_bytes);
-    const hex = "0123456789abcdef";
-    var token = try allocator.alloc(u8, nullhub_gateway_token_prefix.len + random_bytes.len * 2);
-    @memcpy(token[0..nullhub_gateway_token_prefix.len], nullhub_gateway_token_prefix);
-    for (random_bytes, 0..) |b, i| {
-        token[nullhub_gateway_token_prefix.len + i * 2] = hex[b >> 4];
-        token[nullhub_gateway_token_prefix.len + i * 2 + 1] = hex[b & 0x0f];
-    }
-    return token;
-}
-
-fn isNullhubGatewayToken(token: []const u8) bool {
-    return std.mem.startsWith(u8, token, nullhub_gateway_token_prefix);
-}
-
-fn gatewayTokenPath(
-    allocator: std.mem.Allocator,
-    p: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-) ![]u8 {
-    const instance_dir = try p.instanceDir(allocator, component, name);
-    defer allocator.free(instance_dir);
-    return std.fs.path.join(allocator, &.{ instance_dir, nullhub_gateway_token_file });
-}
-
-fn readStoredGatewayToken(
-    allocator: std.mem.Allocator,
-    p: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-) !?[]u8 {
-    const token_path = try gatewayTokenPath(allocator, p, component, name);
-    defer allocator.free(token_path);
-
-    const file = std_compat.fs.openFileAbsolute(token_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return err,
-    };
-    defer file.close();
-
-    const contents = try file.readToEndAlloc(allocator, 16 * 1024);
-    errdefer allocator.free(contents);
-    const trimmed = std.mem.trim(u8, contents, " \t\r\n");
-    if (!isNullhubGatewayToken(trimmed)) {
-        allocator.free(contents);
-        return null;
-    }
-    if (trimmed.len == contents.len) return contents;
-    const token = try allocator.dupe(u8, trimmed);
-    allocator.free(contents);
-    return token;
-}
-
-fn writeStoredGatewayToken(
-    allocator: std.mem.Allocator,
-    p: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-    token: []const u8,
-) !void {
-    const token_path = try gatewayTokenPath(allocator, p, component, name);
-    defer allocator.free(token_path);
-
-    const file = try std_compat.fs.createFileAbsolute(token_path, .{ .truncate = true });
-    defer file.close();
-    if (comptime std_compat.fs.has_executable_bit) file.chmod(0o600) catch {};
-    try file.writeAll(token);
-    try file.writeAll("\n");
-}
-
-fn hashGatewayTokenAlloc(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(token, &digest, .{});
-    const hex = "0123456789abcdef";
-    var out = try allocator.alloc(u8, digest.len * 2);
-    for (digest, 0..) |b, i| {
-        out[i * 2] = hex[b >> 4];
-        out[i * 2 + 1] = hex[b & 0x0f];
-    }
-    return out;
-}
-
-fn ensureGatewayPairedToken(
-    allocator: std.mem.Allocator,
-    json_allocator: std.mem.Allocator,
-    p: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-    gateway_obj: *std.json.ObjectMap,
-    changed: *bool,
-) !void {
-    const token = blk: {
-        if (try readStoredGatewayToken(allocator, p, component, name)) |stored| {
-            break :blk stored;
-        }
-        const generated = try generateNullhubGatewayToken(allocator);
-        errdefer allocator.free(generated);
-        try writeStoredGatewayToken(allocator, p, component, name, generated);
-        break :blk generated;
-    };
-    defer allocator.free(token);
-
-    const token_hash = try hashGatewayTokenAlloc(allocator, token);
-    defer allocator.free(token_hash);
-
-    if (gateway_obj.getPtr("paired_tokens")) |tokens_value| {
-        if (tokens_value.* == .array) {
-            var has_hash = false;
-            var has_plaintext_nullhub_token = false;
-            for (tokens_value.array.items) |item| {
-                if (item == .string and std.mem.eql(u8, item.string, token_hash)) {
-                    has_hash = true;
-                } else if (item == .string and isNullhubGatewayToken(item.string)) {
-                    has_plaintext_nullhub_token = true;
-                }
-            }
-
-            if (has_hash and !has_plaintext_nullhub_token) return;
-
-            var tokens = std.json.Array.init(json_allocator);
-            var inserted_hash = false;
-            for (tokens_value.array.items) |item| {
-                if (item == .string and isNullhubGatewayToken(item.string)) continue;
-                if (item == .string and std.mem.eql(u8, item.string, token_hash)) {
-                    if (inserted_hash) continue;
-                    inserted_hash = true;
-                }
-                try tokens.append(item);
-            }
-            if (!inserted_hash) {
-                try tokens.append(.{ .string = try json_allocator.dupe(u8, token_hash) });
-            }
-            tokens_value.* = .{ .array = tokens };
-            changed.* = true;
-            return;
-        }
-    }
-
-    var tokens = std.json.Array.init(json_allocator);
-    try tokens.append(.{ .string = try json_allocator.dupe(u8, token_hash) });
-    try gateway_obj.put(json_allocator, "paired_tokens", .{ .array = tokens });
-    changed.* = true;
-}
-
 fn patchNullclawRuntimeProfileIntoConfig(
     allocator: std.mem.Allocator,
     p: paths_mod.Paths,
@@ -1379,61 +1207,15 @@ fn patchNullclawRuntimeProfileIntoConfig(
 ) !void {
     if (!std.mem.eql(u8, component, "nullclaw") or !profile.requested) return;
 
-    const config_path = try p.instanceConfig(allocator, component, name);
-    defer allocator.free(config_path);
-
-    const contents = blk: {
-        const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => break :blk try allocator.dupe(u8, "{}"),
-            else => return err,
-        };
-        defer file.close();
-        break :blk try file.readToEndAlloc(allocator, MAX_CONFIG_BYTES);
-    };
-    defer allocator.free(contents);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
+    var access = try nullclaw_gateway_config.ensureConfig(allocator, p, component, name, .{
+        .require_pairing = profile.gateway_require_pairing,
+        .max_body_size_bytes = profile.gateway_max_body_size_bytes,
+        .request_timeout_secs = profile.gateway_request_timeout_secs,
+        .a2a_enabled = profile.a2a_enabled,
+        .a2a_multi_modal = profile.a2a_multi_modal,
+        .stateless_memory = profile.stateless,
     });
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidConfig;
-
-    const json_allocator = parsed.arena.allocator();
-    var changed = false;
-    const root = &parsed.value.object;
-    const gateway_obj = try ensureObjectInMap(json_allocator, root, "gateway");
-    const a2a_obj = try ensureObjectInMap(json_allocator, root, "a2a");
-
-    try setBoolField(json_allocator, gateway_obj, "require_pairing", profile.gateway_require_pairing, &changed);
-    try setIntegerAtLeast(json_allocator, gateway_obj, "max_body_size_bytes", profile.gateway_max_body_size_bytes, &changed);
-    try setIntegerAtLeast(json_allocator, gateway_obj, "request_timeout_secs", profile.gateway_request_timeout_secs, &changed);
-    try setBoolField(json_allocator, a2a_obj, "enabled", profile.a2a_enabled, &changed);
-    try setBoolField(json_allocator, a2a_obj, "multi_modal", profile.a2a_multi_modal, &changed);
-
-    if (profile.gateway_require_pairing) {
-        try ensureGatewayPairedToken(allocator, json_allocator, p, component, name, gateway_obj, &changed);
-    }
-
-    if (profile.stateless) {
-        const memory_obj = try ensureObjectInMap(json_allocator, root, "memory");
-        try setStringField(json_allocator, memory_obj, "profile", "minimal_none", &changed);
-        try setStringField(json_allocator, memory_obj, "backend", "none", &changed);
-        try setBoolField(json_allocator, memory_obj, "auto_save", false, &changed);
-    }
-
-    if (!changed) return;
-
-    const rendered = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{
-        .whitespace = .indent_2,
-        .emit_null_optional_fields = false,
-    });
-    defer allocator.free(rendered);
-
-    const out = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
-    defer out.close();
-    try out.writeAll(rendered);
-    try out.writeAll("\n");
+    defer access.deinit(allocator);
 }
 
 fn ensureObjectInMap(
@@ -2232,19 +2014,19 @@ test "patchNullclawRuntimeProfileIntoConfig prepares stateless gateway config fo
     try std.testing.expectEqualStrings("none", memory.get("backend").?.string);
     try std.testing.expect(!memory.get("auto_save").?.bool);
 
-    const token_path = try gatewayTokenPath(allocator, fixture.paths, "nullclaw", "nullhat");
+    const token_path = try nullclaw_gateway_config.gatewayTokenPath(allocator, fixture.paths, "nullclaw", "nullhat");
     defer allocator.free(token_path);
     const token_file = try std_compat.fs.openFileAbsolute(token_path, .{});
     defer token_file.close();
     const token_bytes = try token_file.readToEndAlloc(allocator, 16 * 1024);
     defer allocator.free(token_bytes);
     const token = std.mem.trim(u8, token_bytes, " \t\r\n");
-    try std.testing.expect(isNullhubGatewayToken(token));
+    try std.testing.expect(nullclaw_gateway_config.isNullhubGatewayToken(token));
 
-    const expected_hash = try hashGatewayTokenAlloc(allocator, token);
+    const expected_hash = try nullclaw_gateway_config.hashGatewayTokenAlloc(allocator, token);
     defer allocator.free(expected_hash);
     const paired_tokens = gateway.get("paired_tokens").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), paired_tokens.len);
     try std.testing.expectEqualStrings(expected_hash, paired_tokens[0].string);
-    try std.testing.expect(!isNullhubGatewayToken(paired_tokens[0].string));
+    try std.testing.expect(!nullclaw_gateway_config.isNullhubGatewayToken(paired_tokens[0].string));
 }

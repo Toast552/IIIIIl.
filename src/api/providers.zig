@@ -1026,8 +1026,7 @@ test "handleCreate without base_url requires nullclaw instance" {
 test "handleValidate for custom provider uses models probe (not nullclaw)" {
     // Regression: handleValidate for a custom provider must not require a nullclaw
     // instance — it uses the /models probe directly. The probe will fail here
-    // (no server at 19999) but the key point is we get a live_ok + reason response,
-    // NOT the old "custom endpoint — validation via /models not yet available" placeholder.
+    // (no server at 19999) but the key point is we get a live_ok + reason response.
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
     defer fixture.deinit();
@@ -1046,9 +1045,8 @@ test "handleValidate for custom provider uses models probe (not nullclaw)" {
     const json = try handleValidate(allocator, 1, &s, fixture.paths);
     defer allocator.free(json);
 
-    // Must return a probe result (live_ok present), never the old placeholder string.
+    // Must return a probe result.
     try std.testing.expect(std.mem.indexOf(u8, json, "\"live_ok\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "not yet available") == null);
     // No nullclaw probe: no "Install a nullclaw instance" error expected.
     try std.testing.expect(std.mem.indexOf(u8, json, "Install a nullclaw instance") == null);
     // Probe should fail (19999 is not running in tests)

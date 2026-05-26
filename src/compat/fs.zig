@@ -240,6 +240,14 @@ pub const Dir = struct {
         self.toInner().close(shared.io());
     }
 
+    pub fn sync(self: Dir) std.Io.File.SyncError!void {
+        const file: std.Io.File = .{
+            .handle = self.handle,
+            .flags = .{ .nonblocking = false },
+        };
+        try file.sync(shared.io());
+    }
+
     pub fn iterate(self: Dir) Iterator {
         return .{ .inner = self.toInner().iterate() };
     }

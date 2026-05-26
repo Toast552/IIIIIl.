@@ -40,9 +40,9 @@ observability, failure recovery, and human-in-the-loop control in under three
 minutes.
 
 It belongs in NullHub because NullHub is already the control plane for the
-ecosystem. The page can honestly present simulated NullTickets-style tasks,
-NullBoiler-style checkpoints, and NullWatch-style telemetry while leaving a
-clear future path to real cross-service wiring.
+ecosystem. The page keeps the local replay deterministic while attaching live
+NullWatch traces and NullBoiler workflow evidence whenever matching local
+instances are available.
 
 ## What Was Implemented
 
@@ -191,6 +191,6 @@ Recovered mission:
 - The MVP uses deterministic demo state instead of real cross-service execution.
 - The mission replay maps to NullTickets, NullBoiler, and NullWatch concepts,
   but does not yet write into those services.
-- A future version could add durable replay storage, side-by-side replay
-  comparison, exportable replay bundles, real NullWatch span hydration, and a
-  judge-mode one-click replay.
+- Durable replay storage, side-by-side replay comparison, live NullWatch
+  hydration, real NullBoiler run/checkpoint evidence, and judge-mode one-click
+  replay are included in this local-first slice.

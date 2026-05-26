@@ -18,6 +18,10 @@ http://127.0.0.1:19802/mission-control
 
 ## Run The Judge-Mode Demo
 
+From `/mission-control`, click `Judge Replay` to run the same deterministic
+reset, launch, failure hold, checkpoint fork, and recovered replay sequence from
+the UI.
+
 In a second terminal:
 
 ```bash
@@ -38,9 +42,10 @@ curl -fsS http://127.0.0.1:19802/api/mission-control/replay \
   -o mission-control-replay.json
 ```
 
-The same export is available from the `Export Replay` button in the UI. The
-artifact contains the current snapshot, the source fixture, and the ecosystem
-mapping used to explain the local replay.
+The same export is available from the `Save Replay` button in the UI. The
+button also persists a durable copy under `~/.nullhub/mission-control/replays/`.
+The artifact contains the current snapshot, the source fixture, and the
+ecosystem mapping used to explain the local replay.
 
 ## Record A Local Video
 
@@ -66,7 +71,8 @@ rerun the command.
 ## Presenter Script
 
 1. Show that the demo is local-first: one NullHub server, no external services.
-2. Launch the mission and call out the role board, workflow graph, and telemetry.
+2. Click `Judge Replay` and call out the role board, workflow graph, and
+   telemetry as the mission advances.
 3. Pause at the failure: the test tool fails, errors increment, and recovery is
    blocked until the failure phase.
 4. Click or let the script trigger checkpoint recovery.

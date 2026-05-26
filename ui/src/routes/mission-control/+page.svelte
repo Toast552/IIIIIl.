@@ -3,9 +3,9 @@
   import { api } from '$lib/api/client';
   import type {
     MissionControlEvent,
-    MissionControlControls,
     MissionControlPhase,
     MissionControlReplayArtifact,
+    MissionControlReplayRecord,
     MissionControlState,
     MissionControlTelemetry,
     MissionControlTraceRef,
@@ -18,82 +18,43 @@
     missionTracePanelRunIds,
     type TraceHydration,
   } from '$lib/missionControl/traceHydration';
+  import {
+    emptyControls,
+    emptyTelemetry,
+    formatBytes,
+    formatCost,
+    formatDuration,
+    formatScore,
+    formatTokens,
+    phaseOrder,
+    statusClass,
+    storyBeats,
+    tracePanelNote as missionTracePanelNote,
+    traceSourceLabel as missionTraceSourceLabel,
+    traceSourceSummary as missionTraceSourceSummary,
+  } from '$lib/missionControl/display';
+  import ReplayComparisonPanel from '$lib/missionControl/ReplayComparisonPanel.svelte';
+  import {
+    JUDGE_REPLAY_PREROLL_MS,
+    nextJudgeReplayTransition,
+  } from '$lib/missionControl/judgeReplay.js';
   import { orchestrationUiRoutes } from '$lib/orchestration/routes';
 
   type MissionAction = 'launch' | 'reset' | 'recover';
-  const emptyControls: MissionControlControls = {
-    can_launch: false,
-    can_recover: false,
-    can_reset: true,
-  };
-  const emptyTelemetry: MissionControlTelemetry = {
-    runs: 0,
-    spans: 0,
-    evals: 0,
-    errors: 0,
-    total_tokens: 0,
-    total_cost_usd: 0,
-    verdict: '-',
-  };
-  const phaseOrder: MissionControlPhase[] = [
-    'idle',
-    'launching',
-    'research',
-    'coding',
-    'checkpoint',
-    'testing',
-    'failed',
-    'forking',
-    'patching',
-    'retesting',
-    'review',
-    'completed',
-  ];
-  const storyBeats: { phase: MissionControlPhase; time: string; title: string; detail: string; tone?: 'error' | 'success' }[] = [
-    {
-      phase: 'launching',
-      time: '0:00',
-      title: 'Launch',
-      detail: 'Backlog claim and workflow dispatch start.',
-    },
-    {
-      phase: 'checkpoint',
-      time: '0:45',
-      title: 'Checkpoint',
-      detail: 'Agents save state before validation.',
-    },
-    {
-      phase: 'failed',
-      time: '1:10',
-      title: 'Failure',
-      detail: 'Test telemetry flags a failed tool call.',
-      tone: 'error',
-    },
-    {
-      phase: 'forking',
-      time: '1:35',
-      title: 'Intervene',
-      detail: 'Human forks from checkpoint with a fix instruction.',
-    },
-    {
-      phase: 'retesting',
-      time: '2:05',
-      title: 'Replay',
-      detail: 'Recovered run replays validation.',
-    },
-    {
-      phase: 'completed',
-      time: '2:30',
-      title: 'Review',
-      detail: 'Recovered mission reaches a passing verdict.',
-      tone: 'success',
-    },
-  ];
+  type JudgeReplayStage = 'idle' | 'resetting' | 'preroll' | 'launching' | 'waiting_failure' | 'holding_failure' | 'recovering' | 'watching';
 
   let mission = $state<MissionControlState | null>(null);
   let loading = $state(true);
   let acting = $state<MissionAction | null>(null);
   let exporting = $state(false);
+  let judgeReplayActive = $state(false);
+  let judgeReplayStage = $state<JudgeReplayStage>('idle');
+  let judgeReplayStartedAt = 0;
+  let judgeReplayRecoverAfterMs = 0;
+  let advancingJudgeReplay = false;
+  let savedReplays = $state<MissionControlReplayRecord[]>([]);
+  let savedReplaysLoading = $state(false);
+  let savedReplaysError = $state<string | null>(null);
   let error = $state<string | null>(null);
   let traceHydration = $state<Record<string, TraceHydration>>({});
   let traceHydrating = $state(false);
@@ -105,7 +66,6 @@
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
   const traceHydrationRefreshMs = 5000;
-
   const nodes = $derived(mission?.graph?.nodes || []);
   const edges = $derived(mission?.graph?.edges || []);
   const agents = $derived(mission?.agents || []);
@@ -113,7 +73,7 @@
   const telemetry = $derived(mission?.telemetry || emptyTelemetry);
   const controls = $derived(mission?.controls || emptyControls);
   const modeLabel = $derived((mission?.mode || 'deterministic_local_replay').replaceAll('_', ' '));
-  const activePoll = $derived(mission?.status === 'running' || mission?.status === 'intervention_required');
+  const activePoll = $derived(judgeReplayActive || mission?.status === 'running' || mission?.status === 'intervention_required');
   const failedRunId = $derived(mission?.failure?.run_id || mission?.failed_run_id || '');
   const recoveredRunId = $derived(mission?.recovery?.run_id || mission?.recovered_run_id || '');
   const failedTrace = $derived(failedRunId ? traceHydration[failedRunId] || null : null);
@@ -123,10 +83,12 @@
   const failedWorkflowRun = $derived(workflowEvidence?.failed_run || null);
   const recoveredWorkflowRun = $derived(workflowEvidence?.recovered_run || null);
   const workflowCheckpoint = $derived(workflowEvidence?.checkpoint || null);
+  const replayComparison = $derived(mission?.replay_comparison || null);
   const liveWorkflowAvailable = $derived(
     workflowEvidence?.status === 'available' && Boolean(failedWorkflowRun || recoveredWorkflowRun || workflowCheckpoint),
   );
   const displayTelemetry = $derived(hydratedTelemetry(telemetry, [failedTrace, recoveredTrace]));
+  const pageBusy = $derived(loading || acting !== null || exporting || judgeReplayActive);
 
   function schedulePoll() {
     if (disposed) return;
@@ -137,9 +99,9 @@
   async function loadMission() {
     try {
       const nextMission = await api.getMissionControlState();
-      mission = nextMission;
-      queueTraceHydration(nextMission);
+      applyMissionState(nextMission);
       error = null;
+      await advanceJudgeReplay(nextMission);
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -153,6 +115,8 @@
       clearTimeout(pollTimer);
       pollTimer = null;
     }
+    judgeReplayActive = false;
+    judgeReplayStage = 'idle';
     acting = name;
     try {
       let nextMission: MissionControlState | null = null;
@@ -160,8 +124,7 @@
       if (name === 'reset') nextMission = await api.resetMissionControl();
       if (name === 'recover') nextMission = await api.recoverMissionControl();
       if (nextMission) {
-        mission = nextMission;
-        queueTraceHydration(nextMission);
+        applyMissionState(nextMission);
       }
       error = null;
     } catch (e) {
@@ -172,20 +135,85 @@
     }
   }
 
+  async function runJudgeReplay() {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+    judgeReplayActive = true;
+    judgeReplayStage = 'resetting';
+    judgeReplayStartedAt = Date.now();
+    judgeReplayRecoverAfterMs = 0;
+    try {
+      applyMissionState(await api.resetMissionControl());
+      error = null;
+      if (disposed) return;
+
+      judgeReplayStage = 'preroll';
+      await sleep(JUDGE_REPLAY_PREROLL_MS);
+      if (disposed) return;
+
+      judgeReplayStage = 'launching';
+      applyMissionState(await api.launchMissionControl());
+      judgeReplayStage = 'waiting_failure';
+      error = null;
+    } catch (e) {
+      judgeReplayActive = false;
+      judgeReplayStage = 'idle';
+      error = (e as Error).message;
+    } finally {
+      schedulePoll();
+    }
+  }
+
+  async function advanceJudgeReplay(snapshot: MissionControlState) {
+    if (!judgeReplayActive || advancingJudgeReplay) return;
+
+    const now = Date.now();
+    const transition = nextJudgeReplayTransition(
+      snapshot,
+      {
+        active: judgeReplayActive,
+        stage: judgeReplayStage,
+        startedAtMs: judgeReplayStartedAt,
+        recoverAfterMs: judgeReplayRecoverAfterMs,
+      },
+      now,
+    );
+    judgeReplayActive = transition.active;
+    judgeReplayStage = transition.stage;
+    judgeReplayRecoverAfterMs = transition.recoverAfterMs;
+    if (transition.error) error = transition.error;
+    if (transition.action !== 'recover') return;
+
+    advancingJudgeReplay = true;
+    judgeReplayStage = 'recovering';
+    try {
+      const recoveredMission = await api.recoverMissionControl();
+      applyMissionState(recoveredMission);
+      if (recoveredMission.status === 'completed') {
+        judgeReplayActive = false;
+        judgeReplayStage = 'idle';
+      } else {
+        judgeReplayStage = 'watching';
+      }
+      error = null;
+    } catch (e) {
+      judgeReplayActive = false;
+      judgeReplayStage = 'idle';
+      error = (e as Error).message;
+    } finally {
+      advancingJudgeReplay = false;
+    }
+  }
+
   async function exportReplay() {
     exporting = true;
     try {
-      const artifact = await api.getMissionControlReplay();
-      const json = JSON.stringify(artifact, null, 2);
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = replayFileName(artifact);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
+      const saved = await api.saveMissionControlReplay();
+      savedReplays = [saved.record, ...savedReplays.filter((item) => item.id !== saved.record.id)].slice(0, 10);
+      savedReplaysError = null;
+      downloadReplayArtifact(saved.artifact, replayFileName(saved.artifact));
       error = null;
     } catch (e) {
       error = (e as Error).message;
@@ -194,8 +222,54 @@
     }
   }
 
+  async function loadSavedReplays() {
+    savedReplaysLoading = true;
+    try {
+      const result = await api.listMissionControlReplays();
+      savedReplays = result.items || [];
+      savedReplaysError = null;
+    } catch (e) {
+      savedReplaysError = (e as Error).message;
+    } finally {
+      savedReplaysLoading = false;
+    }
+  }
+
+  async function downloadStoredReplay(record: MissionControlReplayRecord) {
+    try {
+      const artifact = await api.getStoredMissionControlReplay(record.id);
+      downloadReplayArtifact(artifact, storedReplayFileName(record));
+      error = null;
+    } catch (e) {
+      error = (e as Error).message;
+    }
+  }
+
+  function downloadReplayArtifact(artifact: MissionControlReplayArtifact, filename: string) {
+    const json = JSON.stringify(artifact, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function applyMissionState(nextMission: MissionControlState) {
+    mission = nextMission;
+    queueTraceHydration(nextMission);
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   onMount(() => {
     void loadMission();
+    void loadSavedReplays();
   });
 
   onDestroy(() => {
@@ -252,14 +326,6 @@
     return traceWatchName;
   }
 
-  function statusClass(value: string | undefined): string {
-    if (value === 'done' || value === 'completed' || value === 'pass') return 'done';
-    if (value === 'active' || value === 'running' || value === 'recovering') return 'active';
-    if (value === 'error' || value === 'failed' || value === 'fail' || value === 'intervention_required') return 'error';
-    if (value === 'blocked') return 'warning';
-    return 'pending';
-  }
-
   function phaseRank(phase: MissionControlPhase | undefined | null): number {
     if (!phase) return -1;
     return phaseOrder.indexOf(phase);
@@ -279,26 +345,12 @@
     return 'done';
   }
 
-  function formatDuration(ms: number | undefined | null): string {
-    if (ms == null || ms <= 0) return '0.0s';
-    return `${(ms / 1000).toFixed(1)}s`;
-  }
-
-  function formatCost(cost: number | undefined | null): string {
-    if (!cost) return '$0.000';
-    return `$${cost.toFixed(3)}`;
-  }
-
-  function formatTokens(tokens: number | undefined | null): string {
-    return tokens ? tokens.toLocaleString() : '0';
-  }
-
-  function formatScore(score: number | undefined | null): string {
-    return score == null ? '-' : score.toFixed(2);
-  }
-
   function observabilityHref(runId: string | null | undefined): string {
-    return runId ? `/observability?run_id=${encodeURIComponent(runId)}` : '/observability';
+    const params = new URLSearchParams();
+    if (runId) params.set('run_id', runId);
+    if (traceWatchName) params.set('watch', traceWatchName);
+    const query = params.toString();
+    return query ? `/observability?${query}` : '/observability';
   }
 
   function traceLabel(trace: MissionControlTraceRef): string {
@@ -309,6 +361,28 @@
     const scenario = (artifact.scenario_id || mission?.scenario_id || 'mission').replace(/[^a-z0-9._-]+/gi, '-');
     const phase = (artifact.snapshot?.phase || mission?.phase || 'snapshot').replace(/[^a-z0-9._-]+/gi, '-');
     return `nullhub-${scenario}-${phase}-replay.json`;
+  }
+
+  function judgeReplayButtonLabel(): string {
+    if (!judgeReplayActive) return 'Judge Replay';
+    if (judgeReplayStage === 'resetting') return 'Resetting...';
+    if (judgeReplayStage === 'preroll') return 'Cueing...';
+    if (judgeReplayStage === 'launching') return 'Launching...';
+    if (judgeReplayStage === 'waiting_failure') return 'Waiting Failure...';
+    if (judgeReplayStage === 'holding_failure') return 'Holding Failure...';
+    if (judgeReplayStage === 'recovering') return 'Forking...';
+    return 'Watching...';
+  }
+
+  function storedReplayFileName(record: MissionControlReplayRecord): string {
+    const scenario = (record.scenario_id || 'mission').replace(/[^a-z0-9._-]+/gi, '-');
+    const phase = (record.phase || 'snapshot').replace(/[^a-z0-9._-]+/gi, '-');
+    return `nullhub-${scenario}-${phase}-${record.saved_at_ms}.json`;
+  }
+
+  function replaySavedAt(record: MissionControlReplayRecord): string {
+    if (!record.saved_at_ms) return '-';
+    return new Date(record.saved_at_ms).toLocaleString();
   }
 
   function spanCount(trace: TraceHydration | null): number {
@@ -348,22 +422,24 @@
   }
 
   function traceSourceLabel(trace: TraceHydration | null): string {
-    if (trace) return 'Live NullWatch';
-    if (traceHydrating) return 'Checking NullWatch';
-    return 'NullWatch unavailable';
+    return missionTraceSourceLabel(trace, traceHydrating);
   }
 
   function traceSourceSummary(): string {
-    if (liveTraceAvailable) return 'Live NullWatch';
-    if (traceHydrating && (failedRunId || recoveredRunId)) return 'Checking NullWatch';
-    return 'NullWatch unavailable';
+    return missionTraceSourceSummary({
+      liveTraceAvailable,
+      traceHydrating,
+      hasRunIds: Boolean(failedRunId || recoveredRunId),
+    });
   }
 
   function tracePanelNote(): string {
-    if (liveTraceAvailable) return 'Hydrated run detail';
-    if (traceHydrating && (failedRunId || recoveredRunId)) return 'Looking for live traces';
-    if (failedRunId || recoveredRunId) return 'No running instance';
-    return 'No run ids';
+    return missionTracePanelNote({
+      liveTraceAvailable,
+      traceHydrating,
+      hasRunIds: Boolean(failedRunId || recoveredRunId),
+      hasWatch: Boolean(traceWatchName),
+    });
   }
 
   function workflowRunHref(runId: string): string {
@@ -455,22 +531,25 @@
   }
 </script>
 
-<div class="mission-page" aria-busy={loading || acting !== null || exporting}>
+<div class="mission-page" aria-busy={pageBusy}>
   <header class="mission-header">
     <div>
       <h1>Mission Control</h1>
       <p>{mission?.headline || 'Loading mission state...'}</p>
     </div>
     <div class="actions">
-      <button onclick={() => runAction('reset')} disabled={acting !== null || loading}>Reset</button>
-      <button class="primary" onclick={() => runAction('launch')} disabled={!controls.can_launch || acting !== null || loading}>
+      <button onclick={() => runAction('reset')} disabled={acting !== null || loading || judgeReplayActive}>Reset</button>
+      <button class="primary" onclick={() => runJudgeReplay()} disabled={loading || acting !== null || exporting || judgeReplayActive}>
+        {judgeReplayButtonLabel()}
+      </button>
+      <button onclick={() => runAction('launch')} disabled={!controls.can_launch || acting !== null || loading || judgeReplayActive}>
         {acting === 'launch' ? 'Launching...' : 'Launch Mission'}
       </button>
-      <button class="danger" onclick={() => runAction('recover')} disabled={!controls.can_recover || acting !== null || loading}>
+      <button class="danger" onclick={() => runAction('recover')} disabled={!controls.can_recover || acting !== null || loading || judgeReplayActive}>
         {acting === 'recover' ? 'Forking...' : 'Fork From Checkpoint'}
       </button>
-      <button onclick={() => exportReplay()} disabled={!mission || exporting || loading}>
-        {exporting ? 'Exporting...' : 'Export Replay'}
+      <button onclick={() => exportReplay()} disabled={!mission || exporting || loading || judgeReplayActive}>
+        {exporting ? 'Saving...' : 'Save Replay'}
       </button>
     </div>
   </header>
@@ -522,6 +601,29 @@
         <strong>{mission.active_run_id || '-'}</strong>
       </div>
     </section>
+
+    {#if savedReplays.length > 0 || savedReplaysLoading || savedReplaysError}
+      <section class="saved-replays-panel">
+        <div class="panel-heading">
+          <h2>Saved Replays</h2>
+          <span>{savedReplaysLoading ? 'loading' : savedReplaysError ? 'unavailable' : `${savedReplays.length} stored`}</span>
+        </div>
+        {#if savedReplaysError}
+          <p class="saved-replay-error">{savedReplaysError}</p>
+        {/if}
+        {#if savedReplays.length > 0}
+          <div class="saved-replay-list">
+            {#each savedReplays.slice(0, 4) as replay}
+              <button class="saved-replay-row" onclick={() => downloadStoredReplay(replay)}>
+                <span>{replaySavedAt(replay)}</span>
+                <strong>{replay.phase} · {replay.status}</strong>
+                <small>{replay.scenario_id} · {formatBytes(replay.size_bytes)}</small>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </section>
+    {/if}
 
     <section class="story-strip" aria-label="Three minute mission story">
       {#each storyBeats as beat}
@@ -722,76 +824,12 @@
       </section>
     </div>
 
-    {#if mission.failure || mission.recovery || mission.status === 'completed'}
-      <section class="comparison-panel">
-        <div class="panel-heading">
-          <h2>Failure Recovery</h2>
-          <span>{runVerdict('failed')} -> {runVerdict('recovered')}</span>
-        </div>
-        <div class="comparison-grid">
-          <div class="run-card failed">
-            <span>Failed run</span>
-            <strong>{mission.failure?.run_id || mission.failed_run_id || '-'}</strong>
-            <dl>
-              <div>
-                <dt>Verdict</dt>
-                <dd class="error">{runVerdict('failed')}</dd>
-              </div>
-              <div>
-                <dt>Evidence</dt>
-                <dd>{mission.failure?.failed_step || 'awaiting validation'}</dd>
-              </div>
-              <div>
-                <dt>Checkpoint</dt>
-                <dd>{mission.failure?.checkpoint_id || '-'}</dd>
-              </div>
-            </dl>
-            {#if mission.failure}
-              <p>{mission.failure.error_message}</p>
-              {#if failedTrace}
-                <p class="trace-evidence">{spanCount(failedTrace)} spans · {evalCount(failedTrace)} evals · {formatCost(traceCost(failedTrace))}</p>
-                <a href={observabilityHref(mission.failure.run_id)}>Open failed trace</a>
-              {/if}
-                {#if failedWorkflowRun}
-                  <p class="trace-evidence">NullBoiler {failedWorkflowRun.run_id}{workflowRunSuffix(failedWorkflowRun)}</p>
-                  <a href={workflowRunHref(failedWorkflowRun.run_id)}>Open failed workflow</a>
-              {/if}
-            {/if}
-          </div>
-
-          <div class="run-card recovered">
-            <span>Recovered run</span>
-            <strong>{mission.recovery?.run_id || mission.recovered_run_id || '-'}</strong>
-            <dl>
-              <div>
-                <dt>Verdict</dt>
-                <dd class={statusClass(runVerdict('recovered'))}>{runVerdict('recovered')}</dd>
-              </div>
-              <div>
-                <dt>Forked from</dt>
-                <dd>{mission.recovery?.forked_from || mission.failure?.checkpoint_id || '-'}</dd>
-              </div>
-              <div>
-                <dt>Instruction</dt>
-                <dd>{mission.recovery?.human_instruction || mission.failure?.suggested_intervention || '-'}</dd>
-              </div>
-            </dl>
-            {#if mission.recovery}
-              <p>{mission.recovery.status}</p>
-              {#if recoveredTrace}
-                <p class="trace-evidence">{spanCount(recoveredTrace)} spans · {evalCount(recoveredTrace)} evals · {formatCost(traceCost(recoveredTrace))}</p>
-                <a href={observabilityHref(mission.recovery.run_id)}>Open recovered trace</a>
-              {/if}
-                {#if recoveredWorkflowRun}
-                  <p class="trace-evidence">NullBoiler {recoveredWorkflowRun.run_id}{workflowRunSuffix(recoveredWorkflowRun)}</p>
-                  <a href={workflowRunHref(recoveredWorkflowRun.run_id)}>Open recovered workflow</a>
-              {/if}
-            {:else}
-              <p>Waiting for human checkpoint fork.</p>
-            {/if}
-          </div>
-        </div>
-      </section>
+    {#if replayComparison}
+      <ReplayComparisonPanel
+        {replayComparison}
+        {traceWatchName}
+        boilerInstance={workflowEvidence?.boiler_instance || null}
+      />
     {/if}
 
     <section class="timeline-panel">
@@ -956,7 +994,6 @@
   .mode-strip span,
   .metric-grid span,
   .story-beat span,
-  .run-card span,
   .failure-box span,
   .recovery-box span {
     display: block;
@@ -1035,13 +1072,53 @@
   .graph-panel,
   .agents-panel,
   .telemetry-panel,
-  .comparison-panel,
+  .saved-replays-panel,
   .timeline-panel {
     border: 1px solid var(--border);
     background: var(--bg-surface);
     border-radius: 4px;
     padding: 1rem;
     min-width: 0;
+  }
+
+  .saved-replay-list {
+    margin-top: 0.85rem;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+
+  .saved-replay-row {
+    min-height: 5rem;
+    text-align: left;
+    text-transform: none;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0.25rem;
+    overflow: hidden;
+  }
+
+  .saved-replay-row span,
+  .saved-replay-row small {
+    color: var(--fg-muted);
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
+  }
+
+  .saved-replay-row strong {
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    overflow-wrap: anywhere;
+  }
+
+  .saved-replay-error {
+    margin: 0.85rem 0 0;
+    color: var(--error);
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
   }
 
   .graph-row {
@@ -1173,8 +1250,7 @@
 
   .failure-box,
   .recovery-box,
-  .trace-card,
-  .run-card {
+  .trace-card {
     margin-top: 1rem;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -1188,50 +1264,6 @@
 
   .recovery-box {
     border-color: var(--success);
-  }
-
-  .comparison-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 1rem;
-  }
-
-  .run-card {
-    min-width: 0;
-  }
-
-  .run-card.failed {
-    border-color: var(--error);
-  }
-
-  .run-card.recovered {
-    border-color: var(--success);
-  }
-
-  .run-card dl {
-    margin: 0.75rem 0;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.65rem;
-  }
-
-  .run-card dt,
-  .run-card dd {
-    margin: 0;
-  }
-
-  .run-card dt {
-    color: var(--fg-muted);
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    margin-bottom: 0.25rem;
-  }
-
-  .run-card dd {
-    color: var(--fg);
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
-    overflow-wrap: anywhere;
   }
 
   .trace-card {
@@ -1313,24 +1345,21 @@
 
   .failure-box strong,
   .recovery-box strong,
-  .trace-card strong,
-  .run-card strong {
+  .trace-card strong {
     display: block;
     margin-bottom: 0.35rem;
     color: var(--fg);
   }
 
   .failure-box p,
-  .recovery-box p,
-  .run-card p {
+  .recovery-box p {
     color: var(--fg-muted);
     font-size: 0.8125rem;
     margin-bottom: 0.65rem;
   }
 
   .failure-box p.trace-evidence,
-  .recovery-box p.trace-evidence,
-  .run-card p.trace-evidence {
+  .recovery-box p.trace-evidence {
     margin: 0.65rem 0 0;
     color: var(--fg-muted);
     font-family: var(--font-mono);
@@ -1348,7 +1377,6 @@
   .trace-card a,
   .failure-box a,
   .recovery-box a,
-  .run-card a,
   .event-meta a {
     color: var(--accent);
     text-decoration: none;
@@ -1359,8 +1387,7 @@
 
   .trace-card a,
   .failure-box a,
-  .recovery-box a,
-  .run-card a {
+  .recovery-box a {
     display: inline-flex;
     width: fit-content;
     border: 1px solid var(--accent-dim);
@@ -1380,8 +1407,7 @@
   }
 
   .failure-box a,
-  .recovery-box a,
-  .run-card a {
+  .recovery-box a {
     margin-top: 0.65rem;
   }
 
@@ -1447,6 +1473,7 @@
 
   @media (max-width: 1200px) {
     .graph-row,
+    .saved-replay-list,
     .story-strip,
     .timeline {
       grid-template-columns: 1fr;
@@ -1462,10 +1489,6 @@
     }
 
     .mission-grid {
-      grid-template-columns: 1fr;
-    }
-
-    .comparison-grid {
       grid-template-columns: 1fr;
     }
   }
@@ -1486,8 +1509,7 @@
 
     .command-strip,
     .mode-strip,
-    .metric-grid,
-    .run-card dl {
+    .metric-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 

@@ -15,7 +15,7 @@ NullTickets, NullWatch).
 - **Process supervision** -- start, stop, restart, crash recovery with backoff
 - **Health monitoring** -- periodic HTTP health checks, dashboard status cards
 - **Cross-component linking** -- auto-connect `NullTickets -> NullBoiler`, generate native tracker config, and inspect queue/orchestrator status from one UI
-- **Config management** -- structured editors for `NullClaw`, `NullBoiler`, `NullTickets`, and `NullWatch`, with raw JSON fallback when needed
+- **Config management** -- structured editors for `NullClaw`, `NullBoiler`, `NullTickets`, and `NullWatch`, plus direct raw JSON editing when needed
 - **Log viewing** -- tail and live SSE streaming per instance
 - **One-click updates** -- download, migrate config, rollback on failure
 - **Multi-instance** -- run multiple instances of the same component side by side
@@ -166,12 +166,17 @@ schema, references, ordering, required phases, graph links, and telemetry phase
 coverage. Mission timeline trace links deep-link to `/observability?run_id=...`.
 When a managed NullWatch instance is running, `/mission-control` hydrates the
 failure and recovery trace panels from live run detail through the observability
-proxy. When a NullBoiler instance has matching workflow evidence, the Mission
-Control API includes real workflow run links and checkpoint metadata resolved
-through the orchestration proxy.
+proxy and preserves the selected watch in trace links. When a managed
+NullBoiler instance has matching workflow evidence, the Mission Control API
+includes that instance name with real workflow run links and checkpoint metadata
+resolved through the orchestration proxy.
 `GET /api/mission-control/replay` exports the current snapshot, source fixture,
-and ecosystem mapping metadata as a portable JSON artifact for debugging and
-review.
+the side-by-side failed/recovered replay artifact comparison once the recovered
+run completes, and ecosystem mapping metadata as a portable JSON artifact for
+debugging and review. `POST /api/mission-control/replay/save` stores that
+artifact under `~/.nullhub/mission-control/replays/`; `GET
+/api/mission-control/replays` lists saved replay records and `GET
+/api/mission-control/replays/{id}` reads the durable artifact back.
 
 ### Mission Control Demo
 
@@ -181,12 +186,12 @@ Start NullHub locally and open `/mission-control`:
 zig build run -- serve --host 127.0.0.1 --port 19802 --no-open
 ```
 
-The page provides `Reset`, `Launch Mission`, and `Fork From Checkpoint`
-controls. Launching the mission advances a deterministic agent workflow through
-research, patching, checkpointing, test failure, human intervention, recovered
-test pass, and review completion. Timeline events include trace chips that map
-the cinematic replay back to local NullWatch-style run ids, span ids, operations,
-and eval keys. The page also includes timed story beats and a failed-vs-recovered
+The page provides `Judge Replay`, `Reset`, `Launch Mission`, and
+`Fork From Checkpoint` controls. `Judge Replay` runs the full deterministic
+reset, launch, failure hold, checkpoint fork, and recovered replay sequence from
+one click. Timeline events include trace chips that map the cinematic replay
+back to local NullWatch-style run ids, span ids, operations, and eval keys. The
+page also includes timed story beats and a failed-vs-recovered replay artifact
 comparison panel so the three-minute demo can be followed directly from the
 screen.
 
@@ -215,7 +220,8 @@ curl -fsS http://127.0.0.1:19802/api/mission-control/replay \
   -o mission-control-replay.json
 ```
 
-The same export is available from the `Export Replay` button in Mission Control.
+The same export is available from the `Save Replay` button in Mission Control,
+which also writes a durable server-side copy.
 See `docs/demo/mission-control-replay-artifact.md` for the artifact shape and
 ecosystem mapping.
 

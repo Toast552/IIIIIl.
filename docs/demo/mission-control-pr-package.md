@@ -13,14 +13,16 @@ Adds a local-first Mission Control demo to NullHub: a three-minute control-room
 experience for lightweight agent infrastructure.
 
 The demo shows a deterministic agent mission from launch to failure, human
-checkpoint recovery, recovered validation, review, trace links, telemetry, and
-replay export. It is designed to run locally without hosted services, model
-keys, or external infrastructure.
+checkpoint recovery, recovered validation, review, trace links, telemetry,
+side-by-side failed/recovered replay evidence, and durable replay save/export.
+It is designed to run locally without hosted services, model keys, or external
+infrastructure.
 
 What changed:
 
 - Added `/api/mission-control/*` for mission state, reset, launch, recovery,
-  and replay export.
+  replay export, durable replay save, durable replay list, and durable replay
+  readback.
 - Added a Mission Control domain/state-machine layer in
   `src/core/mission_control.zig` and kept `src/api/mission_control.zig` as the
   HTTP adapter.
@@ -31,14 +33,20 @@ What changed:
 - Added `/mission-control` UI with mission controls, role board, workflow
   graph, telemetry, timeline, trace links, story beats, and failed-vs-recovered
   comparison.
+- Added a one-click `Judge Replay` button that runs reset, launch, failure
+  hold, checkpoint recovery, and recovered validation from the UI.
 - Added deep links from mission events to `/observability?run_id=...`.
 - Hydrates failure/recovery trace panels from a running NullWatch instance via
   the existing observability proxy when live run detail is available.
 - Resolves real NullBoiler workflow run ids and checkpoint metadata server-side
   through the existing orchestration proxy when matching workflow evidence is
   available.
+- Stores saved replay artifacts under
+  `~/.nullhub/mission-control/replays/` using atomic durable writes.
 - Keeps mission runtime state scoped to the NullHub server instance and keeps
   live hydration discovery outside the Svelte route component.
+- Keeps the Judge Replay transition model in a standalone frontend helper with
+  a local unit test.
 - Added local smoke test, judge-mode demo driver, macOS video recorder,
   screenshots, README docs, and hackathon submission notes.
 
@@ -49,20 +57,19 @@ surrounding repositories already sketch out runtime, orchestration, task state,
 and observability. What was missing was a memorable local vertical slice that
 lets reviewers see those concepts working as one operator experience.
 
-This PR keeps the demo deterministic and honest: it does not pretend to mutate
-real NullTickets, NullBoiler, NullClaw, or NullWatch services. Instead it
-provides a stable local replay with explicit ecosystem mapping and a future path
-for real service hydration.
+This PR keeps the demo deterministic and honest: it does not mutate real
+NullTickets, NullBoiler, NullClaw, or NullWatch state. When local NullWatch or
+NullBoiler instances are running and contain matching evidence, Mission Control
+hydrates trace panels, workflow run ids, and checkpoint metadata from those
+services; otherwise it falls back to the deterministic replay fixture.
 
 Validation performed:
 
 ```bash
-zig build test -Dembed-ui=false -Dbuild-ui=false --summary all
 npm --prefix ui run build
-zig build test --summary all
-zig build test-integration -Dembed-ui=false -Dbuild-ui=false --summary all
-NULLHUB_URL=http://127.0.0.1:19802 ./tests/test_mission_control_smoke.sh
-NULLHUB_URL=http://127.0.0.1:19802 MISSION_CONTROL_OPEN_BROWSER=0 ./scripts/mission_control_demo.sh
+npm --prefix ui run test:mission-control
+zig build test
+zig build
 git diff --check
 ```
 
@@ -115,16 +122,18 @@ Screenshots:
    - recovered validation
    - review complete
 
-5. Open a trace link or export the replay artifact:
+5. Open a trace link or save/export the replay artifact:
 
    ```bash
    curl -fsS http://127.0.0.1:19802/api/mission-control/replay \
      -o mission-control-replay.json
    ```
 
+   The same artifact can be persisted from the UI with `Save Replay`.
+
 ## Three-Minute Hackathon Story
 
-0:00 - Launch the mission from NullHub.
+0:00 - Click `Judge Replay` in NullHub.
 
 0:30 - Agents light up on the role board and workflow graph.
 
@@ -141,17 +150,14 @@ exportable replay evidence.
 
 ## Latest Local Validation
 
-Last run: 2026-05-25
+Last run: 2026-05-26
 
 | Command | Result |
 | --- | --- |
 | `npm --prefix ui run build` | pass |
-| `zig build test -Dembed-ui=false -Dbuild-ui=false --summary all` | pass |
-| `zig build test --summary all` | pass |
-| `zig build test-integration -Dembed-ui=false -Dbuild-ui=false --summary all` | pass |
-| `NULLHUB_URL=http://127.0.0.1:19802 ./tests/test_mission_control_smoke.sh` | pass |
-| `NULLHUB_URL=http://127.0.0.1:19802 MISSION_CONTROL_OPEN_BROWSER=0 ./scripts/mission_control_demo.sh` | pass |
-| Browser check of `/mission-control` load, controls, overlay, and console errors | pass |
+| `npm --prefix ui run test:mission-control` | pass |
+| `zig build test` | pass |
+| `zig build` | pass |
 | `git diff --check` | pass |
 
 ## Video Artifact
@@ -182,9 +188,3 @@ This PR intentionally does not:
 - require NullTickets, NullBoiler, NullClaw, or NullWatch to be running;
 - mutate real task or workflow state;
 - replace the existing observability page.
-
-## Future Work
-
-- Compare failed and recovered replay artifacts side by side.
-- Add durable mission replay storage.
-- Add a one-click judge replay button in the UI.

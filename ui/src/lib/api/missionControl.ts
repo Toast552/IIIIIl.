@@ -109,6 +109,38 @@ export type MissionControlRecovery = {
   human_instruction: string;
   status: string;
 };
+export type MissionControlReplayArtifactPanel = {
+  artifact_kind: string;
+  artifact_role: 'failed' | 'recovered' | string;
+  run_id: string;
+  workflow_run_id: string | null;
+  workflow_status: string | null;
+  phase: string;
+  status: string;
+  headline: string;
+  verdict: string;
+  trace_id: string | null;
+  checkpoint_id: string | null;
+  checkpoint_step: string | null;
+  forked_from: string | null;
+  human_instruction: string | null;
+  failure_message: string | null;
+  telemetry: MissionControlTelemetry;
+};
+export type MissionControlReplayArtifactDelta = {
+  verdict_changed: boolean;
+  checkpoint_reused: boolean;
+  spans_delta: number;
+  evals_delta: number;
+  errors_delta: number;
+  tokens_delta: number;
+  cost_delta_usd: number;
+};
+export type MissionControlReplayComparison = {
+  failed: MissionControlReplayArtifactPanel;
+  recovered: MissionControlReplayArtifactPanel;
+  delta: MissionControlReplayArtifactDelta;
+};
 export type MissionControlState = {
   schema_version: number;
   mode: string;
@@ -134,6 +166,7 @@ export type MissionControlState = {
   events: MissionControlEvent[];
   telemetry: MissionControlTelemetry;
   workflow_evidence: MissionControlWorkflowEvidence;
+  replay_comparison: MissionControlReplayComparison | null;
   failure: MissionControlFailure | null;
   recovery: MissionControlRecovery | null;
 };
@@ -174,11 +207,38 @@ export type MissionControlReplayArtifact = {
     nullwatch: MissionControlObservabilityMapping;
   };
 };
+export type MissionControlReplayRecord = {
+  id: string;
+  saved_at_ms: number;
+  generated_at_ms: number;
+  scenario_id: string;
+  scenario_version: string;
+  mission_id: string;
+  title: string;
+  status: string;
+  phase: string;
+  artifact_kind: string;
+  artifact_path: string;
+  size_bytes: number;
+};
+export type MissionControlReplayList = {
+  items: MissionControlReplayRecord[];
+  count: number;
+};
+export type MissionControlReplaySaveResult = {
+  record: MissionControlReplayRecord;
+  artifact: MissionControlReplayArtifact;
+};
 
 export function createMissionControlApi(request: RequestFn) {
   return {
     getMissionControlState: () => request<MissionControlState>('/mission-control/state'),
     getMissionControlReplay: () => request<MissionControlReplayArtifact>('/mission-control/replay'),
+    saveMissionControlReplay: () =>
+      request<MissionControlReplaySaveResult>('/mission-control/replay/save', { method: 'POST' }),
+    listMissionControlReplays: () => request<MissionControlReplayList>('/mission-control/replays'),
+    getStoredMissionControlReplay: (id: string) =>
+      request<MissionControlReplayArtifact>(`/mission-control/replays/${encodeURIComponent(id)}`),
     launchMissionControl: () =>
       request<MissionControlState>('/mission-control/launch', { method: 'POST' }),
     resetMissionControl: () =>

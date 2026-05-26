@@ -51,10 +51,10 @@ reviewable demo mode rather than a throwaway mock:
   deterministic local replay boundary.
 - Tests cover the mission state machine, action routing, invalid transitions,
   and API response shape.
-- Documentation explains how to run, demo, validate, and extend the feature.
-- The implementation leaves a clear path to real NullTickets, NullBoiler, and
-  NullWatch integration without pretending those services are already being
-  mutated by the demo.
+- Documentation explains how to run, demo, validate, and operate the feature.
+- The implementation hydrates live NullWatch and NullBoiler evidence when
+  matching local instances are available while keeping the replay deterministic
+  and avoiding real task/workflow mutation.
 
 ## One-Week Delivery Plan
 
@@ -86,7 +86,7 @@ Day 3 - Add observability affordances.
 Day 4 - Strengthen demo automation.
 
 - Status: DONE
-- Add a judge-mode reset/launch/recover script or one-click replay action.
+- Add a judge-mode reset/launch/recover script and one-click replay action.
 - Add a local presentation runbook and required local run-through before demo.
 - Add a macOS video recording script for PR/hackathon review artifacts.
 - Capture updated screenshots after the full flow.
@@ -100,12 +100,13 @@ Day 5 - Add export/replay artifact.
 
 Day 6 - Polish the three-minute story.
 
-- Status: IN PROGRESS
+- Status: DONE
 - DONE: Added in-screen three-minute story beats so the demo has visible
   presenter timing and narrative anchors.
 - DONE: Added an explicit failed run vs recovered run comparison panel with
   verdict, checkpoint, intervention, and trace links.
-- Remaining: Test from a clean clone with only documented prerequisites.
+- DONE: Added durable replay storage and a one-click Judge Replay action so the
+  story can be replayed and reviewed from the UI.
 
 Day 7 - Stabilize for submission.
 
@@ -119,13 +120,15 @@ Day 7 - Stabilize for submission.
 - DONE: Record or refresh the optional `.mov` video artifact for upload outside
   git.
 
-## Stretch Scope
+## Completed Scope
 
-- Drive real NullTickets/NullBoiler action APIs when configured.
-- Side-by-side replay comparison.
-- Animated graph edges and span waterfall.
-- Judge mode: one button to reset and replay the full cinematic demo.
-- Export mission replay bundle as JSON.
+- DONE: Side-by-side replay comparison.
+- DONE: Judge mode button to reset and replay the full cinematic demo.
+- DONE: Export mission replay bundle as JSON.
+- DONE: Durable mission replay storage.
+- DONE: NullWatch trace hydration when a local running instance is available.
+- DONE: NullBoiler workflow run ids and checkpoint metadata when matching local
+  evidence is available.
 
 ## Iterations
 
@@ -199,7 +202,8 @@ Status: DONE
 
 - Shape mission events so they can map to Observability runs later.
 - Show NullWatch-style run ids.
-- Preserve future path to real NullTickets/NullBoiler/NullWatch integration.
+- Hydrate from live NullWatch and NullBoiler when matching local evidence is
+  available, without mutating real task or workflow state.
 
 Definition of done:
 
@@ -245,7 +249,7 @@ Status: DONE
 - Added Flight Recorder deep links that work as local affordances and can point
   at real NullWatch runs when configured.
 - Added a local smoke-test script for the full demo sequence.
-- Kept optional mission replay JSON export as the Day 5 follow-up instead of
+- Kept mission replay JSON export in the Mission Control slice instead of
   mixing artifact export into the observability slice.
 
 Definition of done:
@@ -277,8 +281,9 @@ Status: DONE
 
 - Added `GET /api/mission-control/replay` as a read-only export endpoint.
 - Export includes the current snapshot, source replay fixture, fixture path,
-  schema identity, and ecosystem mapping metadata.
-- Added `Export Replay` in the Mission Control UI.
+  schema identity, failed/recovered replay artifact comparison, and ecosystem
+  mapping metadata.
+- Added `Save Replay` in the Mission Control UI.
 - Added smoke/demo validation for the replay artifact.
 - Added `docs/demo/mission-control-replay-artifact.md`.
 
@@ -294,11 +299,10 @@ Status: DONE
 
 - Added a compact story strip to `/mission-control` with six timed beats:
   launch, checkpoint, failure, intervention, replay, and review.
-- Added a `Failure Recovery` comparison panel that makes the failed run,
-  recovered run, checkpoint, human instruction, verdict transition, and
-  observability links visible without presenter narration.
-- Kept the change frontend-only because the existing mission state API already
-  exposes the required evidence.
+- Added a `Replay Artifacts` comparison panel that makes the failed artifact,
+  recovered artifact, checkpoint reuse, verdict transition, telemetry deltas,
+  workflow ids, and observability links visible after the recovery artifact
+  exists in the current state.
 
 Definition of done:
 
@@ -312,11 +316,10 @@ Status: DONE
 
 - Added `docs/demo/mission-control-pr-package.md` with a copy-ready PR title,
   PR description, reviewer path, three-minute story, validation matrix, video
-  artifact instructions, scope boundaries, and future work.
+  artifact instructions, and scope boundaries.
 - Linked the PR package from the README demo section and project tree.
-- Updated Day 7 status so the remaining final-submission task is explicit:
-  upload the ignored local `.mov` artifact if the PR or hackathon submission
-  needs an attached video.
+- Documented that the ignored local `.mov` artifact can be uploaded outside git
+  when the PR or hackathon submission needs an attached video.
 
 Definition of done:
 
@@ -336,15 +339,28 @@ Status: DONE
 - Refreshed the ignored local video artifact at
   `docs/demo/nullhub-mission-control-demo.mov`.
 
+### Iteration 13 - Durable Replay Storage
+
+Status: DONE
+
+- Added file-backed mission replay storage under
+  `~/.nullhub/mission-control/replays/`.
+- Added `POST /api/mission-control/replay/save` to persist the current replay
+  artifact without mutating mission runtime state.
+- Added `GET /api/mission-control/replays` and
+  `GET /api/mission-control/replays/{id}` to list and read saved artifacts.
+- Updated `/mission-control` so `Save Replay` persists the artifact, downloads
+  the saved JSON, and shows recent durable records.
+
 Definition of done:
 
-- The demo can be run and recorded locally from the documented commands.
-- The video artifact is available for manual upload but remains excluded from
-  the source diff.
+- A saved replay survives process restart as a self-contained JSON artifact.
+- The UI can save the current replay and retrieve recent saved artifacts through
+  the API.
 
 ## Three-Minute Script
 
-0:00 - Open `/mission-control`; click `Launch Mission`.
+0:00 - Open `/mission-control`; click `Judge Replay`.
 
 0:30 - Research and coding phases light up. Timeline records task claim, model
 planning, code patch, and checkpoint creation.
@@ -365,8 +381,10 @@ cost, duration, and eval verdict.
 ```mermaid
 flowchart LR
   H["NullHub /mission-control"] --> A["/api/mission-control/state"]
-  H --> C["/api/mission-control/actions"]
+  H --> C["/api/mission-control/reset, launch, recover"]
+  H --> R["/api/mission-control/replay/save + replays"]
   C --> S["Mission demo state"]
+  R --> D["~/.nullhub/mission-control/replays"]
   S --> T["NullTickets-like tasks/events"]
   S --> B["NullBoiler-like workflow/checkpoints"]
   S --> W["NullWatch-like spans/evals"]
@@ -374,8 +392,9 @@ flowchart LR
 
 ## Risks
 
-- Real cross-service orchestration can consume the week. Control this by making
-  the MVP deterministic first and adding integration hooks later.
+- Real cross-service orchestration can consume the week. Keep this demo
+  read-only against live NullWatch/NullBoiler evidence and avoid mutating real
+  task or workflow state.
 - Visual polish can expand without limit. Keep one page and one scenario.
-- If backend state becomes complicated, switch to a static replay bundle with
-  action-controlled phase transitions.
+- If backend state becomes complicated, keep mission runtime scoped to the
+  NullHub server instance and keep replay artifacts durable on disk.

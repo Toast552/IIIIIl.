@@ -3,6 +3,8 @@ const std_compat = @import("compat");
 const helpers = @import("helpers.zig");
 const query = @import("query.zig");
 const mission = @import("../core/mission_control.zig");
+const replay_store = @import("../core/mission_replay_store.zig");
+const paths_mod = @import("../core/paths.zig");
 
 const ApiResponse = helpers.ApiResponse;
 
@@ -23,6 +25,7 @@ pub const WorkflowEvidenceResolver = struct {
 };
 
 pub const Integrations = struct {
+    paths: ?paths_mod.Paths = null,
     workflow_evidence_resolver: ?WorkflowEvidenceResolver = null,
 };
 
@@ -37,13 +40,18 @@ pub fn handleWithIntegrations(allocator: std.mem.Allocator, method: []const u8, 
 
     const is_state = std.mem.eql(u8, path, prefix ++ "/state");
     const is_replay = std.mem.eql(u8, path, prefix ++ "/replay");
+    const is_replay_save = std.mem.eql(u8, path, prefix ++ "/replay/save");
+    const is_replays = std.mem.eql(u8, path, prefix ++ "/replays");
+    const stored_replay_id = storedReplayId(path);
     const is_reset = std.mem.eql(u8, path, prefix ++ "/reset");
     const is_launch = std.mem.eql(u8, path, prefix ++ "/launch");
     const is_recover = std.mem.eql(u8, path, prefix ++ "/recover");
-    if (!is_state and !is_replay and !is_reset and !is_launch and !is_recover) return helpers.notFound();
+    if (!is_state and !is_replay and !is_replay_save and !is_replays and stored_replay_id == null and !is_reset and !is_launch and !is_recover) return helpers.notFound();
 
-    if (is_state or is_replay) {
+    if (is_state or is_replay or is_replays or stored_replay_id != null) {
         if (!std.mem.eql(u8, method, "GET")) return helpers.methodNotAllowed();
+    } else if (is_replay_save) {
+        if (!std.mem.eql(u8, method, "POST")) return helpers.methodNotAllowed();
     } else if (!std.mem.eql(u8, method, "POST")) {
         return helpers.methodNotAllowed();
     }
@@ -52,6 +60,9 @@ pub fn handleWithIntegrations(allocator: std.mem.Allocator, method: []const u8, 
 
     if (is_state) return stateResponse(allocator, runtimeSnapshot(store), now_ms, integrations);
     if (is_replay) return replayResponse(allocator, runtimeSnapshot(store), now_ms, integrations);
+    if (is_replay_save) return saveReplayResponse(allocator, runtimeSnapshot(store), now_ms, integrations);
+    if (is_replays) return listReplayResponse(allocator, target, integrations);
+    if (stored_replay_id) |id| return storedReplayResponse(allocator, id, integrations);
 
     if (is_reset) {
         store.mutex.lock();
@@ -113,6 +124,78 @@ fn replayResponse(allocator: std.mem.Allocator, runtime: mission.RuntimeState, n
     return helpers.jsonOk(body);
 }
 
+fn saveReplayResponse(allocator: std.mem.Allocator, runtime: mission.RuntimeState, now_ms: i64, integrations: Integrations) ApiResponse {
+    const paths = integrations.paths orelse return helpers.serverError();
+    const parsed = mission.parseReplay(allocator) catch return helpers.serverError();
+    const workflow_evidence = resolveWorkflowEvidence(allocator, integrations, mission.workflowEvidenceRefs(parsed.value));
+    var view = mission.buildReplayArtifactViewFromParsed(allocator, parsed, runtime, now_ms, workflow_evidence) catch return helpers.serverError();
+    defer view.deinit(allocator);
+
+    const artifact_body = std.json.Stringify.valueAlloc(allocator, view.artifact, .{ .whitespace = .indent_2 }) catch return helpers.serverError();
+    defer allocator.free(artifact_body);
+
+    var record = replay_store.save(allocator, paths, now_ms, artifact_body, replayMetadata(view.artifact)) catch return helpers.serverError();
+    defer record.deinit(allocator);
+
+    const response = struct {
+        record: replay_store.Record,
+        artifact: mission.ReplayArtifact,
+    }{
+        .record = record,
+        .artifact = view.artifact,
+    };
+    const body = std.json.Stringify.valueAlloc(allocator, response, .{ .whitespace = .indent_2 }) catch return helpers.serverError();
+    return helpers.jsonOk(body);
+}
+
+fn listReplayResponse(allocator: std.mem.Allocator, target: []const u8, integrations: Integrations) ApiResponse {
+    const paths = integrations.paths orelse return helpers.serverError();
+    const requested_limit = query.usizeValue(target, "limit", 25);
+    const limit = std.math.clamp(requested_limit, 1, 100);
+    const records = replay_store.list(allocator, paths, limit) catch return helpers.serverError();
+    defer replay_store.deinitRecords(allocator, records);
+
+    const response = struct {
+        items: []const replay_store.Record,
+        count: usize,
+    }{
+        .items = records,
+        .count = records.len,
+    };
+    const body = std.json.Stringify.valueAlloc(allocator, response, .{ .whitespace = .indent_2 }) catch return helpers.serverError();
+    return helpers.jsonOk(body);
+}
+
+fn storedReplayResponse(allocator: std.mem.Allocator, id: []const u8, integrations: Integrations) ApiResponse {
+    const paths = integrations.paths orelse return helpers.serverError();
+    const body = replay_store.read(allocator, paths, id) catch |err| switch (err) {
+        error.FileNotFound, error.InvalidReplayId => return helpers.notFound(),
+        else => return helpers.serverError(),
+    };
+    return helpers.jsonOk(body);
+}
+
+fn replayMetadata(artifact: mission.ReplayArtifact) replay_store.Metadata {
+    return .{
+        .generated_at_ms = artifact.generated_at_ms,
+        .scenario_id = artifact.scenario_id,
+        .scenario_version = artifact.scenario_version,
+        .mission_id = artifact.snapshot.mission_id,
+        .title = artifact.snapshot.title,
+        .status = artifact.snapshot.status,
+        .phase = artifact.snapshot.phase,
+        .artifact_kind = artifact.artifact_kind,
+    };
+}
+
+fn storedReplayId(path: []const u8) ?[]const u8 {
+    const item_prefix = prefix ++ "/replays/";
+    if (!std.mem.startsWith(u8, path, item_prefix)) return null;
+    const id = path[item_prefix.len..];
+    if (id.len == 0 or std.mem.indexOfScalar(u8, id, '/') != null) return null;
+    return id;
+}
+
 fn resolveWorkflowEvidence(allocator: std.mem.Allocator, integrations: Integrations, refs: mission.WorkflowEvidenceRefs) mission.WorkflowEvidence {
     if (integrations.workflow_evidence_resolver) |resolver| return resolver.run(allocator, refs);
     return mission.workflowEvidenceUnavailable("not_configured");
@@ -146,6 +229,16 @@ var test_workflow_resolver_state: u8 = 0;
 
 fn handleForTest(allocator: std.mem.Allocator, method: []const u8, target: []const u8, store: *RuntimeStore) ApiResponse {
     return handleWithIntegrations(allocator, method, target, store, .{
+        .workflow_evidence_resolver = .{
+            .ptr = &test_workflow_resolver_state,
+            .resolve = testWorkflowEvidenceResolver,
+        },
+    });
+}
+
+fn handleForTestWithPaths(allocator: std.mem.Allocator, method: []const u8, target: []const u8, store: *RuntimeStore, paths: paths_mod.Paths) ApiResponse {
+    return handleWithIntegrations(allocator, method, target, store, .{
+        .paths = paths,
         .workflow_evidence_resolver = .{
             .ptr = &test_workflow_resolver_state,
             .resolve = testWorkflowEvidenceResolver,
@@ -259,6 +352,49 @@ test "handle returns replay artifact" {
     try std.testing.expectEqualStrings("200 OK", replay_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, replay_resp.body, "\"artifact_schema_version\": 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, replay_resp.body, "\"artifact_kind\": \"nullhub.mission_control.replay\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, replay_resp.body, "\"replay_comparison\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, replay_resp.body, "\"artifact_role\": \"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, replay_resp.body, "\"workflow_evidence\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, replay_resp.body, "\"scanned_run_count\": 2") != null);
+}
+
+test "handle saves lists and reads durable replay artifacts" {
+    const allocator = std.testing.allocator;
+    const test_helpers = @import("../test_helpers.zig");
+
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+
+    var store = RuntimeStore{};
+    store.runtime = .{
+        .launched = true,
+        .started_at_ms = std_compat.time.milliTimestamp() - 20_000,
+        .recovered = true,
+        .recovery_started_at_ms = std_compat.time.milliTimestamp() - 12_000,
+    };
+
+    const save_resp = handleForTestWithPaths(allocator, "POST", "/api/mission-control/replay/save", &store, fixture.paths);
+    defer allocator.free(save_resp.body);
+    try std.testing.expectEqualStrings("200 OK", save_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, save_resp.body, "\"record\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, save_resp.body, "\"artifact\"") != null);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, save_resp.body, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    const record = parsed.value.object.get("record").?.object;
+    const id = record.get("id").?.string;
+
+    const list_resp = handleForTestWithPaths(allocator, "GET", "/api/mission-control/replays", &store, fixture.paths);
+    defer allocator.free(list_resp.body);
+    try std.testing.expectEqualStrings("200 OK", list_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, list_resp.body, id) != null);
+    try std.testing.expect(std.mem.indexOf(u8, list_resp.body, "\"phase\": \"completed\"") != null);
+
+    const read_path = try std.fmt.allocPrint(allocator, "/api/mission-control/replays/{s}", .{id});
+    defer allocator.free(read_path);
+    const read_resp = handleForTestWithPaths(allocator, "GET", read_path, &store, fixture.paths);
+    defer allocator.free(read_resp.body);
+    try std.testing.expectEqualStrings("200 OK", read_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, read_resp.body, "\"artifact_kind\": \"nullhub.mission_control.replay\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, read_resp.body, "\"phase\": \"completed\"") != null);
 }

@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 /// ~/.nullhub/
 /// ├── config.json
 /// ├── state.json
+/// ├── mission-control/replays/{id}.json
 /// ├── manifests/{component}@{version}.json
 /// ├── bin/{component}-{version} (or bin/{component} for dev-local)
 /// ├── instances/{component}/{name}/
@@ -51,6 +52,11 @@ pub const Paths = struct {
     /// `{root}/state.json`
     pub fn state(self: Paths, allocator: std.mem.Allocator) ![]const u8 {
         return std.fs.path.join(allocator, &.{ self.root, "state.json" });
+    }
+
+    /// `{root}/mission-control/replays`
+    pub fn missionReplayDir(self: Paths, allocator: std.mem.Allocator) ![]const u8 {
+        return std.fs.path.join(allocator, &.{ self.root, "mission-control", "replays" });
     }
 
     // ── Component paths ──────────────────────────────────────────────
@@ -131,6 +137,7 @@ pub const Paths = struct {
             "bin",
             "instances",
             "ui",
+            "mission-control/replays",
             "cache/downloads",
             "cache/usage",
         };
