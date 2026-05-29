@@ -1637,7 +1637,10 @@ pub const Server = struct {
 
         // Config API — /api/instances/{c}/{n}/config
         if (config_api.isConfigPath(target)) {
-            const parsed_owned = config_api.parseConfigPathAlloc(allocator, target) catch return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
+            const parsed_owned = config_api.parseConfigPathAlloc(allocator, target) catch |err| switch (err) {
+                error.InvalidPathSegment => return .{ .status = "400 Bad Request", .content_type = "application/json", .body = "{\"error\":\"invalid path segment\"}" },
+                else => return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" },
+            };
             if (parsed_owned) |parsed_storage| {
                 defer parsed_storage.deinit(allocator);
                 const parsed = parsed_storage.borrowed();
@@ -1663,7 +1666,10 @@ pub const Server = struct {
 
         // Logs API — /api/instances/{c}/{n}/logs and /api/instances/{c}/{n}/logs/stream
         if (logs_api.isLogsPath(target)) {
-            const parsed_owned = logs_api.parseLogsPathAlloc(allocator, target) catch return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
+            const parsed_owned = logs_api.parseLogsPathAlloc(allocator, target) catch |err| switch (err) {
+                error.InvalidPathSegment => return .{ .status = "400 Bad Request", .content_type = "application/json", .body = "{\"error\":\"invalid path segment\"}" },
+                else => return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" },
+            };
             if (parsed_owned) |parsed_storage| {
                 defer parsed_storage.deinit(allocator);
                 const parsed = parsed_storage.borrowed();
@@ -1695,7 +1701,10 @@ pub const Server = struct {
         // Instances API — delegate to instances_api.dispatch and updates_api.
         if (std.mem.startsWith(u8, target, "/api/instances")) {
             // Updates API — POST /api/instances/{c}/{n}/update
-            const update_owned = updates_api.parseUpdatePathAlloc(allocator, target) catch return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
+            const update_owned = updates_api.parseUpdatePathAlloc(allocator, target) catch |err| switch (err) {
+                error.InvalidPathSegment => return .{ .status = "400 Bad Request", .content_type = "application/json", .body = "{\"error\":\"invalid path segment\"}" },
+                else => return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" },
+            };
             if (update_owned) |update_storage| {
                 defer update_storage.deinit(allocator);
                 const up = update_storage.borrowed();
@@ -3377,6 +3386,16 @@ test "route GET config supports percent-encoded instance names" {
     defer allocator.free(resp.body);
     try std.testing.expectEqualStrings("200 OK", resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "3000") != null);
+}
+
+test "route GET config rejects decoded traversal instance names" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+
+    const resp = ctx.route(allocator, "GET", "/api/instances/nullclaw/%2E%2E/config", "");
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"invalid path segment\"}", resp.body);
 }
 
 test "route GET logs supports percent-encoded instance names" {

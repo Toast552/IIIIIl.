@@ -948,7 +948,10 @@ pub fn prepareGatewayProxy(
     target: []const u8,
     body: []const u8,
 ) GatewayProxyPrepareResult {
-    const parsed_owned = parsePathAlloc(allocator, target) catch return .{ .response = .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" } };
+    const parsed_owned = parsePathAlloc(allocator, target) catch |err| switch (err) {
+        error.InvalidPathSegment => return .{ .response = badRequest("{\"error\":\"invalid path segment\"}") },
+        else => return .{ .response = helpers.serverError() },
+    };
     const parsed_storage = parsed_owned orelse return .no_match;
     defer parsed_storage.deinit(allocator);
     const parsed = parsed_storage.borrowed();
@@ -5046,7 +5049,10 @@ pub fn dispatch(
         return methodNotAllowed();
     }
 
-    const parsed_cron_owned = parseCronPathAlloc(allocator, target) catch return helpers.serverError();
+    const parsed_cron_owned = parseCronPathAlloc(allocator, target) catch |err| switch (err) {
+        error.InvalidPathSegment => return badRequest("{\"error\":\"invalid path segment\"}"),
+        else => return helpers.serverError(),
+    };
     if (parsed_cron_owned) |parsed_cron_storage| {
         defer parsed_cron_storage.deinit(allocator);
         const parsed_cron = parsed_cron_storage.borrowed();
@@ -5118,7 +5124,10 @@ pub fn dispatch(
         };
     }
 
-    const parsed_channels_owned = parseChannelsPathAlloc(allocator, target) catch return helpers.serverError();
+    const parsed_channels_owned = parseChannelsPathAlloc(allocator, target) catch |err| switch (err) {
+        error.InvalidPathSegment => return badRequest("{\"error\":\"invalid path segment\"}"),
+        else => return helpers.serverError(),
+    };
     if (parsed_channels_owned) |parsed_channels_storage| {
         defer parsed_channels_storage.deinit(allocator);
         const parsed_channels = parsed_channels_storage.borrowed();
@@ -5126,7 +5135,10 @@ pub fn dispatch(
         return handleChannels(allocator, s, paths, parsed_channels.component, parsed_channels.name, parsed_channels.channel_type);
     }
 
-    const parsed_owned = parsePathAlloc(allocator, target) catch return helpers.serverError();
+    const parsed_owned = parsePathAlloc(allocator, target) catch |err| switch (err) {
+        error.InvalidPathSegment => return badRequest("{\"error\":\"invalid path segment\"}"),
+        else => return helpers.serverError(),
+    };
     const parsed_storage = parsed_owned orelse return null;
     defer parsed_storage.deinit(allocator);
     const parsed = parsed_storage.borrowed();
@@ -6598,8 +6610,7 @@ test "dispatch deletes instance with percent-encoded name" {
     defer mctx.deinit(allocator);
 
     try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.0" });
-    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "Opencode Go", "{\"gateway\":{\"port\":3000}}"
-    );
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "Opencode Go", "{\"gateway\":{\"port\":3000}}");
 
     const resp = dispatch(
         allocator,

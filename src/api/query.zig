@@ -38,11 +38,21 @@ pub fn decodePathSegmentAlloc(allocator: std.mem.Allocator, segment: []const u8)
     errdefer allocator.free(encoded);
 
     const decoded = std.Uri.percentDecodeInPlace(encoded);
+    if (!isSafeDecodedPathSegment(decoded)) return error.InvalidPathSegment;
     if (decoded.ptr == encoded.ptr and decoded.len == encoded.len) return encoded;
 
     const out = try allocator.dupe(u8, decoded);
     allocator.free(encoded);
     return out;
+}
+
+fn isSafeDecodedPathSegment(segment: []const u8) bool {
+    if (segment.len == 0) return false;
+    if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return false;
+    for (segment) |byte| {
+        if (byte == 0 or byte == '/' or byte == '\\') return false;
+    }
+    return true;
 }
 
 pub fn parseInstancePathPrefixAlloc(allocator: std.mem.Allocator, target: []const u8) !?ParsedInstancePathPrefixOwned {
@@ -132,6 +142,24 @@ test "parseInstancePathPrefixAlloc decodes additional percent-encoded path chara
     try std.testing.expectEqualStrings("nullclaw", parsed.component);
     try std.testing.expectEqualStrings("NullClaw MiMo (beta) #1", parsed.name);
     try std.testing.expectEqualStrings("channels/web", parsed.suffix);
+}
+
+test "parseInstancePathPrefixAlloc rejects decoded path separators" {
+    try std.testing.expectError(
+        error.InvalidPathSegment,
+        parseInstancePathPrefixAlloc(std.testing.allocator, "/api/instances/nullclaw/name%2Fwith%2Fslash/config"),
+    );
+    try std.testing.expectError(
+        error.InvalidPathSegment,
+        parseInstancePathPrefixAlloc(std.testing.allocator, "/api/instances/nullclaw/name%5Cwith%5Cslash/config"),
+    );
+}
+
+test "parseInstancePathPrefixAlloc rejects decoded traversal segments" {
+    try std.testing.expectError(
+        error.InvalidPathSegment,
+        parseInstancePathPrefixAlloc(std.testing.allocator, "/api/instances/nullclaw/%2E%2E/config"),
+    );
 }
 
 test "boolValue accepts common truthy forms" {

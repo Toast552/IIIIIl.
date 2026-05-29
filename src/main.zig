@@ -152,7 +152,35 @@ fn printApiError(opts: cli.ApiOptions, err: anyerror) void {
 }
 
 fn instanceActionTarget(allocator: std.mem.Allocator, ref: cli.InstanceRef, action: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "/api/instances/{s}/{s}/{s}", .{ ref.component, ref.name, action });
+    var suffix = std.array_list.Managed(u8).init(allocator);
+    defer suffix.deinit();
+    try suffix.append('/');
+    try suffix.appendSlice(action);
+    return instanceTarget(allocator, ref, suffix.items);
+}
+
+fn instanceTarget(allocator: std.mem.Allocator, ref: cli.InstanceRef, suffix: []const u8) ![]u8 {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    try buf.appendSlice("/api/instances/");
+    try appendUrlPathSegment(&buf, ref.component);
+    try buf.append('/');
+    try appendUrlPathSegment(&buf, ref.name);
+    try buf.appendSlice(suffix);
+    return try buf.toOwnedSlice();
+}
+
+fn appendUrlPathSegment(buf: *std.array_list.Managed(u8), value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.' or byte == '~') {
+            try buf.append(byte);
+        } else {
+            try buf.append('%');
+            try buf.append(hex[byte >> 4]);
+            try buf.append(hex[byte & 0x0f]);
+        }
+    }
 }
 
 fn runInstanceAction(allocator: std.mem.Allocator, ref: cli.InstanceRef, action: []const u8) void {
@@ -196,11 +224,12 @@ fn runLogsCommand(allocator: std.mem.Allocator, opts: cli.LogsOptions) void {
     if (opts.follow) {
         std.debug.print("nullhub logs -f is not stream-backed yet; showing current logs.\n", .{});
     }
-    const target = std.fmt.allocPrint(
-        allocator,
-        "/api/instances/{s}/{s}/logs?lines={d}",
-        .{ opts.instance.component, opts.instance.name, opts.lines },
-    ) catch {
+    const suffix = std.fmt.allocPrint(allocator, "/logs?lines={d}", .{opts.lines}) catch {
+        std.debug.print("failed to build API target\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(suffix);
+    const target = instanceTarget(allocator, opts.instance, suffix) catch {
         std.debug.print("failed to build API target\n", .{});
         std.process.exit(1);
     };
@@ -212,11 +241,7 @@ fn runConfigCommand(allocator: std.mem.Allocator, opts: cli.ConfigOptions) void 
     if (opts.edit) {
         std.debug.print("nullhub config --edit is not stream-backed yet; showing current config.\n", .{});
     }
-    const target = std.fmt.allocPrint(
-        allocator,
-        "/api/instances/{s}/{s}/config",
-        .{ opts.instance.component, opts.instance.name },
-    ) catch {
+    const target = instanceTarget(allocator, opts.instance, "/config") catch {
         std.debug.print("failed to build API target\n", .{});
         std.process.exit(1);
     };
@@ -226,11 +251,7 @@ fn runConfigCommand(allocator: std.mem.Allocator, opts: cli.ConfigOptions) void 
 
 fn runUninstallCommand(allocator: std.mem.Allocator, opts: cli.UninstallOptions) void {
     _ = opts.remove_data;
-    const target = std.fmt.allocPrint(
-        allocator,
-        "/api/instances/{s}/{s}",
-        .{ opts.instance.component, opts.instance.name },
-    ) catch {
+    const target = instanceTarget(allocator, opts.instance, "") catch {
         std.debug.print("failed to build API target\n", .{});
         std.process.exit(1);
     };
