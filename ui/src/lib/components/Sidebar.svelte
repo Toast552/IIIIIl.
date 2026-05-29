@@ -76,11 +76,10 @@
   </div>
 
   <div class="nav-section">
-    <a href="/providers" class:active={currentPath === "/providers"}>Providers</a>
-  </div>
-
-  <div class="nav-section">
-    <a href="/channels" class:active={currentPath === "/channels"}>Channels</a>
+    <a
+      href="/configs"
+      class:active={currentPath === "/configs" || currentPath === "/providers" || currentPath === "/channels"}
+    >Configs</a>
   </div>
 
   <div class="nav-bottom">
