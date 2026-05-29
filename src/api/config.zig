@@ -183,6 +183,20 @@ pub const ParsedConfigPath = struct {
     name: []const u8,
 };
 
+pub const ParsedConfigPathOwned = struct {
+    component: []u8,
+    name: []u8,
+
+    pub fn deinit(self: ParsedConfigPathOwned, allocator: std.mem.Allocator) void {
+        allocator.free(self.component);
+        allocator.free(self.name);
+    }
+
+    pub fn borrowed(self: ParsedConfigPathOwned) ParsedConfigPath {
+        return .{ .component = self.component, .name = self.name };
+    }
+};
+
 pub fn parseConfigPath(target: []const u8) ?ParsedConfigPath {
     const prefix = "/api/instances/";
     const suffix = "/config";
@@ -203,6 +217,16 @@ pub fn parseConfigPath(target: []const u8) ?ParsedConfigPath {
     if (std.mem.indexOfScalar(u8, name, '/') != null) return null;
 
     return .{ .component = component, .name = name };
+}
+
+pub fn parseConfigPathAlloc(allocator: std.mem.Allocator, target: []const u8) !?ParsedConfigPathOwned {
+    const parsed = try query.parseInstancePathPrefixAlloc(allocator, target) orelse return null;
+    errdefer parsed.deinit(allocator);
+    if (!std.mem.eql(u8, parsed.suffix, "config")) {
+        parsed.deinit(allocator);
+        return null;
+    }
+    return .{ .component = parsed.component, .name = parsed.name };
 }
 
 fn lookupJsonPath(root: std.json.Value, dot_path: []const u8) ?std.json.Value {
@@ -249,6 +273,14 @@ test "parseConfigPath: keeps working with query string" {
     const p = parseConfigPath("/api/instances/nullclaw/my-agent/config?path=gateway.port").?;
     try std.testing.expectEqualStrings("nullclaw", p.component);
     try std.testing.expectEqualStrings("my-agent", p.name);
+}
+
+test "parseConfigPathAlloc decodes percent-encoded names" {
+    const allocator = std.testing.allocator;
+    const p = (try parseConfigPathAlloc(allocator, "/api/instances/nullclaw/Opencode%20Go/config?path=gateway.port")).?;
+    defer p.deinit(allocator);
+    try std.testing.expectEqualStrings("nullclaw", p.component);
+    try std.testing.expectEqualStrings("Opencode Go", p.name);
 }
 
 test "parseConfigPath: rejects path without /config suffix" {

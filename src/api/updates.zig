@@ -9,6 +9,7 @@ const downloader = @import("../installer/downloader.zig");
 const launch_args_mod = @import("../core/launch_args.zig");
 const platform = @import("../core/platform.zig");
 const helpers = @import("helpers.zig");
+const query = @import("query.zig");
 const test_helpers = @import("../test_helpers.zig");
 
 const ApiResponse = helpers.ApiResponse;
@@ -22,6 +23,20 @@ const serverError = helpers.serverError;
 pub const ParsedUpdatePath = struct {
     component: []const u8,
     name: []const u8,
+};
+
+pub const ParsedUpdatePathOwned = struct {
+    component: []u8,
+    name: []u8,
+
+    pub fn deinit(self: ParsedUpdatePathOwned, allocator: std.mem.Allocator) void {
+        allocator.free(self.component);
+        allocator.free(self.name);
+    }
+
+    pub fn borrowed(self: ParsedUpdatePathOwned) ParsedUpdatePath {
+        return .{ .component = self.component, .name = self.name };
+    }
 };
 
 /// Parse `/api/instances/{component}/{name}/update` from a request target.
@@ -47,6 +62,16 @@ pub fn parseUpdatePath(target: []const u8) ?ParsedUpdatePath {
     if (it.next() != null) return null;
 
     return .{ .component = component, .name = name };
+}
+
+pub fn parseUpdatePathAlloc(allocator: std.mem.Allocator, target: []const u8) !?ParsedUpdatePathOwned {
+    const parsed = try query.parseInstancePathPrefixAlloc(allocator, target) orelse return null;
+    errdefer parsed.deinit(allocator);
+    if (!std.mem.eql(u8, parsed.suffix, "update")) {
+        parsed.deinit(allocator);
+        return null;
+    }
+    return .{ .component = parsed.component, .name = parsed.name };
 }
 
 fn stripV(v: []const u8) []const u8 {
@@ -399,6 +424,14 @@ test "parseUpdatePath extracts component and name correctly" {
     const p = parseUpdatePath("/api/instances/nullclaw/my-agent/update").?;
     try std.testing.expectEqualStrings("nullclaw", p.component);
     try std.testing.expectEqualStrings("my-agent", p.name);
+}
+
+test "parseUpdatePathAlloc decodes percent-encoded names" {
+    const allocator = std.testing.allocator;
+    const p = (try parseUpdatePathAlloc(allocator, "/api/instances/nullclaw/Opencode%20Go/update")).?;
+    defer p.deinit(allocator);
+    try std.testing.expectEqualStrings("nullclaw", p.component);
+    try std.testing.expectEqualStrings("Opencode Go", p.name);
 }
 
 test "parseUpdatePath rejects wrong action" {
