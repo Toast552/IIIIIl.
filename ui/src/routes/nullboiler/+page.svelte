@@ -79,7 +79,8 @@
     <h1>NullBoiler</h1>
     <div class="header-actions">
       <BoilerInstanceSelector onChange={() => { loading = true; error = null; void loadRuns(); }} />
-      <a href={nullboilerUiRoutes.workflows()} class="action-btn">New Run</a>
+      <a href={nullboilerUiRoutes.workflows()} class="action-btn">Workflows</a>
+      <a href={nullboilerUiRoutes.runs()} class="action-btn">Runs</a>
     </div>
   </div>
 

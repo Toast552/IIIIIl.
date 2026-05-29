@@ -1,10 +1,13 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const std_compat = @import("compat");
 const state_mod = @import("../core/state.zig");
 const manager_mod = @import("../supervisor/manager.zig");
 const paths_mod = @import("../core/paths.zig");
 const health_mod = @import("../supervisor/health.zig");
 const registry = @import("../installer/registry.zig");
+const test_helpers = @import("../test_helpers.zig");
+const imported_standalone_storage_mode = "imported-standalone";
 
 pub const Snapshot = struct {
     status: manager_mod.Status,
@@ -102,30 +105,13 @@ fn normalizeHealthHost(allocator: std.mem.Allocator, host: []const u8) ![]u8 {
 }
 
 fn isImportedStandalone(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
     component: []const u8,
-    name: []const u8,
     entry: state_mod.InstanceEntry,
 ) bool {
     const known = registry.findKnownComponent(component) orelse return false;
     if (standalonePortConfigKey(component) == null) return false;
     if (!isStandaloneLaunchMode(component, entry.launch_mode, known.default_launch_command)) return false;
-
-    const inst_dir = paths.instanceDir(allocator, component, name) catch return false;
-    defer allocator.free(inst_dir);
-    const real_dir = std_compat.fs.realpathAlloc(allocator, inst_dir) catch return false;
-    defer allocator.free(real_dir);
-
-    const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch
-        std_compat.process.getEnvVarOwned(allocator, "USERPROFILE") catch return false;
-    defer allocator.free(home);
-    const standalone_root = std.fmt.allocPrint(allocator, "{s}/.{s}", .{ home, component }) catch return false;
-    defer allocator.free(standalone_root);
-    const real_standalone_root = std_compat.fs.realpathAlloc(allocator, standalone_root) catch return false;
-    defer allocator.free(real_standalone_root);
-
-    return std.mem.eql(u8, real_dir, real_standalone_root);
+    return std.mem.eql(u8, entry.storage_mode, imported_standalone_storage_mode) and entry.source_path.len > 0;
 }
 
 fn standalonePortConfigKey(component: []const u8) ?[]const u8 {
@@ -173,7 +159,7 @@ fn deriveImportedStandaloneSnapshot(
     entry: state_mod.InstanceEntry,
     manager_snapshot: ?Snapshot,
 ) ?Snapshot {
-    if (!isImportedStandalone(allocator, paths, component, name, entry)) return null;
+    if (!isImportedStandalone(component, entry)) return null;
 
     const known = registry.findKnownComponent(component) orelse return null;
     const port_key = standalonePortConfigKey(component) orelse return null;
@@ -256,4 +242,75 @@ test "readPortFromConfig accepts string ports" {
     const normalized = try normalizeHealthHost(allocator, "::");
     defer allocator.free(normalized);
     try std.testing.expectEqualStrings("127.0.0.1", normalized);
+}
+
+test "resolve treats custom-path imported standalone as running when health passes" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const HealthServerCtx = struct {
+        server: *std_compat.net.Server,
+
+        fn run(ctx: @This()) void {
+            var conn = ctx.server.accept() catch return;
+            defer conn.stream.close();
+
+            var buf: [1024]u8 = undefined;
+            _ = conn.stream.read(&buf) catch return;
+            conn.stream.writeAll(
+                "HTTP/1.1 200 OK\r\n" ++
+                    "Content-Type: application/json\r\n" ++
+                    "Content-Length: 15\r\n" ++
+                    "Connection: close\r\n\r\n" ++
+                    "{\"status\":\"ok\"}",
+            ) catch return;
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    try fixture.paths.ensureDirs();
+
+    const source_dir = try fixture.path(allocator, "custom-nullclaw-home");
+    defer allocator.free(source_dir);
+    try std_compat.fs.makeDirAbsolute(source_dir);
+
+    const addr = try std_compat.net.Address.resolveIp("127.0.0.1", 0);
+    var server = try addr.listen(.{});
+    defer server.deinit();
+    const port = server.listen_address.in.getPort();
+
+    const source_config_path = try std.fs.path.join(allocator, &.{ source_dir, "config.json" });
+    defer allocator.free(source_config_path);
+    const source_config = try std_compat.fs.createFileAbsolute(source_config_path, .{ .truncate = true });
+    defer source_config.close();
+    const source_config_json = try std.fmt.allocPrint(allocator, "{{\"gateway\":{{\"port\":{d}}},\"host\":\"127.0.0.1\"}}", .{port});
+    defer allocator.free(source_config_json);
+    try source_config.writeAll(source_config_json);
+
+    const inst_parent = try std.fs.path.join(allocator, &.{ fixture.paths.root, "instances", "nullclaw" });
+    defer allocator.free(inst_parent);
+    try std_compat.fs.makeDirAbsolute(inst_parent);
+
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nullclaw", "imported");
+    defer allocator.free(inst_dir);
+    try std_compat.fs.symLinkAbsolute(source_dir, inst_dir, .{ .is_directory = true });
+
+    const thread = try std.Thread.spawn(.{}, HealthServerCtx.run, .{.{ .server = &server }});
+    defer thread.join();
+
+    var manager = manager_mod.Manager.init(allocator, fixture.paths);
+    defer manager.deinit();
+
+    const snapshot = resolve(allocator, fixture.paths, &manager, "nullclaw", "imported", .{
+        .version = "dev-local",
+        .auto_start = false,
+        .launch_mode = "gateway",
+        .verbose = false,
+        .storage_mode = imported_standalone_storage_mode,
+        .source_path = source_dir,
+    });
+
+    try std.testing.expectEqual(manager_mod.Status.running, snapshot.status);
+    try std.testing.expectEqual(port, snapshot.port);
 }

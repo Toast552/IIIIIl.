@@ -327,6 +327,54 @@ fn seedLaunchableGatewayInstance(server: *IntegrationServer, component: []const 
     }
 }
 
+fn seedInstalledBinaryVersion(server: *IntegrationServer, component: []const u8, version: []const u8) !void {
+    const root = try server.nullhubRoot();
+    defer server.allocator.free(root);
+    try std_compat.fs.cwd().makePath(root);
+
+    const binary_name = try std.fmt.allocPrint(server.allocator, "{s}-{s}", .{ component, version });
+    defer server.allocator.free(binary_name);
+    const script =
+        \\#!/bin/sh
+        \\exit 0
+    ;
+    try writeSeedFile(server, &.{ root, "bin", binary_name }, script);
+
+    const binary_path = try std.fs.path.join(server.allocator, &.{ root, "bin", binary_name });
+    defer server.allocator.free(binary_path);
+    if (comptime std_compat.fs.has_executable_bit) {
+        const file = try std_compat.fs.openFileAbsolute(binary_path, .{});
+        defer file.close();
+        try file.chmod(0o755);
+    }
+}
+
+fn seedStandaloneInstall(server: *IntegrationServer, component: []const u8, config_json: []const u8) ![]const u8 {
+    const dir_name = try std.fmt.allocPrint(server.allocator, ".{s}", .{component});
+    defer server.allocator.free(dir_name);
+    const standalone_dir = try std.fs.path.join(server.allocator, &.{ server.home_dir, dir_name });
+    errdefer server.allocator.free(standalone_dir);
+    try std_compat.fs.makeDirAbsolute(standalone_dir);
+
+    const config_path = try std.fs.path.join(server.allocator, &.{ standalone_dir, "config.json" });
+    defer server.allocator.free(config_path);
+    const file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(config_json);
+
+    return standalone_dir;
+}
+
+fn expectJsonPathBasename(allocator: std.mem.Allocator, body: []const u8, field: []const u8, expected: []const u8) !void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value == .object);
+    const value = parsed.value.object.get(field) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(value == .string);
+    try std.testing.expectEqualStrings(expected, std.fs.path.basename(value.string));
+}
+
 test "integration harness serves health and core api routes" {
     var server = try IntegrationServer.start(std.testing.allocator);
     defer server.deinit();
@@ -616,6 +664,62 @@ test "integration harness covers lifecycle error paths" {
         defer restart_resp.deinit(std.testing.allocator);
         try std.testing.expectEqual(std.http.Status.internal_server_error, restart_resp.status);
         try std.testing.expect(std.mem.indexOf(u8, restart_resp.body, "internal error") != null);
+    }
+}
+
+test "integration harness covers standalone detection and import flow" {
+    var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+        fn call(srv: *IntegrationServer) !void {
+            const standalone_dir = try seedStandaloneInstall(srv, "nullclaw", "{\"instance_name\":\"existing-bot\",\"gateway\":{\"port\":3000}}\n");
+            srv.allocator.free(standalone_dir);
+            try seedInstalledBinaryVersion(srv, "nullclaw", "1.0.0");
+        }
+    }.call);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullclaw/standalone" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"standalone\":true") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"already_imported\":false") != null);
+        try expectJsonPathBasename(std.testing.allocator, resp.body, "standalone_path", ".nullclaw");
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/instances/nullclaw/import",
+            .method = .POST,
+            .body = "{\"path\":\"",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid JSON body") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullclaw/import", .method = .POST });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"imported\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"instance\":\"existing-bot\"") != null);
+        try expectJsonPathBasename(std.testing.allocator, resp.body, "path", ".nullclaw");
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullclaw/standalone" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"standalone\":true") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"already_imported\":true") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"nullclaw\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"existing-bot\"") != null);
     }
 }
 

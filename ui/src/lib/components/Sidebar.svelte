@@ -2,78 +2,38 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
-  import { nullboilerUiRoutes } from "$lib/nullboiler/routes";
-  import { nullticketsUiRoutes } from "$lib/nulltickets/routes";
-  import { routePath } from "$lib/nullstack/path";
-  import {
-    BOILER_INSTANCE_CHANGE_EVENT,
-    TICKETS_INSTANCE_CHANGE_EVENT,
-  } from "$lib/nullstack/backendSelection";
+  import { componentInstancesRoute, instanceRoute } from "$lib/nullstack/path";
 
   let instances = $state<Record<string, any>>({});
-  let installedComponents = $state<Record<string, any>>({});
   let currentPath = $derived($page.url.pathname);
-  let showNullBoiler = $derived(Boolean(installedComponents["nullboiler"]?.installed));
-  let showNullTickets = $derived(Boolean(installedComponents["nulltickets"]?.installed));
-  let showNullWatch = $derived(Boolean(installedComponents["nullwatch"]?.installed));
-  let boilerSelectionVersion = $state(0);
-  let ticketsSelectionVersion = $state(0);
-  let nullclawHref = $derived.by(() => componentEntryHref("nullclaw"));
-  let nullboilerDashboardHref = $derived.by(() => {
-    boilerSelectionVersion;
-    return showNullBoiler ? nullboilerUiRoutes.dashboard() : "/install/nullboiler";
-  });
-  let nullboilerWorkflowsHref = $derived.by(() => {
-    boilerSelectionVersion;
-    return nullboilerUiRoutes.workflows();
-  });
-  let nullboilerRunsHref = $derived.by(() => {
-    boilerSelectionVersion;
-    return nullboilerUiRoutes.runs();
-  });
-  let nullticketsHref = $derived.by(() => {
-    ticketsSelectionVersion;
-    return showNullTickets ? nullticketsUiRoutes.store() : "/install/nulltickets";
-  });
-  let nullwatchHref = $derived(showNullWatch ? "/nullwatch" : "/install/nullwatch");
 
-  function componentEntryHref(component: string): string {
-    const names = Object.keys(instances[component] || {}).sort();
-    return names[0] ? `/instances/${component}/${encodeURIComponent(names[0])}` : `/install/${component}`;
+  function componentHeaderHref(component: string): string {
+    return componentInstancesRoute(component);
+  }
+
+  function componentHeaderActive(component: string): boolean {
+    const root = componentInstancesRoute(component);
+    if (currentPath === root || currentPath.startsWith(`${root}/`)) return true;
+    if (component === "nullboiler") return currentPath.startsWith("/nullboiler");
+    if (component === "nulltickets") return currentPath.startsWith("/nulltickets");
+    if (component === "nullwatch") return currentPath.startsWith("/nullwatch");
+    return false;
   }
 
   async function loadSidebarState() {
-    const [statusResult, componentsResult] = await Promise.allSettled([
-      api.getStatus(),
-      api.getComponents(),
-    ]);
-
-    if (statusResult.status === "fulfilled") {
-      instances = statusResult.value.instances || {};
-    }
-
-    if (componentsResult.status === "fulfilled") {
-      installedComponents = Object.fromEntries(
-        (componentsResult.value.components || []).map((component: any) => [component.name, component]),
-      );
+    try {
+      const status = await api.getStatus();
+      instances = status.instances || {};
+    } catch (e) {
+      console.error(e);
     }
   }
 
   onMount(() => {
     void loadSidebarState();
     const interval = setInterval(loadSidebarState, 5000);
-    const refreshBoilerLinks = () => {
-      boilerSelectionVersion += 1;
-    };
-    const refreshTicketsLinks = () => {
-      ticketsSelectionVersion += 1;
-    };
-    globalThis.addEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
-    globalThis.addEventListener?.(TICKETS_INSTANCE_CHANGE_EVENT, refreshTicketsLinks);
     return () => {
       clearInterval(interval);
-      globalThis.removeEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
-      globalThis.removeEventListener?.(TICKETS_INSTANCE_CHANGE_EVENT, refreshTicketsLinks);
     };
   });
 </script>
@@ -92,26 +52,19 @@
   </div>
 
   <div class="nav-section">
-    <h3>Stack</h3>
-    <a href={nullclawHref} class:active={currentPath.startsWith("/instances/nullclaw/") || currentPath === "/install/nullclaw"}>NullClaw</a>
-    <a href={nullboilerDashboardHref} class:active={currentPath.startsWith("/nullboiler") || currentPath === "/install/nullboiler"}>NullBoiler</a>
-    {#if showNullBoiler}
-      <a href={nullboilerWorkflowsHref} class:active={currentPath.startsWith(routePath(nullboilerWorkflowsHref))}>Workflows</a>
-      <a href={nullboilerRunsHref} class:active={currentPath.startsWith(routePath(nullboilerRunsHref))}>Runs</a>
-    {/if}
-    <a href={nullticketsHref} class:active={currentPath.startsWith("/nulltickets") || currentPath === "/install/nulltickets"}>NullTickets</a>
-    <a href={nullwatchHref} class:active={currentPath.startsWith("/nullwatch") || currentPath === "/install/nullwatch"}>NullWatch</a>
-  </div>
-
-  <div class="nav-section">
     <h3>Instances</h3>
     {#each Object.entries(instances) as [component, items]}
       <div class="component-group">
-        <span class="component-name">{component}</span>
+        <a
+          class="component-name"
+          href={componentHeaderHref(component)}
+          class:active={componentHeaderActive(component)}
+        >{component}</a>
         {#each Object.entries(items as Record<string, any>) as [name, info]}
           <a
-            href="/instances/{component}/{name}"
-            class:active={currentPath === `/instances/${component}/${name}`}
+            class="instance-link"
+            href={instanceRoute(component, name)}
+            class:active={currentPath === instanceRoute(component, name)}
           >
             <span class="status-dot" class:running={info.status === "running"}
             ></span>
@@ -123,15 +76,10 @@
   </div>
 
   <div class="nav-section">
-    <a href="/providers" class:active={currentPath === "/providers"}>Providers</a>
-  </div>
-
-  <div class="nav-section">
-    <a href="/channels" class:active={currentPath === "/channels"}>Channels</a>
-  </div>
-
-  <div class="nav-section">
-    <a href="/mission-control" class:active={currentPath.startsWith("/mission-control")}>Mission Control</a>
+    <a
+      href="/configs"
+      class:active={currentPath === "/configs" || currentPath === "/providers" || currentPath === "/channels"}
+    >Configs</a>
   </div>
 
   <div class="nav-bottom">
@@ -227,20 +175,25 @@
     margin-bottom: 0.5rem;
   }
 
-  .component-name {
-    display: block;
+  .component-group .component-name {
+    display: flex;
+    align-items: center;
     font-size: 0.75rem;
     font-weight: 700;
     color: var(--fg-dim);
-    padding: 0.375rem 1.25rem 0.125rem;
+    padding: 0.5rem 1.25rem 0.35rem;
     text-transform: uppercase;
     letter-spacing: 1px;
-    opacity: 0.7;
   }
 
   .component-group a {
     padding-left: 1.75rem;
     font-size: 0.8rem;
+  }
+
+  .component-group a.component-name {
+    padding-left: 1.25rem;
+    font-size: 0.75rem;
   }
 
   .status-dot {

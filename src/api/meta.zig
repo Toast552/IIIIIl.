@@ -1128,6 +1128,16 @@ const routes = [_]RouteSpec{
         .response = "Integration update result.",
     },
     .{
+        .id = "instances.standalone",
+        .method = "GET",
+        .path_template = "/api/instances/{component}/standalone",
+        .category = "instances",
+        .summary = "Detect a local default standalone installation for a component.",
+        .auth_mode = "optional_bearer",
+        .path_params = component_only_params[0..],
+        .response = "Standalone detection payload with optional path and import status.",
+    },
+    .{
         .id = "instances.import",
         .method = "POST",
         .path_template = "/api/instances/{component}/import",
@@ -1135,6 +1145,7 @@ const routes = [_]RouteSpec{
         .summary = "Import a standalone installation into nullhub management.",
         .auth_mode = "optional_bearer",
         .path_params = component_only_params[0..],
+        .body = "Optional JSON body with path and name. Empty body imports the default ~/.{component} path.",
         .response = "Imported instance payload.",
     },
     .{

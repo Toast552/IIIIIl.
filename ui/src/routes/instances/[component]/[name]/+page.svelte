@@ -20,6 +20,7 @@
     setSelectedBoilerInstance,
     setSelectedTicketsInstance,
   } from "$lib/nullstack/backendSelection";
+  import { instanceRoute } from "$lib/nullstack/path";
 
   let component = $derived($page.params.component);
   let name = $derived($page.params.name);
@@ -1303,7 +1304,7 @@
                             >{claw.running ? "running" : "stopped"}</span
                           >
                         </div>
-                        <a class="btn integration-btn" href={`/instances/nullclaw/${encodeURIComponent(claw.name)}`}
+                        <a class="btn integration-btn" href={instanceRoute("nullclaw", claw.name)}
                           >Open</a
                         >
                       </div>

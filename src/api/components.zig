@@ -62,18 +62,19 @@ fn buildListJson(allocator: std.mem.Allocator, s: *state_mod.State) ![]const u8 
         // Count managed instances from state
         const instance_count = countInstancesFromState(s, comp.name);
 
-        // standalone = dot-dir config exists without a managed NullHub instance
+        // standalone = dot-dir config exists and can be offered as an import source.
         const has_dot_dir = hasStandaloneInstall(allocator, comp.name);
-        const standalone = has_dot_dir and instance_count == 0;
+        const standalone = has_dot_dir;
         const installed = has_dot_dir or instance_count > 0;
 
         try buf.print(
-            "{{\"name\":\"{s}\",\"display_name\":\"{s}\",\"description\":\"{s}\",\"repo\":\"{s}\",\"alpha\":{s},\"installable\":{s},\"installed\":{s},\"standalone\":{s},\"instance_count\":{d}}}",
+            "{{\"name\":\"{s}\",\"display_name\":\"{s}\",\"description\":\"{s}\",\"repo\":\"{s}\",\"stage\":\"{s}\",\"alpha\":{s},\"installable\":{s},\"installed\":{s},\"standalone\":{s},\"instance_count\":{d}}}",
             .{
                 comp.name,
                 comp.display_name,
                 comp.description,
                 comp.repo,
+                comp.stage,
                 if (comp.is_alpha) "true" else "false",
                 if (comp.installable) "true" else "false",
                 if (installed) "true" else "false",
@@ -234,13 +235,66 @@ test "handleList returns valid JSON with all known components" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw/nullwatch\"") != null);
 
     // Verify structural fields
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"stage\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"alpha\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"installable\"") != null);
-    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, json, "\"installable\":true"));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, json, "\"alpha\":true"));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, json, "\"alpha\":false"));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, json, "\"installable\":true"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, "\"stage\":\"alpha\""));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, json, "\"stage\":\"beta\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, "\"alpha\":true"));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, json, "\"alpha\":false"));
     try std.testing.expect(std.mem.indexOf(u8, json, "\"installed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"instance_count\"") != null);
+}
+
+test "handleList keeps standalone hint when default install is already managed" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var fixture = try test_helpers.TempPaths.init(allocator);
+    defer fixture.deinit();
+    const state_path = try fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+
+    try s.addInstance("nullclaw", "default", .{ .version = "1.0.0" });
+
+    const home_dir = try fixture.path(allocator, "home");
+    defer allocator.free(home_dir);
+    try std_compat.fs.makeDirAbsolute(home_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const dot_dir = try std.fs.path.join(allocator, &.{ home_dir, ".nullclaw" });
+    defer allocator.free(dot_dir);
+    try std_compat.fs.makeDirAbsolute(dot_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const config_path = try std.fs.path.join(allocator, &.{ dot_dir, "config.json" });
+    defer allocator.free(config_path);
+    const file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("{}\n");
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer if (builtin.os.tag != .windows) {
+        if (previous_home) |value| {
+            _ = std.c.setenv("HOME", value.ptr, 1);
+        } else {
+            _ = std.c.unsetenv("HOME");
+        }
+    };
+    if (std.c.setenv("HOME", home_dir.ptr, 1) != 0) return error.Unexpected;
+
+    const json = try handleList(allocator, &s);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"nullclaw\",\"display_name\":\"NullClaw\",\"description\":\"Autonomous AI agent runtime\",\"repo\":\"nullclaw/nullclaw\",\"stage\":\"\",\"alpha\":false,\"installable\":true,\"installed\":true,\"standalone\":true,\"instance_count\":1") != null);
 }
 
 test "handleManifest returns null for non-cached manifest" {
