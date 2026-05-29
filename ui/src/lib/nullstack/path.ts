@@ -6,6 +6,10 @@ export function instanceRoute(component: string, name: string): string {
   return `/instances/${encodePathSegment(component)}/${encodePathSegment(name)}`;
 }
 
+export function componentInstancesRoute(component: string): string {
+  return `/instances/${encodePathSegment(component)}`;
+}
+
 export function instanceApiPath(component: string, name: string, suffix = ""): string {
   return `/instances/${encodePathSegment(component)}/${encodePathSegment(name)}${suffix}`;
 }

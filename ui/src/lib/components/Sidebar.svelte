@@ -2,47 +2,18 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
-  import { nullboilerUiRoutes } from "$lib/nullboiler/routes";
-  import { nullticketsUiRoutes } from "$lib/nulltickets/routes";
-  import { instanceRoute, routePath } from "$lib/nullstack/path";
-  import {
-    BOILER_INSTANCE_CHANGE_EVENT,
-    TICKETS_INSTANCE_CHANGE_EVENT,
-  } from "$lib/nullstack/backendSelection";
+  import { componentInstancesRoute, instanceRoute } from "$lib/nullstack/path";
 
   let instances = $state<Record<string, any>>({});
   let currentPath = $derived($page.url.pathname);
-  let boilerSelectionVersion = $state(0);
-  let ticketsSelectionVersion = $state(0);
-  let nullboilerWorkflowsHref = $derived.by(() => {
-    boilerSelectionVersion;
-    return nullboilerUiRoutes.workflows();
-  });
-  let nullboilerRunsHref = $derived.by(() => {
-    boilerSelectionVersion;
-    return nullboilerUiRoutes.runs();
-  });
-
-  function componentEntryHref(component: string): string {
-    const names = Object.keys(instances[component] || {}).sort();
-    return names[0] ? instanceRoute(component, names[0]) : `/install/${component}`;
-  }
 
   function componentHeaderHref(component: string): string {
-    if (component === "nullboiler") {
-      boilerSelectionVersion;
-      return nullboilerUiRoutes.dashboard();
-    }
-    if (component === "nulltickets") {
-      ticketsSelectionVersion;
-      return nullticketsUiRoutes.store();
-    }
-    if (component === "nullwatch") return "/nullwatch";
-    return componentEntryHref(component);
+    return componentInstancesRoute(component);
   }
 
   function componentHeaderActive(component: string): boolean {
-    if (currentPath.startsWith(`/instances/${component}/`)) return true;
+    const root = componentInstancesRoute(component);
+    if (currentPath === root || currentPath.startsWith(`${root}/`)) return true;
     if (component === "nullboiler") return currentPath.startsWith("/nullboiler");
     if (component === "nulltickets") return currentPath.startsWith("/nulltickets");
     if (component === "nullwatch") return currentPath.startsWith("/nullwatch");
@@ -61,18 +32,8 @@
   onMount(() => {
     void loadSidebarState();
     const interval = setInterval(loadSidebarState, 5000);
-    const refreshBoilerLinks = () => {
-      boilerSelectionVersion += 1;
-    };
-    const refreshTicketsLinks = () => {
-      ticketsSelectionVersion += 1;
-    };
-    globalThis.addEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
-    globalThis.addEventListener?.(TICKETS_INSTANCE_CHANGE_EVENT, refreshTicketsLinks);
     return () => {
       clearInterval(interval);
-      globalThis.removeEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
-      globalThis.removeEventListener?.(TICKETS_INSTANCE_CHANGE_EVENT, refreshTicketsLinks);
     };
   });
 </script>
@@ -99,18 +60,6 @@
           href={componentHeaderHref(component)}
           class:active={componentHeaderActive(component)}
         >{component}</a>
-        {#if component === "nullboiler"}
-          <a
-            class="component-sub-link"
-            href={nullboilerWorkflowsHref}
-            class:active={currentPath.startsWith(routePath(nullboilerWorkflowsHref))}
-          >Workflows</a>
-          <a
-            class="component-sub-link"
-            href={nullboilerRunsHref}
-            class:active={currentPath.startsWith(routePath(nullboilerRunsHref))}
-          >Runs</a>
-        {/if}
         {#each Object.entries(items as Record<string, any>) as [name, info]}
           <a
             class="instance-link"
@@ -249,12 +198,6 @@
 
   .component-group a.component-name {
     padding-left: 1.25rem;
-    font-size: 0.75rem;
-  }
-
-  .component-group a.component-sub-link {
-    padding-left: 2.1rem;
-    color: var(--fg-dim);
     font-size: 0.75rem;
   }
 
