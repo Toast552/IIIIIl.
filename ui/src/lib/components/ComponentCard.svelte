@@ -6,12 +6,15 @@
     displayName = "",
     description = "",
     alpha = false,
+    stage = "",
     installable = true,
     installed = false,
     instanceCount = 0,
   } = $props();
   let comingSoon = $derived(!installable && !installed);
   let installHref = $derived(`/install/${encodePathSegment(name)}`);
+  let badgeLabel = $derived((stage || (alpha ? "alpha" : "")).trim().toLowerCase());
+  let badgeText = $derived(badgeLabel ? badgeLabel[0].toUpperCase() + badgeLabel.slice(1) : "");
 </script>
 
 {#if comingSoon}
@@ -19,21 +22,21 @@
   <div class="card-header">
     <h3>{displayName}</h3>
     <div class="card-actions">
-      <span class="alpha-badge">&lt;Alpha&gt;</span>
+      {#if badgeLabel}
+        <span class={`maturity-badge ${badgeLabel}`}>&lt;{badgeText}&gt;</span>
+      {/if}
       <span class="coming-soon-badge">Coming Soon</span>
     </div>
   </div>
   <p>{description}</p>
 </div>
 {:else}
-<div class="component-card">
+<a href={installHref} class="component-card">
   <div class="card-header">
-    <a class="card-title-link" href={installHref}>
-      <h3>{displayName}</h3>
-    </a>
+    <h3>{displayName}</h3>
     <div class="card-actions">
-      {#if alpha}
-        <span class="alpha-badge">&lt;Alpha&gt;</span>
+      {#if badgeLabel}
+        <span class={`maturity-badge ${badgeLabel}`}>&lt;{badgeText}&gt;</span>
       {/if}
       {#if installed}
         <span class="installed-badge"
@@ -42,10 +45,8 @@
       {/if}
     </div>
   </div>
-  <a class="card-description-link" href={installHref}>
-    <p>{description}</p>
-  </a>
-</div>
+  <p>{description}</p>
+</a>
 {/if}
 
 <style>
@@ -61,6 +62,7 @@
   }
 
   .component-card:hover:not(.disabled) {
+    text-decoration: none;
     background: var(--bg-hover);
     border-color: var(--accent);
     box-shadow: 0 0 15px var(--border-glow);
@@ -102,16 +104,6 @@
     text-shadow: var(--text-glow);
   }
 
-  .card-title-link,
-  .card-description-link {
-    color: inherit;
-  }
-
-  .card-title-link:hover,
-  .card-description-link:hover {
-    text-decoration: none;
-  }
-
   .installed-badge {
     font-size: 0.75rem;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -125,17 +117,27 @@
     box-shadow: inset 0 0 5px color-mix(in srgb, var(--accent) 30%, transparent);
   }
 
-  .alpha-badge {
+  .maturity-badge {
     font-size: 0.7rem;
-    background: color-mix(in srgb, #ffb84d 18%, transparent);
-    color: #ffb84d;
-    border: 1px solid color-mix(in srgb, #ffb84d 65%, #000 35%);
     padding: 0.25rem 0.45rem;
     border-radius: 2px;
     text-transform: uppercase;
     letter-spacing: 0.8px;
     font-weight: 700;
+  }
+
+  .maturity-badge.alpha {
+    background: color-mix(in srgb, #ffb84d 18%, transparent);
+    color: #ffb84d;
+    border: 1px solid color-mix(in srgb, #ffb84d 65%, #000 35%);
     box-shadow: inset 0 0 4px color-mix(in srgb, #ffb84d 35%, transparent);
+  }
+
+  .maturity-badge.beta {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    box-shadow: inset 0 0 4px color-mix(in srgb, var(--accent) 25%, transparent);
   }
 
   .coming-soon-badge {

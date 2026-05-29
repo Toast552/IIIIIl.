@@ -11,18 +11,9 @@
   } from "$lib/nullstack/backendSelection";
 
   let instances = $state<Record<string, any>>({});
-  let installedComponents = $state<Record<string, any>>({});
   let currentPath = $derived($page.url.pathname);
-  let showNullBoiler = $derived(Boolean(installedComponents["nullboiler"]?.installed));
-  let showNullTickets = $derived(Boolean(installedComponents["nulltickets"]?.installed));
-  let showNullWatch = $derived(Boolean(installedComponents["nullwatch"]?.installed));
   let boilerSelectionVersion = $state(0);
   let ticketsSelectionVersion = $state(0);
-  let nullclawHref = $derived.by(() => componentEntryHref("nullclaw"));
-  let nullboilerDashboardHref = $derived.by(() => {
-    boilerSelectionVersion;
-    return showNullBoiler ? nullboilerUiRoutes.dashboard() : "/install/nullboiler";
-  });
   let nullboilerWorkflowsHref = $derived.by(() => {
     boilerSelectionVersion;
     return nullboilerUiRoutes.workflows();
@@ -31,31 +22,39 @@
     boilerSelectionVersion;
     return nullboilerUiRoutes.runs();
   });
-  let nullticketsHref = $derived.by(() => {
-    ticketsSelectionVersion;
-    return showNullTickets ? nullticketsUiRoutes.store() : "/install/nulltickets";
-  });
-  let nullwatchHref = $derived(showNullWatch ? "/nullwatch" : "/install/nullwatch");
 
   function componentEntryHref(component: string): string {
     const names = Object.keys(instances[component] || {}).sort();
     return names[0] ? instanceRoute(component, names[0]) : `/install/${component}`;
   }
 
-  async function loadSidebarState() {
-    const [statusResult, componentsResult] = await Promise.allSettled([
-      api.getStatus(),
-      api.getComponents(),
-    ]);
-
-    if (statusResult.status === "fulfilled") {
-      instances = statusResult.value.instances || {};
+  function componentHeaderHref(component: string): string {
+    if (component === "nullboiler") {
+      boilerSelectionVersion;
+      return nullboilerUiRoutes.dashboard();
     }
+    if (component === "nulltickets") {
+      ticketsSelectionVersion;
+      return nullticketsUiRoutes.store();
+    }
+    if (component === "nullwatch") return "/nullwatch";
+    return componentEntryHref(component);
+  }
 
-    if (componentsResult.status === "fulfilled") {
-      installedComponents = Object.fromEntries(
-        (componentsResult.value.components || []).map((component: any) => [component.name, component]),
-      );
+  function componentHeaderActive(component: string): boolean {
+    if (currentPath.startsWith(`/instances/${component}/`)) return true;
+    if (component === "nullboiler") return currentPath.startsWith("/nullboiler");
+    if (component === "nulltickets") return currentPath.startsWith("/nulltickets");
+    if (component === "nullwatch") return currentPath.startsWith("/nullwatch");
+    return false;
+  }
+
+  async function loadSidebarState() {
+    try {
+      const status = await api.getStatus();
+      instances = status.instances || {};
+    } catch (e) {
+      console.error(e);
     }
   }
 
@@ -92,24 +91,29 @@
   </div>
 
   <div class="nav-section">
-    <h3>Stack</h3>
-    <a href={nullclawHref} class:active={currentPath.startsWith("/instances/nullclaw/") || currentPath === "/install/nullclaw"}>NullClaw</a>
-    <a href={nullboilerDashboardHref} class:active={currentPath.startsWith("/nullboiler") || currentPath === "/install/nullboiler"}>NullBoiler</a>
-    {#if showNullBoiler}
-      <a href={nullboilerWorkflowsHref} class:active={currentPath.startsWith(routePath(nullboilerWorkflowsHref))}>Workflows</a>
-      <a href={nullboilerRunsHref} class:active={currentPath.startsWith(routePath(nullboilerRunsHref))}>Runs</a>
-    {/if}
-    <a href={nullticketsHref} class:active={currentPath.startsWith("/nulltickets") || currentPath === "/install/nulltickets"}>NullTickets</a>
-    <a href={nullwatchHref} class:active={currentPath.startsWith("/nullwatch") || currentPath === "/install/nullwatch"}>NullWatch</a>
-  </div>
-
-  <div class="nav-section">
     <h3>Instances</h3>
     {#each Object.entries(instances) as [component, items]}
       <div class="component-group">
-        <span class="component-name">{component}</span>
+        <a
+          class="component-name"
+          href={componentHeaderHref(component)}
+          class:active={componentHeaderActive(component)}
+        >{component}</a>
+        {#if component === "nullboiler"}
+          <a
+            class="component-sub-link"
+            href={nullboilerWorkflowsHref}
+            class:active={currentPath.startsWith(routePath(nullboilerWorkflowsHref))}
+          >Workflows</a>
+          <a
+            class="component-sub-link"
+            href={nullboilerRunsHref}
+            class:active={currentPath.startsWith(routePath(nullboilerRunsHref))}
+          >Runs</a>
+        {/if}
         {#each Object.entries(items as Record<string, any>) as [name, info]}
           <a
+            class="instance-link"
             href={instanceRoute(component, name)}
             class:active={currentPath === instanceRoute(component, name)}
           >
@@ -227,20 +231,31 @@
     margin-bottom: 0.5rem;
   }
 
-  .component-name {
-    display: block;
+  .component-group .component-name {
+    display: flex;
+    align-items: center;
     font-size: 0.75rem;
     font-weight: 700;
     color: var(--fg-dim);
-    padding: 0.375rem 1.25rem 0.125rem;
+    padding: 0.5rem 1.25rem 0.35rem;
     text-transform: uppercase;
     letter-spacing: 1px;
-    opacity: 0.7;
   }
 
   .component-group a {
     padding-left: 1.75rem;
     font-size: 0.8rem;
+  }
+
+  .component-group a.component-name {
+    padding-left: 1.25rem;
+    font-size: 0.75rem;
+  }
+
+  .component-group a.component-sub-link {
+    padding-left: 2.1rem;
+    color: var(--fg-dim);
+    font-size: 0.75rem;
   }
 
   .status-dot {

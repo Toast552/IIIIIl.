@@ -68,12 +68,13 @@ fn buildListJson(allocator: std.mem.Allocator, s: *state_mod.State) ![]const u8 
         const installed = has_dot_dir or instance_count > 0;
 
         try buf.print(
-            "{{\"name\":\"{s}\",\"display_name\":\"{s}\",\"description\":\"{s}\",\"repo\":\"{s}\",\"alpha\":{s},\"installable\":{s},\"installed\":{s},\"standalone\":{s},\"instance_count\":{d}}}",
+            "{{\"name\":\"{s}\",\"display_name\":\"{s}\",\"description\":\"{s}\",\"repo\":\"{s}\",\"stage\":\"{s}\",\"alpha\":{s},\"installable\":{s},\"installed\":{s},\"standalone\":{s},\"instance_count\":{d}}}",
             .{
                 comp.name,
                 comp.display_name,
                 comp.description,
                 comp.repo,
+                comp.stage,
                 if (comp.is_alpha) "true" else "false",
                 if (comp.installable) "true" else "false",
                 if (installed) "true" else "false",
@@ -234,11 +235,14 @@ test "handleList returns valid JSON with all known components" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw/nullwatch\"") != null);
 
     // Verify structural fields
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"stage\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"alpha\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"installable\"") != null);
-    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, json, "\"installable\":true"));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, json, "\"alpha\":true"));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, json, "\"alpha\":false"));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, json, "\"installable\":true"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, "\"stage\":\"alpha\""));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, json, "\"stage\":\"beta\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, "\"alpha\":true"));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, json, "\"alpha\":false"));
     try std.testing.expect(std.mem.indexOf(u8, json, "\"installed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"instance_count\"") != null);
 }
@@ -290,7 +294,7 @@ test "handleList keeps standalone hint when default install is already managed" 
     const json = try handleList(allocator, &s);
     defer allocator.free(json);
 
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"nullclaw\",\"display_name\":\"NullClaw\",\"description\":\"Autonomous AI agent runtime\",\"repo\":\"nullclaw/nullclaw\",\"alpha\":false,\"installable\":true,\"installed\":true,\"standalone\":true,\"instance_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"nullclaw\",\"display_name\":\"NullClaw\",\"description\":\"Autonomous AI agent runtime\",\"repo\":\"nullclaw/nullclaw\",\"stage\":\"\",\"alpha\":false,\"installable\":true,\"installed\":true,\"standalone\":true,\"instance_count\":1") != null);
 }
 
 test "handleManifest returns null for non-cached manifest" {

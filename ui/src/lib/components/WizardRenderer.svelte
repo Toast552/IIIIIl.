@@ -35,25 +35,31 @@
   let validationError = $state("");
   let validationWarning = $state("");
   let existingInstanceNames = $state<string[]>([]);
+  let instanceNameComponent = $state("");
 
-  // Auto-generate instance name on mount
+  function nextInstanceName(componentName: string, names: string[]): string {
+    let id = 1;
+    while (names.includes(`${componentName}-${id}`)) id++;
+    return `${componentName}-${id}`;
+  }
+
+  // Auto-generate instance name when the selected component changes.
   $effect(() => {
-    if (component && !instanceName) {
-      api
-        .getInstances()
-        .then((data: any) => {
-          const existing = data?.instances?.[component] || {};
-          const names = Object.keys(existing);
-          existingInstanceNames = names;
-          let id = 1;
-          while (names.includes(`instance-${id}`)) id++;
-          instanceName = `instance-${id}`;
-        })
-        .catch(() => {
-          existingInstanceNames = [];
-          instanceName = "instance-1";
-        });
-    }
+    const componentName = component;
+    if (!componentName || instanceNameComponent === componentName) return;
+    instanceNameComponent = componentName;
+    api
+      .getInstances()
+      .then((data: any) => {
+        const existing = data?.instances?.[componentName] || {};
+        const names = Object.keys(existing);
+        existingInstanceNames = names;
+        instanceName = nextInstanceName(componentName, names);
+      })
+      .catch(() => {
+        existingInstanceNames = [];
+        instanceName = `${componentName}-1`;
+      });
   });
 
   let trimmedInstanceName = $derived(instanceName.trim());
@@ -432,7 +438,7 @@
           id={instanceNameId}
           type="text"
           bind:value={instanceName}
-          placeholder="instance-1"
+          placeholder={`${component}-1`}
         />
         {#if instanceNameError}
           <p class="name-error">{instanceNameError}</p>
