@@ -3,7 +3,6 @@
   import AddExistingDialog from "$lib/components/AddExistingDialog.svelte";
   import ComponentCard from "$lib/components/ComponentCard.svelte";
   import { api, type StandaloneInfo } from "$lib/api/client";
-  import { onMount } from "svelte";
 
   let components = $state<any[]>([]);
   let standalone = $state<StandaloneInfo | null>(null);
@@ -55,9 +54,6 @@
     }
   }
 
-  onMount(() => {
-    void loadPageData();
-  });
   afterNavigate(loadPageData);
 </script>
 

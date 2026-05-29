@@ -12,17 +12,14 @@
   import NullBoilerPanel from "$lib/components/NullBoilerPanel.svelte";
   import NullTicketsPanel from "$lib/components/NullTicketsPanel.svelte";
   import { api, type ApiRequestError } from "$lib/api/client";
-  import {
-    orchestrationUiRoutes,
-    withBoilerInstance,
-    withTicketsInstance,
-  } from "$lib/orchestration/routes";
+  import { nullboilerUiRoutes, withBoilerInstance } from "$lib/nullboiler/routes";
+  import { nullticketsUiRoutes, withTicketsInstance } from "$lib/nulltickets/routes";
   import {
     getSelectedBoilerInstance,
     getSelectedTicketsInstance,
     setSelectedBoilerInstance,
     setSelectedTicketsInstance,
-  } from "$lib/orchestration/backendSelection";
+  } from "$lib/nullstack/backendSelection";
 
   let component = $derived($page.params.component);
   let name = $derived($page.params.name);
@@ -630,7 +627,7 @@
   async function openTicketsStore() {
     if (component !== "nulltickets") return;
     setSelectedTicketsInstance(name);
-    await goto(withTicketsInstance(orchestrationUiRoutes.store(), name));
+    await goto(withTicketsInstance(nullticketsUiRoutes.store(), name));
   }
 
   async function createTicketTask() {
@@ -1048,7 +1045,7 @@
       <button class="btn" onclick={stop} disabled={loading}>Stop</button>
       <button class="btn" onclick={restart} disabled={loading}>Restart</button>
       {#if component === "nullwatch"}
-        <a class="btn" href={`/observability?watch=${encodeURIComponent(name)}`}>Observability</a>
+        <a class="btn" href={`/nullwatch?watch=${encodeURIComponent(name)}`}>NullWatch</a>
       {/if}
       <button class="btn danger" onclick={remove} disabled={loading}
         >Delete</button
@@ -1285,8 +1282,8 @@
                   {#if linkedWatch}
                     <a
                       class="btn integration-btn"
-                      href={`/observability?watch=${encodeURIComponent(linkedWatch.name)}`}
-                      >Open Observability</a
+                      href={`/nullwatch?watch=${encodeURIComponent(linkedWatch.name)}`}
+                      >Open NullWatch</a
                     >
                   {/if}
                 </div>
@@ -1339,8 +1336,8 @@
                   </button>
                   <a
                     class="btn integration-btn"
-                    href={`/observability?watch=${encodeURIComponent(name)}`}
-                    >Open Observability</a
+                    href={`/nullwatch?watch=${encodeURIComponent(name)}`}
+                    >Open NullWatch</a
                   >
                 </div>
               {:else}
@@ -1447,13 +1444,13 @@
               <div class="integration-actions">
                 <button
                   class="btn integration-btn"
-                  onclick={() => openBoilerRoute(orchestrationUiRoutes.workflows())}
+                  onclick={() => openBoilerRoute(nullboilerUiRoutes.workflows())}
                 >
                   Workflows
                 </button>
                 <button
                   class="btn integration-btn"
-                  onclick={() => openBoilerRoute(orchestrationUiRoutes.runs())}
+                  onclick={() => openBoilerRoute(nullboilerUiRoutes.runs())}
                 >
                   Runs
                 </button>
@@ -1954,7 +1951,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-shadow: var(--text-glow);
     text-decoration: none;
   }
@@ -1997,7 +1994,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .tabs button:hover {
     color: var(--accent);
@@ -2026,7 +2023,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     backdrop-filter: blur(4px);
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .info-card:hover {
     border-color: color-mix(in srgb, var(--accent) 50%, transparent);
@@ -2140,7 +2137,6 @@
   .integration-field select:focus,
   .integration-field input:focus,
   .integration-field textarea:focus {
-    outline: none;
     border-color: var(--accent);
   }
   .integration-field textarea {
@@ -2182,7 +2178,6 @@
     font-size: 0.75rem;
   }
   .usage-window:focus {
-    outline: none;
     border-color: var(--accent);
   }
   .usage-table-wrap {
@@ -2264,7 +2259,7 @@
     background: var(--bg-surface);
     border: none;
     border-radius: 2px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
   }
   .toggle-thumb {
@@ -2275,7 +2270,7 @@
     height: 14px;
     background: var(--fg-dim);
     border-radius: 2px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .toggle-btn.on .toggle-track {
     background: color-mix(in srgb, var(--accent) 20%, transparent);

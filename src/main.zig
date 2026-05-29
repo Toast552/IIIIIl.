@@ -118,7 +118,6 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         },
         .uninstall => |opts| runUninstallCommand(allocator, opts),
-        .add_source => |opts| std.debug.print("add-source {s} (not yet implemented)\n", .{opts.repo}),
         .report => |opts| report_cli.run(allocator, opts) catch |err| {
             const any_err: anyerror = err;
             switch (any_err) {

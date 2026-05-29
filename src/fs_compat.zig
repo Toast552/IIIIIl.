@@ -7,8 +7,8 @@ fn capped_read_limit(max_bytes: u64) usize {
     return @intCast(@min(max_bytes, max_usize_u64));
 }
 
-/// Compatibility wrapper for `Dir.readFileAlloc` that avoids Zig 0.15.2's
-/// `File.stat()` path on Linux kernels where `statx` is unavailable.
+/// Project filesystem helper that reads relative and absolute paths through the
+/// shared Zig 0.16 stdlib adapter.
 pub fn readFileAlloc(dir: anytype, allocator: std.mem.Allocator, sub_path: []const u8, max_bytes: u64) ![]u8 {
     if (std.fs.path.isAbsolute(sub_path)) {
         const file = try openPath(sub_path, .{});
@@ -22,11 +22,8 @@ pub fn readFileAlloc(dir: anytype, allocator: std.mem.Allocator, sub_path: []con
     return try file.readToEndAlloc(allocator, capped_read_limit(max_bytes));
 }
 
-/// Compatibility wrapper for `Dir.makePath` / `cwd().makePath()` that avoids
-/// the `statx`-dependent recursive path walk in Zig 0.15.2 stdlib.
-///
-/// Each ancestor directory is created in order, treating existing
-/// directories as success.
+/// Project filesystem helper for creating each ancestor directory in order,
+/// treating existing directories as success.
 pub fn makePath(path: []const u8) !void {
     if (path.len == 0) return;
 
@@ -60,7 +57,7 @@ pub fn makePath(path: []const u8) !void {
     }
 }
 
-/// Compatibility wrapper that forwards to the file's `stat` implementation.
+/// Project filesystem helper that forwards to the file's `stat` implementation.
 pub fn stat(file: anytype) @TypeOf(file.stat()) {
     return file.stat();
 }

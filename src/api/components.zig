@@ -62,7 +62,7 @@ fn buildListJson(allocator: std.mem.Allocator, s: *state_mod.State) ![]const u8 
         // Count managed instances from state
         const instance_count = countInstancesFromState(s, comp.name);
 
-        // standalone is a lightweight hint that the default dot-dir install exists.
+        // standalone = dot-dir config exists without a managed NullHub instance
         const has_dot_dir = hasStandaloneInstall(allocator, comp.name);
         const standalone = has_dot_dir;
         const installed = has_dot_dir or instance_count > 0;
@@ -130,10 +130,20 @@ pub fn handleManifest(allocator: std.mem.Allocator, component_name: []const u8) 
     return null;
 }
 
-/// Handle POST /api/components/refresh — placeholder for future manifest refresh.
-/// Returns a success response body.
+/// Handle POST /api/components/refresh — report the current known registry snapshot.
 pub fn handleRefresh(allocator: std.mem.Allocator) ![]const u8 {
-    return try allocator.dupe(u8, "{\"status\":\"ok\"}");
+    var installable_count: usize = 0;
+    var alpha_count: usize = 0;
+    for (registry.known_components) |comp| {
+        if (comp.installable) installable_count += 1;
+        if (comp.is_alpha) alpha_count += 1;
+    }
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "{{\"status\":\"ok\",\"component_count\":{d},\"installable_count\":{d},\"alpha_count\":{d}}}",
+        .{ registry.known_components.len, installable_count, alpha_count },
+    );
 }
 
 // ─── Route extraction helper ─────────────────────────────────────────────────
@@ -215,7 +225,7 @@ test "handleList returns valid JSON with all known components" {
     try std.testing.expect(std.mem.indexOf(u8, json, "Autonomous AI agent runtime") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "DAG-based workflow orchestrator") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "Task and issue tracker") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "Headless observability") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "Headless tracing") != null);
 
     // Verify repo fields
     try std.testing.expect(std.mem.indexOf(u8, json, "\"nullclaw/nullclaw\"") != null);
@@ -280,10 +290,6 @@ test "handleList keeps standalone hint when default install is already managed" 
     const json = try handleList(allocator, &s);
     defer allocator.free(json);
 
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"nullclaw\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"nullclaw\"",) == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"nullclaw\",\"display_name\":\"NullClaw\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"nullclaw\",\"display_name\":\"NullClaw\",\"description\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"nullclaw\",\"display_name\":\"NullClaw\",\"description\":\"Autonomous AI agent runtime\",\"repo\":\"nullclaw/nullclaw\",\"alpha\":false,\"installable\":true,\"installed\":true,\"standalone\":true,\"instance_count\":1") != null);
 }
 
@@ -307,7 +313,9 @@ test "handleRefresh returns ok status" {
 
     const json = try handleRefresh(allocator);
     defer allocator.free(json);
-    try std.testing.expectEqualStrings("{\"status\":\"ok\"}", json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"component_count\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"installable_count\":4") != null);
 }
 
 test "extractComponentName parses paths correctly" {

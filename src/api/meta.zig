@@ -83,6 +83,13 @@ const channel_id_param = ParamSpec{
     .description = "Saved channel numeric identifier.",
 };
 
+const mission_replay_id_param = ParamSpec{
+    .name = "id",
+    .location = "path",
+    .required = true,
+    .description = "Durable Mission Control replay artifact id.",
+};
+
 const window_query = ParamSpec{
     .name = "window",
     .location = "query",
@@ -174,6 +181,13 @@ const memory_limit_query = ParamSpec{
     .description = "Maximum number of memory results.",
 };
 
+const mission_replay_limit_query = ParamSpec{
+    .name = "limit",
+    .location = "query",
+    .required = false,
+    .description = "Maximum number of durable replay records to return, clamped to 1..100.",
+};
+
 const memory_offset_query = ParamSpec{
     .name = "offset",
     .location = "query",
@@ -248,6 +262,7 @@ const common_instance_params = [_]ParamSpec{ component_param, instance_name_para
 const component_only_params = [_]ParamSpec{component_param};
 const provider_id_params = [_]ParamSpec{provider_id_param};
 const channel_id_params = [_]ParamSpec{channel_id_param};
+const mission_replay_id_params = [_]ParamSpec{mission_replay_id_param};
 const module_name_params = [_]ParamSpec{module_name_param};
 const component_name_params = [_]ParamSpec{component_name_param};
 const wizard_component_params = [_]ParamSpec{wizard_component_param};
@@ -261,6 +276,7 @@ const config_query_params = [_]ParamSpec{config_path_query};
 const named_query_params = [_]ParamSpec{named_query};
 const session_query_params = [_]ParamSpec{session_query};
 const limit_query_params = [_]ParamSpec{history_limit_query};
+const mission_replay_limit_query_params = [_]ParamSpec{mission_replay_limit_query};
 const cron_job_id_params = [_]ParamSpec{ component_param, instance_name_param, cron_job_id_param };
 
 const route_examples_status = [_]ExampleSpec{
@@ -412,9 +428,9 @@ const routes = [_]RouteSpec{
         .method = "POST",
         .path_template = "/api/components/refresh",
         .category = "components",
-        .summary = "Refresh the component registry and cached manifests.",
+        .summary = "Return the current component registry snapshot.",
         .auth_mode = "optional_bearer",
-        .response = "Refresh status payload.",
+        .response = "Registry snapshot payload.",
     },
     .{
         .id = "wizard.free_port",
@@ -548,7 +564,7 @@ const routes = [_]RouteSpec{
         .summary = "Create or update a component instance from wizard form data.",
         .auth_mode = "optional_bearer",
         .path_params = wizard_component_params[0..],
-        .body = "Wizard submission JSON.",
+        .body = "Wizard submission JSON. For nullclaw, optional generic NullHub hints such as nullhub_profile=stateless prepare memory=none, A2A multimodal, media-sized gateway limits, and a NullHub-managed gateway token.",
         .response = "Created instance payload or validation error.",
     },
     .{
@@ -905,10 +921,44 @@ const routes = [_]RouteSpec{
         .method = "POST",
         .path_template = "/api/instances/{component}/{name}/agent-stream",
         .category = "instances",
-        .summary = "Streaming agent turns are not supported through nullhub; this route returns 501.",
+        .summary = "Stream a managed nullclaw agent turn by translating the request to gateway A2A message/stream.",
         .auth_mode = "optional_bearer",
         .path_params = common_instance_params[0..],
-        .response = "Not implemented payload.",
+        .body = "JSON body with message and optional session_key. Provider/model overrides are not applied on this gateway-backed streaming route.",
+        .response = "text/event-stream A2A task events.",
+    },
+    .{
+        .id = "instances.a2a",
+        .method = "POST",
+        .path_template = "/api/instances/{component}/{name}/a2a",
+        .category = "instances",
+        .summary = "Proxy a JSON-RPC A2A request to a managed nullclaw gateway.",
+        .auth_mode = "optional_bearer",
+        .path_params = common_instance_params[0..],
+        .body = "A2A JSON-RPC request body.",
+        .response = "A2A JSON-RPC response payload.",
+    },
+    .{
+        .id = "instances.a2a.stream",
+        .method = "POST",
+        .path_template = "/api/instances/{component}/{name}/a2a-stream",
+        .category = "instances",
+        .summary = "Proxy a streaming A2A JSON-RPC request to a managed nullclaw gateway.",
+        .auth_mode = "optional_bearer",
+        .path_params = common_instance_params[0..],
+        .body = "A2A JSON-RPC request body using a streaming method.",
+        .response = "text/event-stream A2A response.",
+    },
+    .{
+        .id = "instances.transcribe",
+        .method = "POST",
+        .path_template = "/api/instances/{component}/{name}/transcribe",
+        .category = "instances",
+        .summary = "Transcribe audio through a managed nullclaw gateway.",
+        .auth_mode = "optional_bearer",
+        .path_params = common_instance_params[0..],
+        .body = "JSON body with audio_base64, mime_type, source, and optional language.",
+        .response = "Transcript JSON payload.",
     },
     .{
         .id = "instances.agent.sessions",
@@ -1061,7 +1111,7 @@ const routes = [_]RouteSpec{
         .method = "GET",
         .path_template = "/api/instances/{component}/{name}/integration",
         .category = "instances",
-        .summary = "Read integration status for linked telemetry, orchestration, and tracker components.",
+        .summary = "Read integration status for linked NullWatch telemetry, NullBoiler workflow, and NullTickets tracker components.",
         .auth_mode = "optional_bearer",
         .path_params = common_instance_params[0..],
         .response = "Integration status and linkage payload.",
@@ -1078,6 +1128,16 @@ const routes = [_]RouteSpec{
         .response = "Integration update result.",
     },
     .{
+        .id = "instances.standalone",
+        .method = "GET",
+        .path_template = "/api/instances/{component}/standalone",
+        .category = "instances",
+        .summary = "Detect a local default standalone installation for a component.",
+        .auth_mode = "optional_bearer",
+        .path_params = component_only_params[0..],
+        .response = "Standalone detection payload with optional path and import status.",
+    },
+    .{
         .id = "instances.import",
         .method = "POST",
         .path_template = "/api/instances/{component}/import",
@@ -1085,6 +1145,7 @@ const routes = [_]RouteSpec{
         .summary = "Import a standalone installation into nullhub management.",
         .auth_mode = "optional_bearer",
         .path_params = component_only_params[0..],
+        .body = "Optional JSON body with path and name. Empty body imports the default ~/.{component} path.",
         .response = "Imported instance payload.",
     },
     .{
@@ -1324,24 +1385,112 @@ const routes = [_]RouteSpec{
         .response = "Update result payload.",
     },
     .{
-        .id = "orchestration.proxy",
+        .id = "nullboiler.proxy",
         .method = "ANY",
-        .path_template = "/api/orchestration/{...}",
-        .category = "orchestration",
-        .summary = "Proxy orchestration requests to NullBoiler, or store requests to NullTickets.",
+        .path_template = "/api/nullboiler/{...}",
+        .category = "nullboiler",
+        .summary = "Proxy NullBoiler workflow and run requests.",
         .auth_mode = "optional_bearer",
-        .body = "Forwarded as-is to the orchestration backend.",
+        .body = "Forwarded as-is to NullBoiler.",
         .response = "Forwarded upstream JSON response.",
     },
     .{
-        .id = "observability.proxy",
+        .id = "nulltickets.store.proxy",
         .method = "ANY",
-        .path_template = "/api/observability/{...}",
-        .category = "observability",
-        .summary = "Proxy observability requests to a managed or configured NullWatch instance.",
+        .path_template = "/api/nulltickets/store/{...}",
+        .category = "nulltickets",
+        .summary = "Proxy NullTickets durable store requests.",
+        .auth_mode = "optional_bearer",
+        .body = "Forwarded as-is to NullTickets.",
+        .response = "Forwarded upstream JSON response.",
+    },
+    .{
+        .id = "nullwatch.proxy",
+        .method = "ANY",
+        .path_template = "/api/nullwatch/{...}",
+        .category = "nullwatch",
+        .summary = "Proxy NullWatch tracing and eval requests to a managed or configured instance.",
         .auth_mode = "optional_bearer",
         .body = "Forwarded as-is to NullWatch.",
         .response = "Forwarded upstream JSON response.",
+    },
+    .{
+        .id = "mission-control.state",
+        .method = "GET",
+        .path_template = "/api/mission-control/state",
+        .category = "mission-control",
+        .summary = "Read the local deterministic NullOS Mission Control replay state.",
+        .auth_mode = "optional_bearer",
+        .response = "Schema-versioned mission state, controls, graph, timeline, telemetry, recovery metadata, NullWatch-style trace references, and resolved NullBoiler workflow evidence.",
+    },
+    .{
+        .id = "mission-control.replay",
+        .method = "GET",
+        .path_template = "/api/mission-control/replay",
+        .category = "mission-control",
+        .summary = "Export the current Mission Control replay artifact for local review and debugging.",
+        .auth_mode = "optional_bearer",
+        .response = "Replay artifact with current snapshot, source fixture, failed/recovered artifact comparison, resolved NullBoiler workflow evidence, and NullTickets/NullBoiler/NullClaw/NullWatch mapping metadata.",
+    },
+    .{
+        .id = "mission-control.replay.save",
+        .method = "POST",
+        .path_template = "/api/mission-control/replay/save",
+        .category = "mission-control",
+        .summary = "Persist the completed Mission Control replay artifact in local NullHub storage.",
+        .auth_mode = "optional_bearer",
+        .body = "No request body required.",
+        .response = "Saved replay record and the captured completed replay artifact; returns 409 before recovered validation completes.",
+    },
+    .{
+        .id = "mission-control.replays.list",
+        .method = "GET",
+        .path_template = "/api/mission-control/replays",
+        .category = "mission-control",
+        .summary = "List durable Mission Control replay records.",
+        .auth_mode = "optional_bearer",
+        .query_params = mission_replay_limit_query_params[0..],
+        .response = "Recent replay records from local NullHub storage.",
+    },
+    .{
+        .id = "mission-control.replays.get",
+        .method = "GET",
+        .path_template = "/api/mission-control/replays/{id}",
+        .category = "mission-control",
+        .summary = "Read a durable Mission Control replay artifact by id.",
+        .auth_mode = "optional_bearer",
+        .path_params = mission_replay_id_params[0..],
+        .response = "The stored replay artifact JSON.",
+    },
+    .{
+        .id = "mission-control.reset",
+        .method = "POST",
+        .path_template = "/api/mission-control/reset",
+        .category = "mission-control",
+        .summary = "Reset the local Mission Control replay to idle.",
+        .auth_mode = "optional_bearer",
+        .body = "No request body required.",
+        .response = "Reset mission state.",
+    },
+    .{
+        .id = "mission-control.launch",
+        .method = "POST",
+        .path_template = "/api/mission-control/launch",
+        .category = "mission-control",
+        .summary = "Launch the local Mission Control replay if it is idle.",
+        .auth_mode = "optional_bearer",
+        .body = "No request body required.",
+        .response = "Mission state after launch, or 409 when already started.",
+    },
+    .{
+        .id = "mission-control.recover",
+        .method = "POST",
+        .path_template = "/api/mission-control/recover",
+        .category = "mission-control",
+        .summary = "Fork the local Mission Control replay after the failure phase.",
+        .auth_mode = "optional_bearer",
+        .body = "No request body required.",
+        .response = "Mission state after checkpoint recovery, or 409 before recovery is allowed.",
     },
 };
 

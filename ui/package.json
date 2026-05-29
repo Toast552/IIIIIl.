@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "test:mission-control": "node src/lib/missionControl/replayAutomation.test.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {

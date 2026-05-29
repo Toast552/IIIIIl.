@@ -116,12 +116,9 @@ fn isImportedStandalone(
 
     const inst_dir = paths.instanceDir(allocator, component, name) catch return false;
     defer allocator.free(inst_dir);
-    if (std_compat.fs.realpathAlloc(allocator, inst_dir)) |real_dir| {
-        defer allocator.free(real_dir);
-        return !std.mem.eql(u8, real_dir, inst_dir);
-    } else |_| {
-        return false;
-    }
+    var link_buf: [std_compat.fs.max_path_bytes]u8 = undefined;
+    _ = std.Io.Dir.readLinkAbsolute(std_compat.io(), inst_dir, &link_buf) catch return false;
+    return true;
 }
 
 fn standalonePortConfigKey(component: []const u8) ?[]const u8 {
@@ -285,11 +282,18 @@ test "resolve treats custom-path imported standalone as running when health pass
     defer allocator.free(source_dir);
     try std_compat.fs.makeDirAbsolute(source_dir);
 
+    const addr = try std_compat.net.Address.resolveIp("127.0.0.1", 0);
+    var server = try addr.listen(.{});
+    defer server.deinit();
+    const port = server.listen_address.in.getPort();
+
     const source_config_path = try std.fs.path.join(allocator, &.{ source_dir, "config.json" });
     defer allocator.free(source_config_path);
     const source_config = try std_compat.fs.createFileAbsolute(source_config_path, .{ .truncate = true });
     defer source_config.close();
-    try source_config.writeAll("{\"gateway\":{\"port\":43129},\"host\":\"127.0.0.1\"}");
+    const source_config_json = try std.fmt.allocPrint(allocator, "{{\"gateway\":{{\"port\":{d}}},\"host\":\"127.0.0.1\"}}", .{port});
+    defer allocator.free(source_config_json);
+    try source_config.writeAll(source_config_json);
 
     const inst_parent = try std.fs.path.join(allocator, &.{ fixture.paths.root, "instances", "nullclaw" });
     defer allocator.free(inst_parent);
@@ -299,9 +303,6 @@ test "resolve treats custom-path imported standalone as running when health pass
     defer allocator.free(inst_dir);
     try std_compat.fs.symLinkAbsolute(source_dir, inst_dir, .{ .is_directory = true });
 
-    const addr = try std_compat.net.Address.resolveIp("127.0.0.1", 43129);
-    var server = try addr.listen(.{});
-    defer server.deinit();
     const thread = try std.Thread.spawn(.{}, HealthServerCtx.run, .{.{ .server = &server }});
     defer thread.join();
 
@@ -316,5 +317,5 @@ test "resolve treats custom-path imported standalone as running when health pass
     });
 
     try std.testing.expectEqual(manager_mod.Status.running, snapshot.status);
-    try std.testing.expectEqual(@as(u16, 43129), snapshot.port);
+    try std.testing.expectEqual(port, snapshot.port);
 }

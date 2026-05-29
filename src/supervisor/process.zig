@@ -20,9 +20,31 @@ const darwin = if (builtin.os.tag == .macos) struct {
             pbsi_svgid: u32,
             pbsi_rfu: u32,
         };
+
+        pub const ProcTaskInfo = extern struct {
+            pti_virtual_size: u64,
+            pti_resident_size: u64,
+            pti_total_user: u64,
+            pti_total_system: u64,
+            pti_threads_user: u64,
+            pti_threads_system: u64,
+            pti_policy: i32,
+            pti_faults: i32,
+            pti_pageins: i32,
+            pti_cow_faults: i32,
+            pti_messages_sent: i32,
+            pti_messages_received: i32,
+            pti_syscalls_mach: i32,
+            pti_syscalls_unix: i32,
+            pti_csw: i32,
+            pti_threadnum: i32,
+            pti_numrunning: i32,
+            pti_priority: i32,
+        };
     };
 
     const PROC_PIDT_SHORTBSDINFO: i32 = 13;
+    const PROC_PIDTASKINFO: i32 = 4;
     const SZOMB: u32 = 5;
 
     extern "c" fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: ?*anyopaque, buffersize: i32) c_int;
@@ -326,14 +348,50 @@ pub fn forceKill(pid: std_compat.process.Child.Id) !void {
 
 /// Get the resident set size (RSS) of a process in bytes.
 ///
-/// Returns null if the information is unavailable or not yet implemented
-/// for the current platform.
+/// Returns null if the information is unavailable for the current platform.
 pub fn getMemoryRss(pid: std_compat.process.Child.Id) ?u64 {
-    _ = pid;
-    // TODO: platform-specific RSS reading
-    // Linux: read /proc/{pid}/status and parse VmRSS line
-    // macOS: proc_pid_rusage or similar
+    if (comptime builtin.os.tag == .linux) return getLinuxMemoryRss(pid);
+    if (comptime builtin.os.tag == .macos) return getDarwinMemoryRss(pid);
     return null;
+}
+
+fn getLinuxMemoryRss(pid: std_compat.process.Child.Id) ?u64 {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{pid}) catch return null;
+    const file = std_compat.fs.openFileAbsolute(path, .{}) catch return null;
+    defer file.close();
+
+    var status_buf: [32 * 1024]u8 = undefined;
+    const len = file.readAll(&status_buf) catch return null;
+    return parseLinuxVmRss(status_buf[0..len]);
+}
+
+fn parseLinuxVmRss(status: []const u8) ?u64 {
+    var lines = std.mem.splitScalar(u8, status, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "VmRSS:")) continue;
+        const rest = std.mem.trim(u8, line["VmRSS:".len..], " \t");
+        var parts = std.mem.tokenizeAny(u8, rest, " \t");
+        const value = parts.next() orelse return null;
+        const unit = parts.next() orelse return null;
+        if (!std.mem.eql(u8, unit, "kB")) return null;
+        const kib = std.fmt.parseInt(u64, value, 10) catch return null;
+        return kib * 1024;
+    }
+    return null;
+}
+
+fn getDarwinMemoryRss(pid: std_compat.process.Child.Id) ?u64 {
+    var info: darwin.extern_structs.ProcTaskInfo = undefined;
+    const size = darwin.proc_pidinfo(
+        @intCast(pid),
+        darwin.PROC_PIDTASKINFO,
+        0,
+        @ptrCast(&info),
+        @sizeOf(darwin.extern_structs.ProcTaskInfo),
+    );
+    if (size != @sizeOf(darwin.extern_structs.ProcTaskInfo)) return null;
+    return info.pti_resident_size;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -436,8 +494,21 @@ test "forceKill non-existent pid does not error" {
     try forceKill(99999999);
 }
 
-test "getMemoryRss returns null for now" {
-    try std.testing.expect(getMemoryRss(1) == null);
+test "parseLinuxVmRss reads kilobytes as bytes" {
+    try std.testing.expectEqual(@as(?u64, 12_345 * 1024), parseLinuxVmRss(
+        \\Name: nullhub
+        \\VmRSS:   12345 kB
+        \\Threads: 1
+    ));
+}
+
+test "getMemoryRss reads current process where supported" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux and builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const pid: std_compat.process.Child.Id = @intCast(std.posix.getpid());
+    const rss = getMemoryRss(pid) orelse return error.SkipZigTest;
+    try std.testing.expect(rss > 0);
 }
 
 test "spawn with stdout_path captures stdout and stderr" {
