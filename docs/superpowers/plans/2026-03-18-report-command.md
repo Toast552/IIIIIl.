@@ -145,7 +145,7 @@ pub const ReportOptions = struct {
 
 - [ ] **Step 4: Add `report` to Command union**
 
-Add `report: ReportOptions,` after `add_source: AddSourceOptions,` in the `Command` union.
+Add `report: ReportOptions,` to the `Command` union near the other CLI commands.
 
 - [ ] **Step 5: Add parseReport function and wire into parse()**
 
@@ -1345,7 +1345,7 @@ git commit -m "Add report API endpoints for preview and submit"
 
 - [ ] **Step 1: Add API methods to client.ts**
 
-Add before the `...createOrchestrationApi(request, withQuery)` line:
+Add before the `...createNullBoilerApi(request, withQuery)` line:
 
 ```typescript
   reportPreview: (data: { repo: string; type: string; message: string }) =>
@@ -1642,14 +1642,15 @@ Create `ui/src/routes/report/+page.svelte`:
     color: var(--fg);
     font-size: 0.875rem;
     font-family: var(--font-mono);
-    outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
   }
 
-  .field input:focus,
-  .field select:focus,
-  .field textarea:focus {
+  .field input:focus-visible,
+  .field select:focus-visible,
+  .field textarea:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
     border-color: var(--accent);
     box-shadow: 0 0 8px var(--border-glow);
   }
@@ -1726,7 +1727,7 @@ Create `ui/src/routes/report/+page.svelte`:
     text-transform: uppercase;
     letter-spacing: 2px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, text-shadow 0.2s ease;
     text-shadow: var(--text-glow);
     box-shadow: inset 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
   }
@@ -1753,7 +1754,7 @@ Create `ui/src/routes/report/+page.svelte`:
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
   }
 
   .btn:hover {

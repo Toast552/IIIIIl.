@@ -9,15 +9,17 @@ const paths_mod = @import("../core/paths.zig");
 const state_mod = @import("../core/state.zig");
 const platform = @import("../core/platform.zig");
 const local_binary = @import("../core/local_binary.zig");
-const gateway_access = @import("../core/gateway_access.zig");
 const fs_compat = @import("../fs_compat.zig");
 const launch_args_mod = @import("../core/launch_args.zig");
 const nullclaw_web_channel = @import("../core/nullclaw_web_channel.zig");
+const nullclaw_gateway_config = @import("../core/nullclaw_gateway_config.zig");
 const manager_mod = @import("../supervisor/manager.zig");
 const ui_modules_mod = @import("ui_modules.zig");
 const managed_skills = @import("../managed_skills.zig");
 const test_helpers = @import("../test_helpers.zig");
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
+const min_gateway_body_size = nullclaw_gateway_config.min_body_size;
+const min_gateway_timeout_secs = nullclaw_gateway_config.min_timeout_secs;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -207,7 +209,7 @@ pub fn install(
         ) catch null;
         break :blk owned_launch_command orelse comp.default_launch_command;
     } else comp.default_launch_command;
-    const launch_command = registry.normalizeLaunchCommand(opts.component, raw_launch_command);
+    const launch_command = raw_launch_command;
     const health_endpoint = if (parsed_manifest) |pm| pm.value.health.endpoint else comp.default_health_endpoint;
     const default_port = if (parsed_manifest) |pm| (if (pm.value.ports.len > 0) pm.value.ports[0].default else comp.default_port) else comp.default_port;
     defer if (parsed_manifest) |pm| pm.deinit();
@@ -753,8 +755,8 @@ const NullclawRuntimeProfile = struct {
     requested: bool = false,
     stateless: bool = false,
     gateway_require_pairing: bool = true,
-    gateway_max_body_size_bytes: i64 = gateway_access.min_body_size,
-    gateway_request_timeout_secs: i64 = gateway_access.min_timeout_secs,
+    gateway_max_body_size_bytes: i64 = min_gateway_body_size,
+    gateway_request_timeout_secs: i64 = min_gateway_timeout_secs,
     a2a_enabled: bool = true,
     a2a_multi_modal: bool = true,
 };
@@ -1034,11 +1036,11 @@ fn parseNullclawRuntimeProfile(
     }
     if (integerField(root, "gateway_max_body_size_bytes")) |value| {
         profile.requested = true;
-        profile.gateway_max_body_size_bytes = @max(value, gateway_access.min_body_size);
+        profile.gateway_max_body_size_bytes = @max(value, min_gateway_body_size);
     }
     if (integerField(root, "gateway_request_timeout_secs")) |value| {
         profile.requested = true;
-        profile.gateway_request_timeout_secs = @max(value, gateway_access.min_timeout_secs);
+        profile.gateway_request_timeout_secs = @max(value, min_gateway_timeout_secs);
     }
     if (boolField(root, "a2a_enabled")) |value| {
         profile.requested = true;
@@ -1048,50 +1050,8 @@ fn parseNullclawRuntimeProfile(
         profile.requested = true;
         profile.a2a_multi_modal = value;
     }
-    if (root.get("gateway")) |gateway_value| {
-        if (gateway_value == .object) {
-            var gateway = gateway_value.object;
-            if (boolField(&gateway, "require_pairing")) |value| {
-                profile.requested = true;
-                profile.gateway_require_pairing = value;
-            }
-            if (integerField(&gateway, "max_body_size_bytes")) |value| {
-                profile.requested = true;
-                profile.gateway_max_body_size_bytes = @max(value, gateway_access.min_body_size);
-            }
-            if (integerField(&gateway, "request_timeout_secs")) |value| {
-                profile.requested = true;
-                profile.gateway_request_timeout_secs = @max(value, gateway_access.min_timeout_secs);
-            }
-        }
-    }
-    if (root.get("a2a")) |a2a_value| {
-        if (a2a_value == .object) {
-            var a2a = a2a_value.object;
-            if (boolField(&a2a, "enabled")) |value| {
-                profile.requested = true;
-                profile.a2a_enabled = value;
-            }
-            if (boolField(&a2a, "multi_modal")) |value| {
-                profile.requested = true;
-                profile.a2a_multi_modal = value;
-            }
-        }
-    }
 
     return profile;
-}
-
-fn stripObjectHintFields(root: *std.json.ObjectMap, object_key: []const u8, fields: []const []const u8) void {
-    if (root.getPtr(object_key)) |value| {
-        if (value.* != .object) return;
-        for (fields) |field| {
-            _ = value.object.orderedRemove(field);
-        }
-        if (value.object.count() == 0) {
-            _ = root.orderedRemove(object_key);
-        }
-    }
 }
 
 fn stripNullhubRuntimeProfileHints(allocator: std.mem.Allocator, component: []const u8, answers_json: []const u8, profile: NullclawRuntimeProfile) ![]const u8 {
@@ -1117,12 +1077,6 @@ fn stripNullhubRuntimeProfileHints(allocator: std.mem.Allocator, component: []co
     _ = root.orderedRemove("gateway_request_timeout_secs");
     _ = root.orderedRemove("a2a_enabled");
     _ = root.orderedRemove("a2a_multi_modal");
-    const memory_fields = [_][]const u8{ "profile", "backend", "auto_save" };
-    const gateway_fields = [_][]const u8{ "require_pairing", "max_body_size_bytes", "request_timeout_secs" };
-    const a2a_fields = [_][]const u8{ "enabled", "multi_modal" };
-    stripObjectHintFields(root, "memory", memory_fields[0..]);
-    stripObjectHintFields(root, "gateway", gateway_fields[0..]);
-    stripObjectHintFields(root, "a2a", a2a_fields[0..]);
 
     return std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
 }
@@ -1244,30 +1198,6 @@ fn patchCustomProvidersIntoConfig(
     try out.writeAll("\n");
 }
 
-fn setStringField(allocator: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8, value: []const u8, changed: *bool) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .string and std.mem.eql(u8, existing.string, value)) return;
-    }
-    try obj.put(allocator, key, .{ .string = try allocator.dupe(u8, value) });
-    changed.* = true;
-}
-
-fn setBoolField(allocator: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8, value: bool, changed: *bool) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .bool and existing.bool == value) return;
-    }
-    try obj.put(allocator, key, .{ .bool = value });
-    changed.* = true;
-}
-
-fn setIntegerAtLeast(allocator: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8, minimum: i64, changed: *bool) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .integer and existing.integer >= minimum) return;
-    }
-    try obj.put(allocator, key, .{ .integer = minimum });
-    changed.* = true;
-}
-
 fn patchNullclawRuntimeProfileIntoConfig(
     allocator: std.mem.Allocator,
     p: paths_mod.Paths,
@@ -1277,62 +1207,15 @@ fn patchNullclawRuntimeProfileIntoConfig(
 ) !void {
     if (!std.mem.eql(u8, component, "nullclaw") or !profile.requested) return;
 
-    const config_path = try p.instanceConfig(allocator, component, name);
-    defer allocator.free(config_path);
-
-    const contents = blk: {
-        const file = std_compat.fs.openFileAbsolute(config_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => break :blk try allocator.dupe(u8, "{}"),
-            else => return err,
-        };
-        defer file.close();
-        break :blk try file.readToEndAlloc(allocator, MAX_CONFIG_BYTES);
-    };
-    defer allocator.free(contents);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
+    var access = try nullclaw_gateway_config.ensureConfig(allocator, p, component, name, .{
+        .require_pairing = profile.gateway_require_pairing,
+        .max_body_size_bytes = profile.gateway_max_body_size_bytes,
+        .request_timeout_secs = profile.gateway_request_timeout_secs,
+        .a2a_enabled = profile.a2a_enabled,
+        .a2a_multi_modal = profile.a2a_multi_modal,
+        .stateless_memory = profile.stateless,
     });
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidConfig;
-
-    const json_allocator = parsed.arena.allocator();
-    var changed = false;
-    const root = &parsed.value.object;
-    const gateway_obj = try ensureObjectInMap(json_allocator, root, "gateway");
-    const a2a_obj = try ensureObjectInMap(json_allocator, root, "a2a");
-
-    try setBoolField(json_allocator, gateway_obj, "require_pairing", profile.gateway_require_pairing, &changed);
-    try setIntegerAtLeast(json_allocator, gateway_obj, "max_body_size_bytes", profile.gateway_max_body_size_bytes, &changed);
-    try setIntegerAtLeast(json_allocator, gateway_obj, "request_timeout_secs", profile.gateway_request_timeout_secs, &changed);
-    try setBoolField(json_allocator, a2a_obj, "enabled", profile.a2a_enabled, &changed);
-    try setBoolField(json_allocator, a2a_obj, "multi_modal", profile.a2a_multi_modal, &changed);
-
-    if (profile.gateway_require_pairing) {
-        const token = try gateway_access.ensurePairedToken(allocator, json_allocator, p, component, name, gateway_obj, &changed);
-        allocator.free(token);
-    }
-
-    if (profile.stateless) {
-        const memory_obj = try ensureObjectInMap(json_allocator, root, "memory");
-        try setStringField(json_allocator, memory_obj, "profile", "minimal_none", &changed);
-        try setStringField(json_allocator, memory_obj, "backend", "none", &changed);
-        try setBoolField(json_allocator, memory_obj, "auto_save", false, &changed);
-    }
-
-    if (!changed) return;
-
-    const rendered = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{
-        .whitespace = .indent_2,
-        .emit_null_optional_fields = false,
-    });
-    defer allocator.free(rendered);
-
-    const out = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
-    defer out.close();
-    try out.writeAll(rendered);
-    try out.writeAll("\n");
+    defer access.deinit(allocator);
 }
 
 fn ensureObjectInMap(
@@ -2066,7 +1949,7 @@ test "patchCustomProvidersIntoConfig restores primary custom and keeps standard 
 test "stripNullhubRuntimeProfileHints removes nullhub-only fields before component config generation" {
     const allocator = std.testing.allocator;
     const body =
-        \\{"instance_name":"stateless-agent","provider":"openrouter","nullhub_profile":"stateless","memory_backend":"none","gateway_max_body_size_bytes":33554432,"a2a_multi_modal":true,"memory":{"backend":"none","auto_save":false},"gateway":{"max_body_size_bytes":33554432},"a2a":{"multi_modal":true}}
+        \\{"instance_name":"nullhat","provider":"openrouter","nullhub_profile":"stateless","memory_backend":"none","gateway_max_body_size_bytes":33554432,"a2a_multi_modal":true}
     ;
     const profile = parseNullclawRuntimeProfile(allocator, "nullclaw", body);
     try std.testing.expect(profile.requested);
@@ -2078,13 +1961,10 @@ test "stripNullhubRuntimeProfileHints removes nullhub-only fields before compone
     try std.testing.expect(std.mem.indexOf(u8, stripped, "nullhub_profile") == null);
     try std.testing.expect(std.mem.indexOf(u8, stripped, "memory_backend") == null);
     try std.testing.expect(std.mem.indexOf(u8, stripped, "gateway_max_body_size_bytes") == null);
-    try std.testing.expect(std.mem.indexOf(u8, stripped, "\"memory\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, stripped, "\"gateway\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, stripped, "\"a2a\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, stripped, "\"provider\":\"openrouter\"") != null);
 }
 
-test "patchNullclawRuntimeProfileIntoConfig prepares stateless gateway config for generic instances" {
+test "patchNullclawRuntimeProfileIntoConfig prepares stateless gateway config for NullHat-style instances" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
     defer fixture.deinit();
@@ -2096,14 +1976,14 @@ test "patchNullclawRuntimeProfileIntoConfig prepares stateless gateway config fo
         error.PathAlreadyExists => {},
         else => return err,
     };
-    const inst_dir = try fixture.paths.instanceDir(allocator, "nullclaw", "stateless-agent");
+    const inst_dir = try fixture.paths.instanceDir(allocator, "nullclaw", "nullhat");
     defer allocator.free(inst_dir);
     std_compat.fs.makeDirAbsolute(inst_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    const config_path = try fixture.paths.instanceConfig(allocator, "nullclaw", "stateless-agent");
+    const config_path = try fixture.paths.instanceConfig(allocator, "nullclaw", "nullhat");
     defer allocator.free(config_path);
     try writeFile(config_path,
         \\{"gateway":{"port":43123,"max_body_size_bytes":1024},"a2a":{"enabled":false},"memory":{"profile":"hybrid_keyword","backend":"hybrid","auto_save":true}}
@@ -2112,7 +1992,7 @@ test "patchNullclawRuntimeProfileIntoConfig prepares stateless gateway config fo
     const profile = parseNullclawRuntimeProfile(allocator, "nullclaw",
         \\{"nullhub_profile":"stateless"}
     );
-    try patchNullclawRuntimeProfileIntoConfig(allocator, fixture.paths, "nullclaw", "stateless-agent", profile);
+    try patchNullclawRuntimeProfileIntoConfig(allocator, fixture.paths, "nullclaw", "nullhat", profile);
 
     const file = try std_compat.fs.openFileAbsolute(config_path, .{});
     defer file.close();
@@ -2126,27 +2006,27 @@ test "patchNullclawRuntimeProfileIntoConfig prepares stateless gateway config fo
     const a2a = root.get("a2a").?.object;
     const memory = root.get("memory").?.object;
     try std.testing.expect(gateway.get("require_pairing").?.bool);
-    try std.testing.expect(gateway.get("max_body_size_bytes").?.integer >= gateway_access.min_body_size);
-    try std.testing.expect(gateway.get("request_timeout_secs").?.integer >= gateway_access.min_timeout_secs);
+    try std.testing.expect(gateway.get("max_body_size_bytes").?.integer >= min_gateway_body_size);
+    try std.testing.expect(gateway.get("request_timeout_secs").?.integer >= min_gateway_timeout_secs);
     try std.testing.expect(a2a.get("enabled").?.bool);
     try std.testing.expect(a2a.get("multi_modal").?.bool);
     try std.testing.expectEqualStrings("minimal_none", memory.get("profile").?.string);
     try std.testing.expectEqualStrings("none", memory.get("backend").?.string);
     try std.testing.expect(!memory.get("auto_save").?.bool);
 
-    const token_path = try gateway_access.tokenPath(allocator, fixture.paths, "nullclaw", "stateless-agent");
+    const token_path = try nullclaw_gateway_config.gatewayTokenPath(allocator, fixture.paths, "nullclaw", "nullhat");
     defer allocator.free(token_path);
     const token_file = try std_compat.fs.openFileAbsolute(token_path, .{});
     defer token_file.close();
     const token_bytes = try token_file.readToEndAlloc(allocator, 16 * 1024);
     defer allocator.free(token_bytes);
     const token = std.mem.trim(u8, token_bytes, " \t\r\n");
-    try std.testing.expect(gateway_access.isNullhubToken(token));
+    try std.testing.expect(nullclaw_gateway_config.isNullhubGatewayToken(token));
 
-    const expected_hash = try gateway_access.hashTokenAlloc(allocator, token);
+    const expected_hash = try nullclaw_gateway_config.hashGatewayTokenAlloc(allocator, token);
     defer allocator.free(expected_hash);
     const paired_tokens = gateway.get("paired_tokens").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), paired_tokens.len);
     try std.testing.expectEqualStrings(expected_hash, paired_tokens[0].string);
-    try std.testing.expect(!gateway_access.isNullhubToken(paired_tokens[0].string));
+    try std.testing.expect(!nullclaw_gateway_config.isNullhubGatewayToken(paired_tokens[0].string));
 }

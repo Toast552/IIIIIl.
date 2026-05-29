@@ -17,7 +17,6 @@ const mdns_mod = @import("mdns.zig");
 const state_mod = @import("core/state.zig");
 const integration_mod = @import("core/integration.zig");
 const paths_mod = @import("core/paths.zig");
-const gateway_access = @import("core/gateway_access.zig");
 const manager_mod = @import("supervisor/manager.zig");
 const process_mod = @import("supervisor/process.zig");
 const runtime_state_mod = @import("supervisor/runtime_state.zig");
@@ -27,8 +26,12 @@ const providers_api = @import("api/providers.zig");
 const channels_api = @import("api/channels.zig");
 const usage_api = @import("api/usage.zig");
 const report_api = @import("api/report.zig");
-const orchestration_api = @import("api/orchestration.zig");
-const observability_api = @import("api/observability.zig");
+const nullboiler_api = @import("api/nullboiler.zig");
+const nulltickets_api = @import("api/nulltickets.zig");
+const nullwatch_api = @import("api/nullwatch.zig");
+const mission_control_api = @import("api/mission_control.zig");
+const mission_core = @import("core/mission_control.zig");
+const nullclaw_gateway_config = @import("core/nullclaw_gateway_config.zig");
 const launch_args_mod = @import("core/launch_args.zig");
 const ui_modules = @import("installer/ui_modules.zig");
 const orchestrator = @import("installer/orchestrator.zig");
@@ -37,8 +40,64 @@ const ui_assets = @import("ui_assets");
 const version = @import("version.zig");
 const test_helpers = @import("test_helpers.zig");
 
-const max_request_size: usize = 64 * 1024 * 1024;
+const default_max_request_size: usize = 64 * 1024;
+const gateway_max_request_size: usize = @as(usize, @intCast(nullclaw_gateway_config.min_body_size));
 const initial_request_buffer_size: usize = 64 * 1024;
+const mission_workflow_evidence_ttl_ms: i64 = 5000;
+const mission_workflow_scan_limit: usize = 50;
+const mission_workflow_response_max_bytes: usize = 2 * 1024 * 1024;
+
+const MissionWorkflowEvidenceCache = struct {
+    mutex: std_compat.sync.Mutex = .{},
+    arena: ?std.heap.ArenaAllocator = null,
+    key: []const u8 = "",
+    checked_at_ms: i64 = 0,
+    evidence: mission_core.WorkflowEvidence = mission_core.workflowEvidenceUnavailable("not_checked"),
+
+    fn deinit(self: *MissionWorkflowEvidenceCache) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.arena) |*arena| arena.deinit();
+        self.arena = null;
+        self.key = "";
+        self.checked_at_ms = 0;
+        self.evidence = mission_core.workflowEvidenceUnavailable("not_checked");
+    }
+
+    fn cloneFresh(self: *MissionWorkflowEvidenceCache, allocator: std.mem.Allocator, key: []const u8, now_ms: i64) ?mission_core.WorkflowEvidence {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.arena == null) return null;
+        if (!std.mem.eql(u8, self.key, key)) return null;
+        if (now_ms - self.checked_at_ms > mission_workflow_evidence_ttl_ms) return null;
+        return mission_core.cloneWorkflowEvidence(allocator, self.evidence) catch
+            mission_core.workflowEvidenceUnavailable("evidence_clone_failed");
+    }
+
+    fn replaceAndClone(
+        self: *MissionWorkflowEvidenceCache,
+        allocator: std.mem.Allocator,
+        arena: std.heap.ArenaAllocator,
+        key: []const u8,
+        checked_at_ms: i64,
+        evidence: mission_core.WorkflowEvidence,
+    ) mission_core.WorkflowEvidence {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.arena) |*old| old.deinit();
+        self.arena = arena;
+        self.key = key;
+        self.checked_at_ms = checked_at_ms;
+        self.evidence = evidence;
+        return mission_core.cloneWorkflowEvidence(allocator, self.evidence) catch
+            mission_core.workflowEvidenceUnavailable("evidence_clone_failed");
+    }
+};
+
+const MissionRunCandidate = struct {
+    run: mission_core.WorkflowEvidenceRun,
+    checkpoints: []const mission_core.WorkflowEvidenceCheckpoint,
+};
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -52,6 +111,8 @@ pub const Server = struct {
     paths: paths_mod.Paths,
     manager: *manager_mod.Manager,
     mutex: *std_compat.sync.Mutex,
+    mission_control: mission_control_api.RuntimeStore = .{},
+    mission_workflow_evidence_cache: MissionWorkflowEvidenceCache = .{},
     start_time: i64,
 
     pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16, manager: *manager_mod.Manager, mutex: *std_compat.sync.Mutex) !Server {
@@ -98,6 +159,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
+        self.mission_workflow_evidence_cache.deinit();
         self.state.deinit();
         self.allocator.destroy(self.state);
         self.paths.deinit(self.allocator);
@@ -162,22 +224,11 @@ pub const Server = struct {
         };
         defer self.allocator.free(desired_binary);
 
-        const launch_mode = normalizedLaunchModeForRestore(component, entry.launch_mode);
-        var desired_launch = launch_args_mod.resolve(self.allocator, launch_mode, entry.verbose) catch {
+        var desired_launch = launch_args_mod.resolve(self.allocator, entry.launch_mode, entry.verbose) catch {
             self.terminatePersistedRuntime(&runtime, component, name);
             return false;
         };
         defer desired_launch.deinit();
-
-        if (!std.mem.eql(u8, launch_mode, entry.launch_mode)) {
-            _ = self.state.updateInstance(component, name, .{
-                .version = entry.version,
-                .auto_start = entry.auto_start,
-                .launch_mode = launch_mode,
-                .verbose = entry.verbose,
-            }) catch {};
-            self.state.save() catch {};
-        }
 
         if (!persistedMatchesDesired(runtime, desired_binary, desired_launch.primary_command, desired_launch.argv)) {
             self.terminatePersistedRuntime(&runtime, component, name);
@@ -187,18 +238,6 @@ pub const Server = struct {
         const restored = self.manager.adoptInstance(component, name, runtime) catch return false;
         if (!restored) runtime_state_mod.delete(self.allocator, self.paths, component, name);
         return restored;
-    }
-
-    fn normalizedLaunchModeForRestore(component: []const u8, launch_mode: []const u8) []const u8 {
-        const known = registry.findKnownComponent(component) orelse return launch_mode;
-        const normalized = registry.normalizeLaunchCommand(component, launch_mode);
-        if (!std.mem.eql(u8, known.default_launch_command, "gateway") and std.mem.eql(u8, normalized, "gateway")) {
-            return known.default_launch_command;
-        }
-        if (std.mem.eql(u8, component, "nullwatch") and std.mem.eql(u8, normalized, "nullwatch")) {
-            return known.default_launch_command;
-        }
-        return normalized;
     }
 
     fn terminatePersistedRuntime(
@@ -493,18 +532,6 @@ pub const Server = struct {
             return;
         }
 
-        // Read remaining body if Content-Length indicates more data
-        const body = readBody(raw, n, conn.stream, alloc) catch |err| {
-            if (err == error.RequestTooLarge) {
-                try sendResponse(conn.stream, .{
-                    .status = "413 Payload Too Large",
-                    .content_type = "application/json",
-                    .body = "{\"error\":\"request body too large\"}",
-                }, raw, self.host, self.port, extra_origins);
-            }
-            return;
-        };
-
         // Handle OPTIONS preflight
         if (std.mem.eql(u8, method, "OPTIONS")) {
             try sendResponse(conn.stream, .{
@@ -526,6 +553,25 @@ pub const Server = struct {
                 return;
             }
         }
+
+        // Read remaining body only after origin and auth are accepted.
+        const body = readBody(raw, n, conn.stream, alloc, maxRequestBodySize(target)) catch |err| {
+            const response = switch (err) {
+                error.RequestTooLarge => Response{
+                    .status = "413 Request Entity Too Large",
+                    .content_type = "application/json",
+                    .body = "{\"error\":\"request body too large\"}",
+                },
+                error.IncompleteBody, error.InvalidContentLength => Response{
+                    .status = "400 Bad Request",
+                    .content_type = "application/json",
+                    .body = "{\"error\":\"invalid request body\"}",
+                },
+                else => return err,
+            };
+            try sendResponse(conn.stream, response, raw, self.host, self.port, extra_origins);
+            return;
+        };
 
         if (instances_api.isGatewayProxyPath(target)) {
             const prepared = blk: {
@@ -633,10 +679,12 @@ pub const Server = struct {
     }
 
     const ManagedBackendConfig = struct {
+        name: []u8,
         url: []u8,
         token: ?[]u8 = null,
 
         fn deinit(self: *ManagedBackendConfig, allocator: std.mem.Allocator) void {
+            allocator.free(self.name);
             allocator.free(self.url);
             if (self.token) |token| allocator.free(token);
             self.* = undefined;
@@ -667,14 +715,14 @@ pub const Server = struct {
         if (requested_name) |wanted| {
             for (configs) |cfg| {
                 if (std.mem.eql(u8, cfg.name, wanted)) {
-                    return managedBackendFromConfig(allocator, cfg.port, cfg.api_token);
+                    return managedBackendFromConfig(allocator, cfg.name, cfg.port, cfg.api_token);
                 }
             }
             return null;
         }
 
         const selected = self.selectManagedBackendIndex(component, configs);
-        return managedBackendFromConfig(allocator, configs[selected].port, configs[selected].api_token);
+        return managedBackendFromConfig(allocator, configs[selected].name, configs[selected].port, configs[selected].api_token);
     }
 
     fn selectManagedBackendIndex(self: *Server, component: []const u8, configs: anytype) usize {
@@ -687,16 +735,104 @@ pub const Server = struct {
         return fallback;
     }
 
-    fn managedBackendFromConfig(allocator: std.mem.Allocator, port: u16, token: ?[]const u8) ?ManagedBackendConfig {
-        const url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port}) catch return null;
+    fn managedBackendFromConfig(allocator: std.mem.Allocator, name: []const u8, port: u16, token: ?[]const u8) ?ManagedBackendConfig {
+        const owned_name = allocator.dupe(u8, name) catch return null;
+        const url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port}) catch {
+            allocator.free(owned_name);
+            return null;
+        };
         const owned_token = if (token) |value| allocator.dupe(u8, value) catch {
+            allocator.free(owned_name);
             allocator.free(url);
             return null;
         } else null;
         return .{
+            .name = owned_name,
             .url = url,
             .token = owned_token,
         };
+    }
+
+    fn ownedManagedBackend(allocator: std.mem.Allocator, name: []const u8, url: []const u8, token: ?[]const u8) !ManagedBackendConfig {
+        const owned_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_name);
+        const owned_url = try allocator.dupe(u8, url);
+        errdefer allocator.free(owned_url);
+        const owned_token = if (token) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (owned_token) |value| allocator.free(value);
+        return .{
+            .name = owned_name,
+            .url = owned_url,
+            .token = owned_token,
+        };
+    }
+
+    fn deinitManagedBackendConfigs(allocator: std.mem.Allocator, configs: []ManagedBackendConfig) void {
+        for (configs) |*cfg| cfg.deinit(allocator);
+        allocator.free(configs);
+    }
+
+    fn appendUniqueManagedBackend(
+        allocator: std.mem.Allocator,
+        list: *std.ArrayListUnmanaged(ManagedBackendConfig),
+        backend: ManagedBackendConfig,
+    ) !void {
+        var owned = backend;
+        errdefer owned.deinit(allocator);
+        for (list.items) |item| {
+            if (std.mem.eql(u8, item.url, owned.url)) {
+                owned.deinit(allocator);
+                return;
+            }
+        }
+        try list.append(allocator, owned);
+    }
+
+    fn appendManagedNullBoilerBackends(self: *Server, allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(ManagedBackendConfig)) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const configs = try integration_mod.listNullBoilers(allocator, self.state, self.paths);
+        defer integration_mod.deinitNullBoilerConfigs(allocator, configs);
+
+        const before_running = list.items.len;
+        try self.appendManagedBackendPass(allocator, list, "nullboiler", configs, true);
+        if (list.items.len == before_running) {
+            try self.appendManagedBackendPass(allocator, list, "nullboiler", configs, false);
+        }
+    }
+
+    fn appendManagedBackendPass(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        list: *std.ArrayListUnmanaged(ManagedBackendConfig),
+        component: []const u8,
+        configs: anytype,
+        running_pass: bool,
+    ) !void {
+        for (configs) |cfg| {
+            const status = self.manager.getStatus(component, cfg.name);
+            const running = if (status) |value| value.status == .running else false;
+            if (running != running_pass) continue;
+            const backend = managedBackendFromConfig(allocator, cfg.name, cfg.port, cfg.api_token) orelse return error.OutOfMemory;
+            try appendUniqueManagedBackend(allocator, list, backend);
+        }
+    }
+
+    fn missionWorkflowBackends(self: *Server, allocator: std.mem.Allocator) ![]ManagedBackendConfig {
+        var list: std.ArrayListUnmanaged(ManagedBackendConfig) = .empty;
+        errdefer {
+            for (list.items) |*cfg| cfg.deinit(allocator);
+            list.deinit(allocator);
+        }
+        defer list.deinit(allocator);
+
+        if (self.getBoilerUrl()) |url| {
+            const env_backend = try ownedManagedBackend(allocator, "env", url, self.getBoilerToken());
+            try appendUniqueManagedBackend(allocator, &list, env_backend);
+        }
+        try self.appendManagedNullBoilerBackends(allocator, &list);
+        return try list.toOwnedSlice(allocator);
     }
 
     fn shouldResolveManagedBackend(env_url: ?[]const u8, requested_name: ?[]const u8) bool {
@@ -711,6 +847,157 @@ pub const Server = struct {
     fn selectBackendToken(env_token: ?[]const u8, managed: ?ManagedBackendConfig, requested_name: ?[]const u8) ?[]const u8 {
         if (requested_name != null) return if (managed) |cfg| cfg.token else null;
         return env_token orelse if (managed) |cfg| cfg.token else null;
+    }
+
+    fn resolveMissionWorkflowEvidence(self: *Server, request_allocator: std.mem.Allocator, refs: mission_core.WorkflowEvidenceRefs) mission_core.WorkflowEvidence {
+        const now_ms = std_compat.time.milliTimestamp();
+        const backends = self.missionWorkflowBackends(request_allocator) catch
+            return mission_core.workflowEvidenceUnavailable("nullboiler_backend_discovery_failed");
+        defer deinitManagedBackendConfigs(request_allocator, backends);
+
+        const cache_key = missionWorkflowEvidenceCacheKey(request_allocator, refs, backends) catch
+            return mission_core.workflowEvidenceUnavailable("cache_key_allocation_failed");
+        defer request_allocator.free(cache_key);
+
+        if (self.mission_workflow_evidence_cache.cloneFresh(request_allocator, cache_key, now_ms)) |cached| return cached;
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const allocator = arena.allocator();
+        const owned_key = allocator.dupe(u8, cache_key) catch
+            return mission_core.workflowEvidenceUnavailable("cache_key_allocation_failed");
+        const evidence = self.loadMissionWorkflowEvidence(allocator, refs, backends);
+        return self.mission_workflow_evidence_cache.replaceAndClone(request_allocator, arena, owned_key, now_ms, evidence);
+    }
+
+    fn loadMissionWorkflowEvidence(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        refs: mission_core.WorkflowEvidenceRefs,
+        backends: []const ManagedBackendConfig,
+    ) mission_core.WorkflowEvidence {
+        if (backends.len == 0) return missionWorkflowEvidenceStatus("not_configured", "nullboiler_not_configured", 0);
+
+        var available: ?mission_core.WorkflowEvidence = null;
+        var best_not_found: ?mission_core.WorkflowEvidence = null;
+        var best_unavailable: ?mission_core.WorkflowEvidence = null;
+        var scanned_run_count: usize = 0;
+
+        for (backends) |backend| {
+            const evidence = self.loadMissionWorkflowEvidenceFromBackend(allocator, refs, backend);
+            scanned_run_count += evidence.scanned_run_count;
+            if (std.mem.eql(u8, evidence.status, "available")) {
+                if (available != null) {
+                    return missionWorkflowEvidenceStatus("ambiguous", "workflow_evidence_matched_multiple_backends", scanned_run_count);
+                }
+                available = evidence;
+                continue;
+            }
+            if (std.mem.eql(u8, evidence.status, "ambiguous")) return evidence;
+            if (std.mem.eql(u8, evidence.status, "not_found")) {
+                if (best_not_found == null or evidence.scanned_run_count > best_not_found.?.scanned_run_count) best_not_found = evidence;
+                continue;
+            }
+            if (best_unavailable == null) best_unavailable = evidence;
+        }
+
+        if (available) |evidence| return evidence;
+        if (best_not_found) |evidence| return evidence;
+        if (best_unavailable) |evidence| return evidence;
+        return missionWorkflowEvidenceStatus("not_configured", "nullboiler_not_configured", 0);
+    }
+
+    fn loadMissionWorkflowEvidenceFromBackend(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        refs: mission_core.WorkflowEvidenceRefs,
+        backend: ManagedBackendConfig,
+    ) mission_core.WorkflowEvidence {
+        var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch_arena.deinit();
+        const scratch_allocator = scratch_arena.allocator();
+
+        const runs_resp = proxy_api.forward(scratch_allocator, .{
+            .method = "GET",
+            .base_url = backend.url,
+            .path = "/runs?limit=50",
+            .body = "",
+            .bearer_token = backend.token,
+            .unreachable_body = "{\"error\":\"NullBoiler unreachable\"}",
+            .max_response_bytes = mission_workflow_response_max_bytes,
+        });
+        if (!isSuccessStatus(runs_resp.status)) {
+            return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("unavailable", "nullboiler_runs_unavailable", 0), backend.name);
+        }
+
+        const parsed_runs = std.json.parseFromSlice(std.json.Value, scratch_allocator, runs_resp.body, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("schema_mismatch", "invalid_runs_payload", 0), backend.name);
+        defer parsed_runs.deinit();
+
+        const items = missionWorkflowRunItems(parsed_runs.value) orelse
+            return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("schema_mismatch", "missing_runs_items", 0), backend.name);
+
+        var candidates: std.ArrayListUnmanaged(MissionRunCandidate) = .empty;
+        for (items[0..@min(items.len, mission_workflow_scan_limit)]) |item| {
+            const run_id = jsonStringField(item, "id");
+            if (run_id.len == 0) continue;
+
+            const loaded_checkpoints: ?[]const mission_core.WorkflowEvidenceCheckpoint =
+                self.loadMissionRunCheckpoints(allocator, scratch_allocator, backend.url, backend.token, run_id) catch null;
+            const checkpoints = loaded_checkpoints orelse &.{};
+            const evidence_run = mission_core.WorkflowEvidenceRun{
+                .run_id = allocator.dupe(u8, run_id) catch
+                    return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("unavailable", "run_id_allocation_failed", candidates.items.len), backend.name),
+                .status = allocator.dupe(u8, jsonStringFieldOr(item, "status", "unknown")) catch
+                    return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("unavailable", "run_status_allocation_failed", candidates.items.len), backend.name),
+                .created_at_ms = jsonIntField(item, "created_at_ms"),
+                .updated_at_ms = jsonIntField(item, "updated_at_ms"),
+                .checkpoint_count = if (loaded_checkpoints != null) checkpoints.len else null,
+            };
+            candidates.append(allocator, .{ .run = evidence_run, .checkpoints = checkpoints }) catch
+                return missionWorkflowEvidenceWithBackendName(allocator, missionWorkflowEvidenceStatus("unavailable", "candidate_allocation_failed", candidates.items.len), backend.name);
+        }
+
+        return missionWorkflowEvidenceWithBackendName(allocator, selectMissionWorkflowEvidence(refs, candidates.items), backend.name);
+    }
+
+    fn loadMissionRunCheckpoints(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        base_url: []const u8,
+        token: ?[]const u8,
+        run_id: []const u8,
+    ) ![]const mission_core.WorkflowEvidenceCheckpoint {
+        _ = self;
+        const path = try missionRunCheckpointsPath(scratch_allocator, run_id);
+        const resp = proxy_api.forward(scratch_allocator, .{
+            .method = "GET",
+            .base_url = base_url,
+            .path = path,
+            .body = "",
+            .bearer_token = token,
+            .unreachable_body = "{\"error\":\"NullBoiler unreachable\"}",
+            .max_response_bytes = mission_workflow_response_max_bytes,
+        });
+        if (!isSuccessStatus(resp.status)) return error.CheckpointsUnavailable;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, scratch_allocator, resp.body, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return error.InvalidCheckpointPayload;
+        defer parsed.deinit();
+        if (parsed.value != .array) return error.InvalidCheckpointPayload;
+
+        var checkpoints: std.ArrayListUnmanaged(mission_core.WorkflowEvidenceCheckpoint) = .empty;
+        for (parsed.value.array.items) |item| {
+            if (try normalizeMissionCheckpoint(allocator, item, run_id)) |checkpoint| {
+                try checkpoints.append(allocator, checkpoint);
+            }
+        }
+        return try checkpoints.toOwnedSlice(allocator);
     }
 
     const WatchTarget = struct {
@@ -839,11 +1126,24 @@ pub const Server = struct {
         return instances_api.isIntegrationPath(target) or
             instances_api.isTicketsActionPath(target) or
             logs_api.isLogsPath(target) or
-            orchestration_api.isProxyPath(target) or
-            observability_api.isProxyPath(target);
+            nullboiler_api.isProxyPath(target) or
+            nulltickets_api.isProxyPath(target) or
+            nullwatch_api.isProxyPath(target) or
+            mission_control_api.isPath(target);
     }
 
     fn route(self: *Server, allocator: std.mem.Allocator, method: []const u8, target: []const u8, body: []const u8) Response {
+        if (mission_control_api.isPath(target)) {
+            const resp = mission_control_api.handleWithIntegrations(allocator, method, target, &self.mission_control, .{
+                .paths = self.paths,
+                .workflow_evidence_resolver = .{
+                    .ptr = self,
+                    .resolve = missionWorkflowEvidenceResolver,
+                },
+            });
+            return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
+        }
+
         if (std.mem.eql(u8, method, "GET")) {
             if (std.mem.eql(u8, target, "/health")) {
                 return .{
@@ -1412,38 +1712,46 @@ pub const Server = struct {
             }
         }
 
-        if (orchestration_api.isProxyPath(target)) {
+        if (nullboiler_api.isProxyPath(target)) {
             const env_boiler_url = self.getBoilerUrl();
             const env_boiler_token = self.getBoilerToken();
-            const env_tickets_url = self.getTicketsUrl();
-            const env_tickets_token = self.getTicketsToken();
-            const requested_boiler = orchestration_api.requestedBoilerInstance(allocator, target) catch null;
+            const requested_boiler = nullboiler_api.requestedBoilerInstance(allocator, target) catch null;
             defer if (requested_boiler) |value| allocator.free(value);
-            const requested_tickets = orchestration_api.requestedTicketsInstance(allocator, target) catch null;
-            defer if (requested_tickets) |value| allocator.free(value);
 
             var managed_boiler = if (shouldResolveManagedBackend(env_boiler_url, requested_boiler))
                 self.resolveManagedBackend(allocator, "nullboiler", requested_boiler)
             else
                 null;
             defer if (managed_boiler) |*cfg| cfg.deinit(allocator);
+
+            const resp = nullboiler_api.handle(allocator, method, target, body, .{
+                .boiler_url = selectBackendUrl(env_boiler_url, managed_boiler, requested_boiler),
+                .boiler_token = selectBackendToken(env_boiler_token, managed_boiler, requested_boiler),
+            });
+            return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
+        }
+
+        if (nulltickets_api.isProxyPath(target)) {
+            const env_tickets_url = self.getTicketsUrl();
+            const env_tickets_token = self.getTicketsToken();
+            const requested_tickets = nulltickets_api.requestedTicketsInstance(allocator, target) catch null;
+            defer if (requested_tickets) |value| allocator.free(value);
+
             var managed_tickets = if (shouldResolveManagedBackend(env_tickets_url, requested_tickets))
                 self.resolveManagedBackend(allocator, "nulltickets", requested_tickets)
             else
                 null;
             defer if (managed_tickets) |*cfg| cfg.deinit(allocator);
 
-            const resp = orchestration_api.handle(allocator, method, target, body, .{
-                .boiler_url = selectBackendUrl(env_boiler_url, managed_boiler, requested_boiler),
-                .boiler_token = selectBackendToken(env_boiler_token, managed_boiler, requested_boiler),
+            const resp = nulltickets_api.handle(allocator, method, target, body, .{
                 .tickets_url = selectBackendUrl(env_tickets_url, managed_tickets, requested_tickets),
                 .tickets_token = selectBackendToken(env_tickets_token, managed_tickets, requested_tickets),
             });
             return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
         }
 
-        if (observability_api.isProxyPath(target)) {
-            const selected_watch = observability_api.selectedWatchNameAlloc(allocator, target) catch
+        if (nullwatch_api.isProxyPath(target)) {
+            const selected_watch = nullwatch_api.selectedWatchNameAlloc(allocator, target) catch
                 return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" };
             defer if (selected_watch) |value| allocator.free(value);
 
@@ -1454,7 +1762,7 @@ pub const Server = struct {
             };
             defer watch_target.deinit(allocator);
 
-            const resp = observability_api.handle(allocator, method, target, body, .{
+            const resp = nullwatch_api.handle(allocator, method, target, body, .{
                 .watch_url = watch_target.url,
                 .watch_token = watch_target.token,
             });
@@ -1485,6 +1793,368 @@ pub const Server = struct {
     }
 };
 
+fn missionWorkflowEvidenceResolver(ptr: *anyopaque, allocator: std.mem.Allocator, refs: mission_core.WorkflowEvidenceRefs) mission_core.WorkflowEvidence {
+    const server: *Server = @ptrCast(@alignCast(ptr));
+    return server.resolveMissionWorkflowEvidence(allocator, refs);
+}
+
+fn missionWorkflowEvidenceCacheKey(
+    allocator: std.mem.Allocator,
+    refs: mission_core.WorkflowEvidenceRefs,
+    backends: []const Server.ManagedBackendConfig,
+) ![]u8 {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    try buf.appendSlice(refs.scenario_id);
+    try buf.append('|');
+    try buf.appendSlice(refs.mission_id);
+    try buf.append('|');
+    try buf.appendSlice(refs.failed_run_id);
+    try buf.append('|');
+    try buf.appendSlice(refs.recovered_run_id);
+    try buf.append('|');
+    try buf.appendSlice(refs.checkpoint_id);
+    for (backends) |backend| {
+        try buf.appendSlice("|backend=");
+        try buf.appendSlice(backend.name);
+        try buf.append('@');
+        try buf.appendSlice(backend.url);
+        try buf.append('#');
+        try appendTokenFingerprint(&buf, backend.token);
+    }
+    return try buf.toOwnedSlice();
+}
+
+fn appendTokenFingerprint(buf: *std.array_list.Managed(u8), token: ?[]const u8) !void {
+    const value = token orelse {
+        try buf.append('-');
+        return;
+    };
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(value, &digest, .{});
+    const hex = "0123456789abcdef";
+    for (digest) |byte| {
+        try buf.append(hex[byte >> 4]);
+        try buf.append(hex[byte & 0x0f]);
+    }
+}
+
+fn missionWorkflowEvidenceStatus(status: []const u8, reason: []const u8, scanned_run_count: usize) mission_core.WorkflowEvidence {
+    return .{
+        .status = status,
+        .reason = reason,
+        .scanned_run_count = scanned_run_count,
+    };
+}
+
+fn missionWorkflowEvidenceWithBackendName(allocator: std.mem.Allocator, evidence: mission_core.WorkflowEvidence, backend_name: ?[]const u8) mission_core.WorkflowEvidence {
+    var out = evidence;
+    if (backend_name) |name| {
+        out.boiler_instance = allocator.dupe(u8, name) catch null;
+    }
+    return out;
+}
+
+fn missionWorkflowRunItems(value: std.json.Value) ?[]std.json.Value {
+    if (value == .array) return value.array.items;
+    if (value != .object) return null;
+    const items = value.object.get("items") orelse value.object.get("runs") orelse return null;
+    if (items != .array) return null;
+    return items.array.items;
+}
+
+fn missionRunCheckpointsPath(allocator: std.mem.Allocator, run_id: []const u8) ![]u8 {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    try buf.appendSlice("/runs/");
+    try appendUrlPathSegment(&buf, run_id);
+    try buf.appendSlice("/checkpoints");
+    return try buf.toOwnedSlice();
+}
+
+fn appendUrlPathSegment(buf: *std.array_list.Managed(u8), value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.' or byte == '~') {
+            try buf.append(byte);
+        } else {
+            try buf.append('%');
+            try buf.append(hex[byte >> 4]);
+            try buf.append(hex[byte & 0x0f]);
+        }
+    }
+}
+
+fn isSuccessStatus(status: []const u8) bool {
+    return status.len >= 1 and status[0] == '2';
+}
+
+fn normalizeMissionCheckpoint(allocator: std.mem.Allocator, item: std.json.Value, default_run_id: []const u8) !?mission_core.WorkflowEvidenceCheckpoint {
+    const id = jsonStringField(item, "id");
+    if (id.len == 0) return null;
+    const run_id = jsonStringFieldOr(item, "run_id", default_run_id);
+    return .{
+        .id = try allocator.dupe(u8, id),
+        .run_id = try allocator.dupe(u8, run_id),
+        .step_id = try allocator.dupe(u8, firstJsonStringField(item, &.{ "step_id", "step_name", "after_step" })),
+        .parent_id = try cloneOptionalWorkflowString(allocator, firstJsonOptionalStringField(item, &.{ "parent_id", "parent_checkpoint_id", "forked_from", "source_checkpoint_id" })),
+        .version = jsonIntField(item, "version"),
+        .created_at_ms = jsonIntField(item, "created_at_ms"),
+        .completed_nodes = try jsonStringArrayFields(allocator, item, &.{ "completed_nodes", "completed_nodes_json" }),
+        .metadata = try jsonCheckpointMetadata(allocator, item),
+    };
+}
+
+fn cloneOptionalWorkflowString(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
+    if (value) |text| return try allocator.dupe(u8, text);
+    return null;
+}
+
+fn selectMissionWorkflowEvidence(refs: mission_core.WorkflowEvidenceRefs, candidates: []const MissionRunCandidate) mission_core.WorkflowEvidence {
+    const checkpoint_match = findUniqueCheckpointById(candidates, refs.checkpoint_id) catch
+        return missionWorkflowEvidenceStatus("ambiguous", "checkpoint_id_matched_multiple_runs", candidates.len);
+    const failed_exact = findCandidateByRunId(candidates, refs.failed_run_id) catch
+        return missionWorkflowEvidenceStatus("ambiguous", "failed_run_id_matched_multiple_runs", candidates.len);
+    const recovered_exact = findCandidateByRunId(candidates, refs.recovered_run_id) catch
+        return missionWorkflowEvidenceStatus("ambiguous", "recovered_run_id_matched_multiple_runs", candidates.len);
+    const fork_match = if (checkpoint_match.checkpoint) |checkpoint|
+        findUniqueForkCandidate(candidates, checkpoint.id) catch
+            return missionWorkflowEvidenceStatus("ambiguous", "fork_parent_matched_multiple_runs", candidates.len)
+    else
+        MissionCandidateMatch{};
+
+    var failed_run: ?mission_core.WorkflowEvidenceRun = null;
+    if (failed_exact.candidate) |candidate| failed_run = candidate.run;
+    if (checkpoint_match.candidate) |candidate| {
+        if (failed_run) |run| {
+            if (!std.mem.eql(u8, run.run_id, candidate.run.run_id)) {
+                return missionWorkflowEvidenceStatus("ambiguous", "failed_run_checkpoint_owner_mismatch", candidates.len);
+            }
+        } else {
+            failed_run = candidate.run;
+        }
+    }
+
+    var recovered_run: ?mission_core.WorkflowEvidenceRun = null;
+    if (recovered_exact.candidate) |candidate| recovered_run = candidate.run;
+    if (fork_match.candidate) |candidate| {
+        if (recovered_run) |run| {
+            if (!std.mem.eql(u8, run.run_id, candidate.run.run_id)) {
+                return missionWorkflowEvidenceStatus("ambiguous", "recovered_run_fork_owner_mismatch", candidates.len);
+            }
+        } else {
+            recovered_run = candidate.run;
+        }
+    }
+
+    if (failed_run == null and recovered_run == null and checkpoint_match.checkpoint == null) {
+        return missionWorkflowEvidenceStatus("not_found", "no_matching_run_or_checkpoint", candidates.len);
+    }
+
+    return .{
+        .status = "available",
+        .failed_run = failed_run,
+        .recovered_run = recovered_run,
+        .checkpoint = checkpoint_match.checkpoint,
+        .scanned_run_count = candidates.len,
+    };
+}
+
+const MissionCandidateMatch = struct {
+    candidate: ?MissionRunCandidate = null,
+    checkpoint: ?mission_core.WorkflowEvidenceCheckpoint = null,
+};
+
+fn findCandidateByRunId(candidates: []const MissionRunCandidate, run_id: []const u8) !MissionCandidateMatch {
+    if (run_id.len == 0) return .{};
+    var match: ?MissionRunCandidate = null;
+    for (candidates) |candidate| {
+        if (!std.mem.eql(u8, candidate.run.run_id, run_id)) continue;
+        if (match != null) return error.Ambiguous;
+        match = candidate;
+    }
+    return .{ .candidate = match };
+}
+
+fn findUniqueCheckpointById(candidates: []const MissionRunCandidate, checkpoint_id: []const u8) !MissionCandidateMatch {
+    if (checkpoint_id.len == 0) return .{};
+    var found_candidate: ?MissionRunCandidate = null;
+    var found_checkpoint: ?mission_core.WorkflowEvidenceCheckpoint = null;
+    for (candidates) |candidate| {
+        for (candidate.checkpoints) |checkpoint| {
+            if (!std.mem.eql(u8, checkpoint.id, checkpoint_id)) continue;
+            if (found_checkpoint != null) return error.Ambiguous;
+            found_candidate = candidate;
+            found_checkpoint = checkpoint;
+        }
+    }
+    return .{ .candidate = found_candidate, .checkpoint = found_checkpoint };
+}
+
+fn findUniqueForkCandidate(candidates: []const MissionRunCandidate, checkpoint_id: []const u8) !MissionCandidateMatch {
+    if (checkpoint_id.len == 0) return .{};
+    var found: ?MissionRunCandidate = null;
+    for (candidates) |candidate| {
+        for (candidate.checkpoints) |checkpoint| {
+            const parent_id = checkpoint.parent_id orelse continue;
+            if (!std.mem.eql(u8, parent_id, checkpoint_id)) continue;
+            if (found != null and !std.mem.eql(u8, found.?.run.run_id, candidate.run.run_id)) return error.Ambiguous;
+            found = candidate;
+        }
+    }
+    return .{ .candidate = found };
+}
+
+fn jsonStringField(value: std.json.Value, key: []const u8) []const u8 {
+    if (value != .object) return "";
+    return switch (value.object.get(key) orelse .null) {
+        .string => |string| string,
+        .number_string => |string| string,
+        else => "",
+    };
+}
+
+fn jsonStringFieldOr(value: std.json.Value, key: []const u8, default: []const u8) []const u8 {
+    const string = jsonStringField(value, key);
+    return if (string.len > 0) string else default;
+}
+
+fn firstJsonStringField(value: std.json.Value, keys: []const []const u8) []const u8 {
+    for (keys) |key| {
+        const string = jsonStringField(value, key);
+        if (string.len > 0) return string;
+    }
+    return "";
+}
+
+fn firstJsonOptionalStringField(value: std.json.Value, keys: []const []const u8) ?[]const u8 {
+    const string = firstJsonStringField(value, keys);
+    return if (string.len > 0) string else null;
+}
+
+fn jsonOptionalValueField(value: std.json.Value, key: []const u8) ?std.json.Value {
+    if (value != .object) return null;
+    const field = value.object.get(key) orelse return null;
+    if (field == .null) return null;
+    return field;
+}
+
+fn jsonIntField(value: std.json.Value, key: []const u8) ?i64 {
+    if (value != .object) return null;
+    return switch (value.object.get(key) orelse .null) {
+        .integer => |integer| integer,
+        .number_string => |string| std.fmt.parseInt(i64, string, 10) catch null,
+        .string => |string| std.fmt.parseInt(i64, string, 10) catch null,
+        else => null,
+    };
+}
+
+fn jsonStringArrayFields(allocator: std.mem.Allocator, value: std.json.Value, keys: []const []const u8) ![]const []const u8 {
+    if (value != .object) return &.{};
+    for (keys) |key| {
+        if (value.object.get(key)) |field| {
+            if (field == .null) continue;
+            return try jsonStringArrayValue(allocator, field);
+        }
+    }
+    return &.{};
+}
+
+fn jsonStringArrayValue(allocator: std.mem.Allocator, value: std.json.Value) anyerror![]const []const u8 {
+    switch (value) {
+        .array => |array| return try cloneJsonStringArray(allocator, array.items),
+        .string => |string| return try jsonStringArrayFromEncodedValue(allocator, string),
+        .number_string => |string| return try jsonStringArrayFromEncodedValue(allocator, string),
+        else => return &.{},
+    }
+}
+
+fn jsonStringArrayFromEncodedValue(allocator: std.mem.Allocator, text: []const u8) anyerror![]const []const u8 {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0) return &.{};
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return &.{},
+    };
+    defer parsed.deinit();
+    return try jsonStringArrayValue(allocator, parsed.value);
+}
+
+fn cloneJsonStringArray(allocator: std.mem.Allocator, items: []const std.json.Value) ![]const []const u8 {
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (list.items) |item| allocator.free(item);
+        list.deinit(allocator);
+    }
+    for (items) |item| {
+        if (item == .string) try list.append(allocator, try allocator.dupe(u8, item.string));
+    }
+    if (list.items.len == 0) {
+        list.deinit(allocator);
+        return &.{};
+    }
+    return try list.toOwnedSlice(allocator);
+}
+
+fn jsonCheckpointMetadata(allocator: std.mem.Allocator, value: std.json.Value) !?std.json.Value {
+    if (jsonOptionalValueField(value, "metadata")) |metadata| {
+        return try mission_core.cloneJsonValue(allocator, metadata);
+    }
+    const encoded = jsonOptionalValueField(value, "metadata_json") orelse return null;
+    return try cloneJsonEncodedOrRawValue(allocator, encoded);
+}
+
+fn cloneJsonEncodedOrRawValue(allocator: std.mem.Allocator, value: std.json.Value) !?std.json.Value {
+    return switch (value) {
+        .string => |string| try parseJsonValueString(allocator, string),
+        .number_string => |string| try parseJsonValueString(allocator, string),
+        .null => null,
+        else => try mission_core.cloneJsonValue(allocator, value),
+    };
+}
+
+fn parseJsonValueString(allocator: std.mem.Allocator, text: []const u8) !?std.json.Value {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return std.json.parseFromSliceLeaky(std.json.Value, allocator, trimmed, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+}
+
+test "normalizeMissionCheckpoint accepts encoded NullBoiler checkpoint fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const payload =
+        \\{
+        \\  "id": "cp-a",
+        \\  "step_name": "code.build",
+        \\  "parent_checkpoint_id": "cp-parent",
+        \\  "completed_nodes_json": "[\"claim\",\"code\"]",
+        \\  "metadata_json": "{\"source\":\"nullboiler\",\"attempt\":2}"
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{ .allocate = .alloc_always });
+    const checkpoint = (try normalizeMissionCheckpoint(allocator, parsed.value, "run-a")).?;
+
+    try std.testing.expectEqualStrings("cp-a", checkpoint.id);
+    try std.testing.expectEqualStrings("run-a", checkpoint.run_id);
+    try std.testing.expectEqualStrings("code.build", checkpoint.step_id);
+    try std.testing.expectEqualStrings("cp-parent", checkpoint.parent_id.?);
+    try std.testing.expectEqual(@as(usize, 2), checkpoint.completed_nodes.len);
+    try std.testing.expectEqualStrings("claim", checkpoint.completed_nodes[0]);
+    try std.testing.expectEqualStrings("code", checkpoint.completed_nodes[1]);
+    try std.testing.expectEqualStrings("nullboiler", checkpoint.metadata.?.object.get("source").?.string);
+}
+
 const Response = struct {
     status: []const u8,
     content_type: []const u8,
@@ -1495,35 +2165,36 @@ fn jsonResponse(body: []const u8) Response {
     return .{ .status = "200 OK", .content_type = "application/json", .body = body };
 }
 
-fn readBody(raw: []const u8, n: usize, stream: std_compat.net.Stream, alloc: std.mem.Allocator) ![]const u8 {
-    if (extractHeader(raw, "Content-Length")) |cl_str| {
-        const content_length = std.fmt.parseInt(usize, cl_str, 10) catch 0;
-        if (content_length > 0) {
-            const header_end_pos = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return "";
-            const body_start = header_end_pos + 4;
-            const body_received = n - body_start;
-            if (requestBodyExceedsLimit(content_length)) return error.RequestTooLarge;
-            if (body_received >= content_length) {
-                return raw[body_start .. body_start + content_length];
-            }
-            // Need to read more data from the stream
-            const total_size = body_start + content_length;
-            const full_buf = try alloc.alloc(u8, total_size);
-            @memcpy(full_buf[0..n], raw);
-            var total_read = n;
-            while (total_read < total_size) {
-                const extra = net_compat.streamRead(stream, full_buf[total_read..total_size]) catch break;
-                if (extra == 0) break;
-                total_read += extra;
-            }
-            return full_buf[body_start..total_read];
-        }
-    }
-    return extractBody(raw);
+fn maxRequestBodySize(target: []const u8) usize {
+    if (instances_api.isGatewayProxyPath(target)) return gateway_max_request_size;
+    return default_max_request_size;
 }
 
-fn requestBodyExceedsLimit(content_length: usize) bool {
-    return content_length > max_request_size;
+fn readBody(raw: []const u8, n: usize, stream: std_compat.net.Stream, alloc: std.mem.Allocator, max_body_size: usize) ![]const u8 {
+    if (extractHeader(raw, "Content-Length")) |cl_str| {
+        const content_length = std.fmt.parseInt(usize, cl_str, 10) catch return error.InvalidContentLength;
+        if (content_length > max_body_size) return error.RequestTooLarge;
+        if (content_length == 0) return "";
+
+        const header_end_pos = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.IncompleteBody;
+        const body_start = header_end_pos + 4;
+        const body_received = n - body_start;
+        if (body_received >= content_length) {
+            return raw[body_start .. body_start + content_length];
+        }
+        // Need to read more data from the stream
+        const total_size = body_start + content_length;
+        const full_buf = try alloc.alloc(u8, total_size);
+        @memcpy(full_buf[0..n], raw);
+        var total_read = n;
+        while (total_read < total_size) {
+            const extra = try net_compat.streamRead(stream, full_buf[total_read..total_size]);
+            if (extra == 0) return error.IncompleteBody;
+            total_read += extra;
+        }
+        return full_buf[body_start..total_size];
+    }
+    return extractBody(raw);
 }
 
 fn sendResponse(stream: std_compat.net.Stream, response: Response, raw_request: []const u8, bind_host: []const u8, port: u16, extra_origins: []const []const u8) !void {
@@ -1739,6 +2410,7 @@ const TestContext = struct {
     }
 
     fn deinit(self: *TestContext, allocator: std.mem.Allocator) void {
+        self.server.mission_workflow_evidence_cache.deinit();
         self.manager.deinit();
         self.state.deinit();
         allocator.destroy(self.state);
@@ -1747,6 +2419,14 @@ const TestContext = struct {
 
     fn route(self: *TestContext, allocator: std.mem.Allocator, method: []const u8, target: []const u8, body: []const u8) Response {
         return self.server.route(allocator, method, target, body);
+    }
+
+    fn routeWithRequestArena(self: *TestContext, allocator: std.mem.Allocator, method: []const u8, target: []const u8, body: []const u8) Response {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const resp = self.server.route(arena.allocator(), method, target, body);
+        const owned_body = allocator.dupe(u8, resp.body) catch @panic("OOM");
+        return .{ .status = resp.status, .content_type = resp.content_type, .body = owned_body };
     }
 };
 
@@ -1978,7 +2658,7 @@ test "reconcileInstancesOnBoot terminates mismatched persisted runtime without r
     try std.testing.expectEqualStrings("started\n", contents);
 }
 
-test "reconcileInstancesOnBoot adopts legacy nullwatch launch mode as serve" {
+test "reconcileInstancesOnBoot rejects mismatched nullwatch launch mode" {
     const builtin = @import("builtin");
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
 
@@ -2017,12 +2697,15 @@ test "reconcileInstancesOnBoot adopts legacy nullwatch launch mode as serve" {
 
     ctx.reconcileInstancesOnBoot();
 
-    const status = ctx.manager.getStatus("nullwatch", "watch").?;
-    try std.testing.expectEqual(manager_mod.Status.running, status.status);
-    try std.testing.expect(process_mod.isAlive(spawned.pid));
-    try std.testing.expectEqualStrings("serve", ctx.state.getInstance("nullwatch", "watch").?.launch_mode);
+    var attempts: usize = 0;
+    while (attempts < 20 and process_mod.isAlive(spawned.pid)) : (attempts += 1) {
+        std_compat.thread.sleep(50 * std.time.ns_per_ms);
+    }
 
-    ctx.manager.stopInstance("nullwatch", "watch") catch {};
+    try std.testing.expect(!process_mod.isAlive(spawned.pid));
+    try std.testing.expect(ctx.manager.getStatus("nullwatch", "watch") == null);
+    try std.testing.expectEqualStrings("gateway", ctx.state.getInstance("nullwatch", "watch").?.launch_mode);
+    try std.testing.expect((try runtime_state_mod.load(allocator, ctx.paths, "nullwatch", "watch")) == null);
     _ = spawned.child.wait() catch {};
 }
 
@@ -2064,6 +2747,51 @@ test "route GET /api/spec returns route catalog alias" {
     try std.testing.expectEqualStrings("application/json", resp.content_type);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"id\": \"meta.spec.get\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"path_template\": \"/api/spec\"") != null);
+}
+
+test "route persists mission replay artifacts through server paths" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+
+    ctx.server.mission_control.runtime = .{
+        .launched = true,
+        .started_at_ms = std_compat.time.milliTimestamp() - 20_000,
+        .recovered = true,
+        .recovery_started_at_ms = std_compat.time.milliTimestamp() - 12_000,
+    };
+
+    const save_resp = ctx.routeWithRequestArena(allocator, "POST", "/api/mission-control/replay/save", "");
+    defer allocator.free(save_resp.body);
+    try std.testing.expectEqualStrings("200 OK", save_resp.status);
+    try std.testing.expectEqualStrings("application/json", save_resp.content_type);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, save_resp.body, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    const record = parsed.value.object.get("record").?.object;
+    const id = record.get("id").?.string;
+
+    const second_save_resp = ctx.routeWithRequestArena(allocator, "POST", "/api/mission-control/replay/save", "");
+    defer allocator.free(second_save_resp.body);
+    try std.testing.expectEqualStrings("200 OK", second_save_resp.status);
+
+    const bounded_resp = ctx.routeWithRequestArena(allocator, "GET", "/api/mission-control/replays?limit=0", "");
+    defer allocator.free(bounded_resp.body);
+    try std.testing.expectEqualStrings("200 OK", bounded_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, bounded_resp.body, "\"count\": 1") != null);
+
+    const list_resp = ctx.routeWithRequestArena(allocator, "GET", "/api/mission-control/replays?limit=100", "");
+    defer allocator.free(list_resp.body);
+    try std.testing.expectEqualStrings("200 OK", list_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, list_resp.body, id) != null);
+
+    const read_path = try std.fmt.allocPrint(allocator, "/api/mission-control/replays/{s}", .{id});
+    defer allocator.free(read_path);
+    const read_resp = ctx.routeWithRequestArena(allocator, "GET", read_path, "");
+    defer allocator.free(read_resp.body);
+    try std.testing.expectEqualStrings("200 OK", read_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, read_resp.body, "\"artifact_kind\": \"nullhub.mission_control.replay\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, read_resp.body, "\"phase\": \"completed\"") != null);
 }
 
 test "route unknown non-API path attempts static file serving" {
@@ -2143,7 +2871,8 @@ test "route POST /api/components/refresh returns 200" {
     const resp = ctx.route(std.testing.allocator, "POST", "/api/components/refresh", "");
     defer std.testing.allocator.free(resp.body);
     try std.testing.expectEqualStrings("200 OK", resp.status);
-    try std.testing.expectEqualStrings("{\"status\":\"ok\"}", resp.body);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"component_count\":4") != null);
 }
 
 test "extractHeader finds Content-Length" {
@@ -2247,19 +2976,22 @@ test "requestOriginAllowed honors configured extra origins" {
     try std.testing.expect(!requestOriginAllowed(foreign_raw, "/api/status", "127.0.0.1", 19800, extras));
 }
 
-test "routeWithoutServerMutex keeps orchestration proxy requests off global lock" {
-    try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration"));
-    try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration/runs"));
-    try std.testing.expect(Server.routeWithoutServerMutex("/api/orchestration/store/search"));
-    try std.testing.expect(Server.routeWithoutServerMutex("/api/observability/v1/runs"));
+test "routeWithoutServerMutex keeps product proxy requests off global lock" {
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/nullboiler"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/nullboiler/runs"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/nulltickets/store/search"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/nullwatch/v1/runs"));
+    try std.testing.expect(!Server.routeWithoutServerMutex("/api/nulltickets/tasks"));
+    try std.testing.expect(Server.routeWithoutServerMutex("/api/mission-control/state"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nullclaw/demo/logs"));
     try std.testing.expect(Server.routeWithoutServerMutex("/api/instances/nulltickets/tracker-a/tickets"));
     try std.testing.expect(!Server.routeWithoutServerMutex("/api/components"));
 }
 
-test "explicit managed orchestration backend selection overrides env fallback" {
+test "explicit managed product backend selection overrides env fallback" {
     const allocator = std.testing.allocator;
     var managed = Server.ManagedBackendConfig{
+        .name = try allocator.dupe(u8, "worker-a"),
         .url = try allocator.dupe(u8, "http://127.0.0.1:8081"),
         .token = try allocator.dupe(u8, "managed-token"),
     };
@@ -2282,6 +3014,13 @@ test "explicit managed orchestration backend selection overrides env fallback" {
         "env-token",
         Server.selectBackendToken("env-token", managed, null).?,
     );
+    const evidence = missionWorkflowEvidenceWithBackendName(
+        allocator,
+        missionWorkflowEvidenceStatus("available", "ok", 1),
+        managed.name,
+    );
+    defer allocator.free(evidence.boiler_instance.?);
+    try std.testing.expectEqualStrings("worker-a", evidence.boiler_instance.?);
 }
 
 test "managed NullWatch target is discovered from supervisor state" {
@@ -2627,9 +3366,11 @@ test "contentType returns correct MIME type for .html" {
 
 test "initial request buffer stays small while media body limit remains high" {
     try std.testing.expect(initial_request_buffer_size <= 128 * 1024);
-    try std.testing.expect(max_request_size >= @as(usize, @intCast(gateway_access.min_body_size)));
-    try std.testing.expect(!requestBodyExceedsLimit(max_request_size));
-    try std.testing.expect(requestBodyExceedsLimit(max_request_size + 1));
+    try std.testing.expect(default_max_request_size <= 128 * 1024);
+    try std.testing.expect(gateway_max_request_size >= 64 * 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, @intCast(nullclaw_gateway_config.min_body_size)), gateway_max_request_size);
+    try std.testing.expectEqual(default_max_request_size, maxRequestBodySize("/api/status"));
+    try std.testing.expectEqual(gateway_max_request_size, maxRequestBodySize("/api/instances/nullclaw/demo/a2a"));
 }
 
 test "contentType returns correct MIME type for .js" {

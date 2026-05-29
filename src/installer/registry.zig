@@ -15,6 +15,7 @@ pub const KnownComponent = struct {
     display_name: []const u8,
     description: []const u8,
     repo: []const u8,
+    stage: []const u8 = "",
     is_alpha: bool = false,
     installable: bool = true,
     default_launch_command: []const u8 = "gateway",
@@ -40,7 +41,7 @@ pub const known_components = [_]KnownComponent{
         .display_name = "NullBoiler",
         .description = "DAG-based workflow orchestrator. Chains agents into multi-step pipelines with branching, loops, and parallel execution. Turns NullClaw agents into teams.",
         .repo = "nullclaw/nullboiler",
-        .is_alpha = true,
+        .stage = "beta",
         .default_launch_command = "server",
         .default_port = 8080,
     },
@@ -49,15 +50,17 @@ pub const known_components = [_]KnownComponent{
         .display_name = "NullTickets",
         .description = "Task and issue tracker for AI agents. Project management that agents can read, create, and update autonomously via API.",
         .repo = "nullclaw/nulltickets",
-        .is_alpha = true,
+        .stage = "beta",
         .default_launch_command = "server",
         .default_port = 7700,
     },
     .{
         .name = "nullwatch",
         .display_name = "NullWatch",
-        .description = "Headless observability, tracing, evals, and run intelligence for lightweight agent infrastructure.",
+        .description = "Headless tracing, evals, and run intelligence for lightweight agent infrastructure.",
         .repo = "nullclaw/nullwatch",
+        .stage = "alpha",
+        .is_alpha = true,
         .default_launch_command = "serve",
         .default_port = 7710,
     },
@@ -71,19 +74,6 @@ pub fn findKnownComponent(name: []const u8) ?KnownComponent {
         }
     }
     return null;
-}
-
-/// NullBoiler and NullTickets expose long-lived API services as the default
-/// process. Their manifests historically named the binary as the launch
-/// command; NullHub stores the service mode as `server` so process supervision
-/// can use HTTP health checks without passing a component-name argument.
-pub fn normalizeLaunchCommand(component: []const u8, command: []const u8) []const u8 {
-    if ((std.mem.eql(u8, component, "nullboiler") or std.mem.eql(u8, component, "nulltickets")) and
-        (std.mem.eql(u8, command, component) or std.mem.eql(u8, command, "serve")))
-    {
-        return "server";
-    }
-    return command;
 }
 
 // ─── URL builders ────────────────────────────────────────────────────────────
@@ -276,12 +266,6 @@ test "findKnownComponent returns nullwatch" {
 
 test "findKnownComponent returns null for unknown" {
     try std.testing.expect(findKnownComponent("nonexistent") == null);
-}
-
-test "normalizeLaunchCommand maps service component binary names to server mode" {
-    try std.testing.expectEqualStrings("server", normalizeLaunchCommand("nullboiler", "nullboiler"));
-    try std.testing.expectEqualStrings("server", normalizeLaunchCommand("nulltickets", "nulltickets"));
-    try std.testing.expectEqualStrings("gateway", normalizeLaunchCommand("nullclaw", "gateway"));
 }
 
 test "buildReleasesUrl" {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import StatusBadge from "./StatusBadge.svelte";
   import { api } from "$lib/api/client";
+  import { instanceRoute } from "$lib/nullstack/path";
 
   let {
     component = "",
@@ -17,6 +18,7 @@
     !version ? "-" : version.startsWith("v") || version.startsWith("dev-") ? version : `v${version}`,
   );
   let portLabel = $derived(component === "nullclaw" ? "Gateway" : "API");
+  let detailHref = $derived(instanceRoute(component, name));
 
   // Sync localStatus when prop changes (from poll)
   $effect(() => {
@@ -54,33 +56,35 @@
   }
 </script>
 
-<a href="/instances/{component}/{name}" class="card">
-  <div class="card-header">
-    <span class="card-name">{name}</span>
-    <StatusBadge status={localStatus} />
-  </div>
-  <div class="card-meta">
-    <span class="component-tag">{component}</span>
-    <span class="version">{displayVersion}</span>
-  </div>
-  {#if localStatus === "running" && port > 0}
-    <div class="gateway-addr">
-      <span class="gateway-label">{portLabel}:</span>
-      <code>127.0.0.1:{port}</code>
+<div class="card">
+  <a href={detailHref} class="card-main">
+    <div class="card-header">
+      <span class="card-name">{name}</span>
+      <StatusBadge status={localStatus} />
     </div>
-  {/if}
+    <div class="card-meta">
+      <span class="component-tag">{component}</span>
+      <span class="version">{displayVersion}</span>
+    </div>
+    {#if localStatus === "running" && port > 0}
+      <div class="gateway-addr">
+        <span class="gateway-label">{portLabel}:</span>
+        <code>127.0.0.1:{port}</code>
+      </div>
+    {/if}
+  </a>
   <div class="card-actions">
     {#if localStatus === "running" || localStatus === "stopping"}
-      <button onclick={stop} disabled={loading}>
+      <button type="button" onclick={stop} disabled={loading}>
         {loading ? "Stopping..." : "Stop"}
       </button>
     {:else}
-      <button onclick={start} disabled={loading}>
+      <button type="button" onclick={start} disabled={loading}>
         {loading ? "Starting..." : "Start"}
       </button>
     {/if}
   </div>
-</a>
+</div>
 
 <style>
   .card {
@@ -92,15 +96,23 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--fg);
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     backdrop-filter: blur(4px);
   }
   .card:hover {
-    text-decoration: none;
     background: var(--bg-hover);
     border-color: var(--accent);
     box-shadow: 0 0 15px var(--border-glow);
     transform: translateY(-2px);
+  }
+  .card-main {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    color: inherit;
+  }
+  .card-main:hover {
+    text-decoration: none;
   }
   .card-header {
     display: flex;
@@ -155,7 +167,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-shadow: var(--text-glow);
   }
   .card-actions button:hover {

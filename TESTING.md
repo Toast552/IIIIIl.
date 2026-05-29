@@ -8,7 +8,7 @@ The aim is not a single large testing rewrite. The aim is to improve confidence 
 
 - make the existing backend test suite a reliable daily gate
 - expand coverage into the highest-risk backend areas
-- add the missing frontend unit-test layer
+- expand frontend unit coverage beyond the current targeted UI helper tests
 - replace shell-only smoke reliance with structured integration coverage
 - keep browser E2E small and focused
 - adopt NullClaw-style expectations: every behavior change gets tests, every bug fix gets a regression test
@@ -20,7 +20,8 @@ As of the current `main` branch:
 - NullHub already has substantial Zig unit-test coverage in parts of the backend.
 - Coverage is concentrated heavily in API and routing code.
 - The project has a shell smoke script at `tests/test_e2e.sh`.
-- The project does not yet have a committed frontend unit-test harness.
+- The project has a targeted Mission Control UI helper test; broader component
+  and route-level frontend coverage is still light.
 - CI currently runs backend tests, the shell smoke test on Linux, and ReleaseSmall binary builds.
 
 This means the main gap is not "no tests". The gap is uneven coverage and missing layers.
@@ -49,9 +50,9 @@ The snapshot below is based on the current `src/` tree and the committed test di
 | Config, state, and paths | Medium | `src/core/state.zig`, `src/api/config.zig`, `src/core/paths.zig` | add tests around persisted-state restoration and migration-sensitive behavior |
 | Auth and access control | Light | `src/auth.zig`, `src/access.zig` | add unauthorized origin, token failure, and sensitive-route boundary tests |
 | Service install/uninstall/status | Light | `src/service.zig` | add stronger platform-specific generation and failure-path tests |
-| Orchestration proxy | Light | `src/api/orchestration.zig` | add upstream error mapping, token/header forwarding, and store-vs-boiler routing tests |
+| Product proxies | Light | `src/api/nullboiler.zig`, `src/api/nulltickets.zig`, `src/api/nullwatch.zig` | add upstream error mapping and token/header forwarding tests |
 | Discovery, mDNS, and compat layers | Light | `src/discovery.zig`, `src/mdns.zig`, `src/compat/*` | add degraded-mode and missing-tool fallback coverage |
-| Frontend UI logic | Missing | no committed UI test harness in `ui/` | add Vitest and Testing Library first |
+| Frontend UI logic | Light | `ui/src/lib/missionControl/replayAutomation.test.mjs` covers the replay automation helper | add broader component and route-level coverage |
 | Structured backend integration tests | Light | shell smoke only in `tests/test_e2e.sh` | add a real HTTP/integration harness with fixtures |
 | Browser end-to-end | Missing | no Playwright or equivalent suite | add a very small critical-flow suite after UI unit tests land |
 
@@ -108,7 +109,7 @@ Use for:
 - HTTP route behavior across modules
 - boot and runtime lifecycle flows
 - managed-instance interactions
-- orchestration proxy behavior with fake upstreams
+- product proxy behavior with fake upstreams
 - installer and update scenarios using fixtures
 
 These should not require a browser.
@@ -120,7 +121,7 @@ Use for:
 - API client helpers
 - stores and route transforms
 - form validation and state behavior
-- orchestration helpers and key UI components
+- NullBoiler helper and key UI components
 
 Recommended tooling:
 
@@ -226,7 +227,7 @@ Dependencies:
 
 Purpose:
 
-- make installer, supervisor, and orchestration tests cheaper to write
+- make installer, supervisor, and product proxy tests cheaper to write
 
 Suggested PR:
 
@@ -243,7 +244,7 @@ Target order:
 1. supervisor and process lifecycle
 2. installer and updates
 3. auth and access control
-4. orchestration proxy behavior
+4. product proxy behavior
 5. service generation and status behavior
 6. discovery and degraded-mode fallbacks
 
@@ -252,7 +253,7 @@ Example PRs:
 - `test(supervisor): cover restart threshold and crash recovery transitions`
 - `test(installer): cover rollback and duplicate-instance failure paths`
 - `test(auth): cover unauthorized origin and bearer-token failure paths`
-- `test(orchestration): cover upstream error mapping and token forwarding`
+- `test(product-proxies): cover upstream error mapping and token forwarding`
 - `test(service): cover launchd/systemd generation and failure paths`
 
 Dependencies:
@@ -269,23 +270,23 @@ Suggested PRs:
 
 - `test(integration): add structured HTTP smoke harness`
 - `test(integration): cover instance lifecycle and config mutation flows`
-- `test(integration): cover orchestration proxy scenarios`
+- `test(integration): cover product proxy scenarios`
 
 Dependencies:
 
 - Phase 4 strongly recommended
 
-### Phase 7: Frontend Unit-Test Harness
+### Phase 7: Frontend Unit Coverage
 
 Purpose:
 
-- add the missing UI logic test layer
+- expand the UI logic test layer
 
 Suggested PRs:
 
-- `test(ui): add Vitest and Testing Library harness`
+- `test(ui): add component-level Svelte test coverage`
 - `test(ui): cover API client and config-form helpers`
-- `test(ui): cover orchestration helpers and key components`
+- `test(ui): cover NullBoiler helpers and key components`
 
 Dependencies:
 
@@ -358,7 +359,7 @@ zig build test -Dembed-ui=false -Dbuild-ui=false --summary all
 bash tests/test_e2e.sh
 ```
 
-Future UI test changes after the harness exists:
+Frontend logic changes:
 
 ```bash
 npm --prefix ui test -- --run

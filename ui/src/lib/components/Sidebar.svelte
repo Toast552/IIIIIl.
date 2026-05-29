@@ -2,69 +2,38 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { api } from "$lib/api/client";
-  import { orchestrationUiRoutes, routePath } from "$lib/orchestration/routes";
-  import {
-    BOILER_INSTANCE_CHANGE_EVENT,
-    TICKETS_INSTANCE_CHANGE_EVENT,
-  } from "$lib/orchestration/backendSelection";
+  import { componentInstancesRoute, instanceRoute } from "$lib/nullstack/path";
 
   let instances = $state<Record<string, any>>({});
-  let installedComponents = $state<Record<string, any>>({});
   let currentPath = $derived($page.url.pathname);
-  let showBoilerOrchestration = $derived(Boolean(installedComponents["nullboiler"]?.installed));
-  let showTicketsStore = $derived(Boolean(installedComponents["nulltickets"]?.installed));
-  let showOrchestration = $derived(showBoilerOrchestration || showTicketsStore);
-  let boilerSelectionVersion = $state(0);
-  let ticketsSelectionVersion = $state(0);
-  let orchestrationDashboardHref = $derived.by(() => {
-    boilerSelectionVersion;
-    return orchestrationUiRoutes.dashboard();
-  });
-  let orchestrationWorkflowsHref = $derived.by(() => {
-    boilerSelectionVersion;
-    return orchestrationUiRoutes.workflows();
-  });
-  let orchestrationRunsHref = $derived.by(() => {
-    boilerSelectionVersion;
-    return orchestrationUiRoutes.runs();
-  });
-  let orchestrationStoreHref = $derived.by(() => {
-    ticketsSelectionVersion;
-    return orchestrationUiRoutes.store();
-  });
+
+  function componentHeaderHref(component: string): string {
+    return componentInstancesRoute(component);
+  }
+
+  function componentHeaderActive(component: string): boolean {
+    const root = componentInstancesRoute(component);
+    if (currentPath === root || currentPath.startsWith(`${root}/`)) return true;
+    if (component === "nullboiler") return currentPath.startsWith("/nullboiler");
+    if (component === "nulltickets") return currentPath.startsWith("/nulltickets");
+    if (component === "nullwatch") return currentPath.startsWith("/nullwatch");
+    return false;
+  }
 
   async function loadSidebarState() {
-    const [statusResult, componentsResult] = await Promise.allSettled([
-      api.getStatus(),
-      api.getComponents(),
-    ]);
-
-    if (statusResult.status === "fulfilled") {
-      instances = statusResult.value.instances || {};
-    }
-
-    if (componentsResult.status === "fulfilled") {
-      installedComponents = Object.fromEntries(
-        (componentsResult.value.components || []).map((component: any) => [component.name, component]),
-      );
+    try {
+      const status = await api.getStatus();
+      instances = status.instances || {};
+    } catch (e) {
+      console.error(e);
     }
   }
 
   onMount(() => {
     void loadSidebarState();
     const interval = setInterval(loadSidebarState, 5000);
-    const refreshBoilerLinks = () => {
-      boilerSelectionVersion += 1;
-    };
-    const refreshTicketsLinks = () => {
-      ticketsSelectionVersion += 1;
-    };
-    globalThis.addEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
-    globalThis.addEventListener?.(TICKETS_INSTANCE_CHANGE_EVENT, refreshTicketsLinks);
     return () => {
       clearInterval(interval);
-      globalThis.removeEventListener?.(BOILER_INSTANCE_CHANGE_EVENT, refreshBoilerLinks);
-      globalThis.removeEventListener?.(TICKETS_INSTANCE_CHANGE_EVENT, refreshTicketsLinks);
     };
   });
 </script>
@@ -86,11 +55,16 @@
     <h3>Instances</h3>
     {#each Object.entries(instances) as [component, items]}
       <div class="component-group">
-        <span class="component-name">{component}</span>
+        <a
+          class="component-name"
+          href={componentHeaderHref(component)}
+          class:active={componentHeaderActive(component)}
+        >{component}</a>
         {#each Object.entries(items as Record<string, any>) as [name, info]}
           <a
-            href="/instances/{component}/{name}"
-            class:active={currentPath === `/instances/${component}/${name}`}
+            class="instance-link"
+            href={instanceRoute(component, name)}
+            class:active={currentPath === instanceRoute(component, name)}
           >
             <span class="status-dot" class:running={info.status === "running"}
             ></span>
@@ -101,30 +75,11 @@
     {/each}
   </div>
 
-  {#if showOrchestration}
-    <div class="nav-section">
-      <h3>Orchestration</h3>
-      {#if showBoilerOrchestration}
-        <a href={orchestrationDashboardHref} class:active={currentPath === routePath(orchestrationDashboardHref)}>Dashboard</a>
-        <a href={orchestrationWorkflowsHref} class:active={currentPath.startsWith(routePath(orchestrationWorkflowsHref))}>Workflows</a>
-        <a href={orchestrationRunsHref} class:active={currentPath.startsWith(routePath(orchestrationRunsHref))}>Runs</a>
-      {/if}
-      {#if showTicketsStore}
-        <a href={orchestrationStoreHref} class:active={currentPath.startsWith(routePath(orchestrationStoreHref))}>Store</a>
-      {/if}
-    </div>
-  {/if}
-
   <div class="nav-section">
-    <a href="/providers" class:active={currentPath === "/providers"}>Providers</a>
-  </div>
-
-  <div class="nav-section">
-    <a href="/channels" class:active={currentPath === "/channels"}>Channels</a>
-  </div>
-
-  <div class="nav-section">
-    <a href="/observability" class:active={currentPath.startsWith("/observability")}>Observability</a>
+    <a
+      href="/configs"
+      class:active={currentPath === "/configs" || currentPath === "/providers" || currentPath === "/channels"}
+    >Configs</a>
   </div>
 
   <div class="nav-bottom">
@@ -196,7 +151,7 @@
     font-size: 0.875rem;
     text-transform: uppercase;
     letter-spacing: 1px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     border-left: 3px solid transparent;
   }
 
@@ -220,20 +175,25 @@
     margin-bottom: 0.5rem;
   }
 
-  .component-name {
-    display: block;
+  .component-group .component-name {
+    display: flex;
+    align-items: center;
     font-size: 0.75rem;
     font-weight: 700;
     color: var(--fg-dim);
-    padding: 0.375rem 1.25rem 0.125rem;
+    padding: 0.5rem 1.25rem 0.35rem;
     text-transform: uppercase;
     letter-spacing: 1px;
-    opacity: 0.7;
   }
 
   .component-group a {
     padding-left: 1.75rem;
     font-size: 0.8rem;
+  }
+
+  .component-group a.component-name {
+    padding-left: 1.25rem;
+    font-size: 0.75rem;
   }
 
   .status-dot {
@@ -264,7 +224,7 @@
     font-size: 0.875rem;
     text-transform: uppercase;
     letter-spacing: 1px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     border-left: 3px solid transparent;
   }
 

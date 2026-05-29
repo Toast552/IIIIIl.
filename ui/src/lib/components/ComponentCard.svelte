@@ -1,36 +1,20 @@
 <script lang="ts">
-  import { api } from "$lib/api/client";
+  import { encodePathSegment } from "$lib/nullstack/path";
 
   let {
     name = "",
     displayName = "",
     description = "",
     alpha = false,
+    stage = "",
     installable = true,
     installed = false,
-    standalone = false,
     instanceCount = 0,
   } = $props();
-  let importing = $state(false);
-  let imported = $state(false);
-  let comingSoon = $derived(!installable && !installed && !standalone);
-
-  async function handleImport(e: MouseEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    importing = true;
-    try {
-      await api.importInstance(name);
-      imported = true;
-      standalone = false;
-      installed = true;
-      instanceCount = 1;
-    } catch (err) {
-      console.error("Import failed:", err);
-    } finally {
-      importing = false;
-    }
-  }
+  let comingSoon = $derived(!installable && !installed);
+  let installHref = $derived(`/install/${encodePathSegment(name)}`);
+  let badgeLabel = $derived((stage || (alpha ? "alpha" : "")).trim().toLowerCase());
+  let badgeText = $derived(badgeLabel ? badgeLabel[0].toUpperCase() + badgeLabel.slice(1) : "");
 </script>
 
 {#if comingSoon}
@@ -38,27 +22,23 @@
   <div class="card-header">
     <h3>{displayName}</h3>
     <div class="card-actions">
-      <span class="alpha-badge">&lt;Alpha&gt;</span>
+      {#if badgeLabel}
+        <span class={`maturity-badge ${badgeLabel}`}>&lt;{badgeText}&gt;</span>
+      {/if}
       <span class="coming-soon-badge">Coming Soon</span>
     </div>
   </div>
   <p>{description}</p>
 </div>
 {:else}
-<a href="/install/{name}" class="component-card">
+<a href={installHref} class="component-card">
   <div class="card-header">
     <h3>{displayName}</h3>
     <div class="card-actions">
-      {#if alpha}
-        <span class="alpha-badge">&lt;Alpha&gt;</span>
+      {#if badgeLabel}
+        <span class={`maturity-badge ${badgeLabel}`}>&lt;{badgeText}&gt;</span>
       {/if}
-      {#if imported}
-        <span class="installed-badge">Imported</span>
-      {:else if standalone}
-        <button class="import-btn" onclick={handleImport} disabled={importing}>
-          {importing ? "Importing..." : "Import"}
-        </button>
-      {:else if installed}
+      {#if installed}
         <span class="installed-badge"
           >{instanceCount} {instanceCount === 1 ? "instance" : "instances"}</span
         >
@@ -77,7 +57,7 @@
     border-radius: 4px;
     padding: 1.5rem;
     color: var(--fg);
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     backdrop-filter: blur(4px);
   }
 
@@ -87,6 +67,11 @@
     border-color: var(--accent);
     box-shadow: 0 0 15px var(--border-glow);
     transform: translateY(-2px);
+  }
+
+  .component-card:focus-within:not(.disabled) {
+    border-color: var(--accent);
+    box-shadow: 0 0 15px var(--border-glow);
   }
 
   .component-card.disabled {
@@ -132,17 +117,27 @@
     box-shadow: inset 0 0 5px color-mix(in srgb, var(--accent) 30%, transparent);
   }
 
-  .alpha-badge {
+  .maturity-badge {
     font-size: 0.7rem;
-    background: color-mix(in srgb, #ffb84d 18%, transparent);
-    color: #ffb84d;
-    border: 1px solid color-mix(in srgb, #ffb84d 65%, #000 35%);
     padding: 0.25rem 0.45rem;
     border-radius: 2px;
     text-transform: uppercase;
     letter-spacing: 0.8px;
     font-weight: 700;
+  }
+
+  .maturity-badge.alpha {
+    background: color-mix(in srgb, #ffb84d 18%, transparent);
+    color: #ffb84d;
+    border: 1px solid color-mix(in srgb, #ffb84d 65%, #000 35%);
     box-shadow: inset 0 0 4px color-mix(in srgb, #ffb84d 35%, transparent);
+  }
+
+  .maturity-badge.beta {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    box-shadow: inset 0 0 4px color-mix(in srgb, var(--accent) 25%, transparent);
   }
 
   .coming-soon-badge {
@@ -155,34 +150,6 @@
     text-transform: uppercase;
     letter-spacing: 0.8px;
     font-weight: 700;
-  }
-
-  .import-btn {
-    font-size: 0.75rem;
-    background: var(--bg-surface);
-    color: var(--accent);
-    border: 1px solid var(--accent-dim);
-    padding: 0.375rem 0.75rem;
-    border-radius: 2px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    font-weight: bold;
-  }
-
-  .import-btn:hover {
-    background: var(--bg-hover);
-    border-color: var(--accent);
-    box-shadow: 0 0 10px var(--border-glow);
-    text-shadow: 0 0 8px var(--accent);
-  }
-
-  .import-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    box-shadow: none;
-    text-shadow: none;
   }
 
   p {

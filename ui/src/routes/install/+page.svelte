@@ -5,7 +5,7 @@
 
   let components = $state<any[]>([]);
 
-  async function loadComponents() {
+  async function loadPageData() {
     try {
       const data = await api.getComponents();
       components = data.components || [];
@@ -14,12 +14,16 @@
     }
   }
 
-  afterNavigate(loadComponents);
+  afterNavigate(loadPageData);
 </script>
 
 <div class="install-page">
-  <h1>Install Component</h1>
-  <p class="subtitle">Choose a component to install</p>
+  <div class="page-header">
+    <div>
+      <h1>Install Component</h1>
+      <p class="subtitle">Choose a component to install</p>
+    </div>
+  </div>
 
   <div class="catalog-grid">
     {#each components as comp}
@@ -28,9 +32,9 @@
         displayName={comp.display_name}
         description={comp.description}
         alpha={Boolean(comp.alpha)}
+        stage={comp.stage || ""}
         installable={comp.installable !== false}
-        installed={comp.installed}
-        standalone={comp.standalone}
+        installed={comp.instance_count > 0}
         instanceCount={comp.instance_count}
       />
     {/each}
@@ -40,6 +44,13 @@
 <style>
   .install-page {
     max-width: 900px;
+  }
+  .page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 2rem;
   }
   h1 {
     font-size: 1.75rem;
@@ -60,5 +71,10 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: 1.5rem;
+  }
+  @media (max-width: 640px) {
+    .page-header {
+      flex-direction: column;
+    }
   }
 </style>

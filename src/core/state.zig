@@ -8,6 +8,8 @@ pub const InstanceEntry = struct {
     auto_start: bool = false,
     launch_mode: []const u8 = "gateway",
     verbose: bool = false,
+    storage_mode: []const u8 = "",
+    source_path: []const u8 = "",
 };
 
 pub const SavedProvider = struct {
@@ -182,6 +184,42 @@ const InstanceMap = ManagedStringArrayHashMap(InstanceEntry);
 /// Outer map type: component-name → InstanceMap.
 const ComponentMap = ManagedStringArrayHashMap(InstanceMap);
 
+fn duplicateOptionalString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    if (value.len == 0) return "";
+    return allocator.dupe(u8, value);
+}
+
+fn freeOptionalString(allocator: std.mem.Allocator, value: []const u8) void {
+    if (value.len > 0) allocator.free(value);
+}
+
+fn duplicateInstanceEntry(allocator: std.mem.Allocator, entry: InstanceEntry) !InstanceEntry {
+    const owned_version = try allocator.dupe(u8, entry.version);
+    errdefer allocator.free(owned_version);
+    const owned_launch_mode = try allocator.dupe(u8, entry.launch_mode);
+    errdefer allocator.free(owned_launch_mode);
+    const owned_storage_mode = try duplicateOptionalString(allocator, entry.storage_mode);
+    errdefer freeOptionalString(allocator, owned_storage_mode);
+    const owned_source_path = try duplicateOptionalString(allocator, entry.source_path);
+    errdefer freeOptionalString(allocator, owned_source_path);
+
+    return .{
+        .version = owned_version,
+        .auto_start = entry.auto_start,
+        .launch_mode = owned_launch_mode,
+        .verbose = entry.verbose,
+        .storage_mode = owned_storage_mode,
+        .source_path = owned_source_path,
+    };
+}
+
+fn freeInstanceEntry(allocator: std.mem.Allocator, entry: InstanceEntry) void {
+    allocator.free(entry.version);
+    allocator.free(entry.launch_mode);
+    freeOptionalString(allocator, entry.storage_mode);
+    freeOptionalString(allocator, entry.source_path);
+}
+
 // ─── State ───────────────────────────────────────────────────────────────────
 
 pub const State = struct {
@@ -239,8 +277,7 @@ pub const State = struct {
         while (comp_it.next()) |comp_entry| {
             var inst_it = comp_entry.value_ptr.iterator();
             while (inst_it.next()) |inst_entry| {
-                self.allocator.free(inst_entry.value_ptr.version);
-                self.allocator.free(inst_entry.value_ptr.launch_mode);
+                freeInstanceEntry(self.allocator, inst_entry.value_ptr.*);
                 self.allocator.free(inst_entry.key_ptr.*);
             }
             comp_entry.value_ptr.deinit();
@@ -283,8 +320,7 @@ pub const State = struct {
             errdefer {
                 var it = inner.iterator();
                 while (it.next()) |e| {
-                    allocator.free(e.value_ptr.version);
-                    allocator.free(e.value_ptr.launch_mode);
+                    freeInstanceEntry(allocator, e.value_ptr.*);
                     allocator.free(e.key_ptr.*);
                 }
                 inner.deinit();
@@ -294,14 +330,7 @@ pub const State = struct {
             while (inst_it.next()) |inst_kv| {
                 const inst_name = try allocator.dupe(u8, inst_kv.key_ptr.*);
                 errdefer allocator.free(inst_name);
-                const duped_launch_mode = try allocator.dupe(u8, inst_kv.value_ptr.launch_mode);
-                errdefer allocator.free(duped_launch_mode);
-                const entry = InstanceEntry{
-                    .version = try allocator.dupe(u8, inst_kv.value_ptr.version),
-                    .auto_start = inst_kv.value_ptr.auto_start,
-                    .launch_mode = duped_launch_mode,
-                    .verbose = inst_kv.value_ptr.verbose,
-                };
+                const entry = try duplicateInstanceEntry(allocator, inst_kv.value_ptr.*);
                 try inner.put(inst_name, entry);
             }
 
@@ -438,14 +467,8 @@ pub const State = struct {
 
         const owned_name = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned_name);
-        const owned_launch_mode = try self.allocator.dupe(u8, entry.launch_mode);
-        errdefer self.allocator.free(owned_launch_mode);
-        const owned_entry = InstanceEntry{
-            .version = try self.allocator.dupe(u8, entry.version),
-            .auto_start = entry.auto_start,
-            .launch_mode = owned_launch_mode,
-            .verbose = entry.verbose,
-        };
+        const owned_entry = try duplicateInstanceEntry(self.allocator, entry);
+        errdefer freeInstanceEntry(self.allocator, owned_entry);
         try inner_ptr.put(owned_name, owned_entry);
     }
 
@@ -454,8 +477,7 @@ pub const State = struct {
         const inner = self.instances.getPtr(component) orelse return false;
         const entry = inner.fetchSwapRemove(name) orelse return false;
 
-        self.allocator.free(entry.value.version);
-        self.allocator.free(entry.value.launch_mode);
+        freeInstanceEntry(self.allocator, entry.value);
         self.allocator.free(entry.key);
 
         // If this was the last instance, remove the component key too.
@@ -485,19 +507,24 @@ pub const State = struct {
         const inner = self.instances.getPtr(component) orelse return false;
         const ptr = inner.getPtr(name) orelse return false;
 
+        const effective_storage_mode = if (entry.storage_mode.len > 0) entry.storage_mode else ptr.storage_mode;
+        const effective_source_path = if (entry.source_path.len > 0) entry.source_path else ptr.source_path;
+        const effective_entry = InstanceEntry{
+            .version = entry.version,
+            .auto_start = entry.auto_start,
+            .launch_mode = entry.launch_mode,
+            .verbose = entry.verbose,
+            .storage_mode = effective_storage_mode,
+            .source_path = effective_source_path,
+        };
+
         // Dupe new values before freeing old ones to avoid use-after-free
         // when the caller passes slices pointing to the old entry's memory.
-        const new_version = try self.allocator.dupe(u8, entry.version);
-        errdefer self.allocator.free(new_version);
-        const new_launch_mode = try self.allocator.dupe(u8, entry.launch_mode);
-        errdefer self.allocator.free(new_launch_mode);
+        const new_entry = try duplicateInstanceEntry(self.allocator, effective_entry);
+        errdefer freeInstanceEntry(self.allocator, new_entry);
 
-        self.allocator.free(ptr.version);
-        self.allocator.free(ptr.launch_mode);
-        ptr.version = new_version;
-        ptr.launch_mode = new_launch_mode;
-        ptr.auto_start = entry.auto_start;
-        ptr.verbose = entry.verbose;
+        freeInstanceEntry(self.allocator, ptr.*);
+        ptr.* = new_entry;
         return true;
     }
 
@@ -943,6 +970,34 @@ test "update instance version, save, load, verify" {
         try std.testing.expectEqualStrings("2.0.0", entry.?.version);
         try std.testing.expect(entry.?.auto_start == true);
     }
+}
+
+test "update preserves instance storage metadata when omitted" {
+    const allocator = std.testing.allocator;
+    const path = try testPath(allocator, "state.json");
+    defer allocator.free(path);
+    defer cleanupTestDir();
+
+    var s = State.init(allocator, path);
+    defer s.deinit();
+
+    try s.addInstance("nullclaw", "imported", .{
+        .version = "1.0.0",
+        .launch_mode = "gateway",
+        .storage_mode = "imported-standalone",
+        .source_path = "/tmp/external-nullclaw",
+    });
+
+    const updated = try s.updateInstance("nullclaw", "imported", .{
+        .version = "2.0.0",
+        .launch_mode = "gateway",
+    });
+    try std.testing.expect(updated);
+
+    const entry = s.getInstance("nullclaw", "imported").?;
+    try std.testing.expectEqualStrings("2.0.0", entry.version);
+    try std.testing.expectEqualStrings("imported-standalone", entry.storage_mode);
+    try std.testing.expectEqualStrings("/tmp/external-nullclaw", entry.source_path);
 }
 
 test "load non-existent file returns empty state" {

@@ -12,13 +12,12 @@ const local_binary = @import("../core/local_binary.zig");
 const component_cli = @import("../core/component_cli.zig");
 const integration_mod = @import("../core/integration.zig");
 const launch_args_mod = @import("../core/launch_args.zig");
-const gateway_access = @import("../core/gateway_access.zig");
 const managed_skills = @import("../managed_skills.zig");
 const manifest_mod = @import("../core/manifest.zig");
 const managed_cli = @import("managed_cli.zig");
 const nullclaw_web_channel = @import("../core/nullclaw_web_channel.zig");
+const nullclaw_gateway_config = @import("../core/nullclaw_gateway_config.zig");
 const query_api = @import("query.zig");
-const proxy_api = @import("proxy.zig");
 const test_helpers = @import("../test_helpers.zig");
 const instance_runtime = @import("instance_runtime.zig");
 
@@ -28,19 +27,13 @@ const jsonOk = helpers.jsonOk;
 const notFound = helpers.notFound;
 const badRequest = helpers.badRequest;
 const methodNotAllowed = helpers.methodNotAllowed;
-const gateway_ready_timeout_ms: i64 = 15_000;
-const gateway_ready_poll_ms: u64 = 100;
+const imported_standalone_storage_mode = "imported-standalone";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn defaultLaunchModeForComponent(component: []const u8) []const u8 {
     if (registry.findKnownComponent(component)) |known| return known.default_launch_command;
     return "gateway";
-}
-
-fn isLegacyDefaultLaunchMode(component: []const u8, launch_mode: []const u8) bool {
-    const default_launch = defaultLaunchModeForComponent(component);
-    return !std.mem.eql(u8, default_launch, "gateway") and std.mem.eql(u8, launch_mode, "gateway");
 }
 
 const StartBinary = struct {
@@ -66,6 +59,8 @@ fn persistStartVersion(
         .auto_start = entry.auto_start,
         .launch_mode = entry.launch_mode,
         .verbose = entry.verbose,
+        .storage_mode = entry.storage_mode,
+        .source_path = entry.source_path,
     });
     if (!updated) return error.StateError;
     s.save() catch return error.StateError;
@@ -486,24 +481,6 @@ const NullclawOnboardingStatus = struct {
     }
 };
 
-const NullclawBootstrapMemoryProbe = struct {
-    exists: bool = false,
-    timestamp: ?[]u8 = null,
-
-    fn deinit(self: *NullclawBootstrapMemoryProbe, allocator: std.mem.Allocator) void {
-        if (self.timestamp) |value| allocator.free(value);
-        self.* = .{};
-    }
-
-    fn takeTimestamp(self: *NullclawBootstrapMemoryProbe) ?[]u8 {
-        const value = self.timestamp;
-        self.timestamp = null;
-        return value;
-    }
-};
-
-const nullclaw_bootstrap_memory_key = "__bootstrap.prompt.BOOTSTRAP.md";
-
 fn fileExistsAbsolute(path: []const u8) bool {
     std_compat.fs.accessAbsolute(path, .{}) catch return false;
     return true;
@@ -513,46 +490,8 @@ fn nullclawWorkspaceStatePath(allocator: std.mem.Allocator, workspace_dir: []con
     return std.fs.path.join(allocator, &.{ workspace_dir, ".nullclaw", "workspace-state.json" });
 }
 
-fn probeNullclawBootstrapInMemory(
-    allocator: std.mem.Allocator,
-    s: *state_mod.State,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-) NullclawBootstrapMemoryProbe {
-    const args = [_][]const u8{
-        "memory",
-        "get",
-        nullclaw_bootstrap_memory_key,
-        "--json",
-    };
-    const stdout = managed_cli.tryRunJsonSuccess(allocator, s, paths, component, name, &args) orelse return .{};
-    defer allocator.free(stdout);
-
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, stdout, .{
-        .allocate = .alloc_if_needed,
-        .ignore_unknown_fields = true,
-    }) catch return .{};
-    defer parsed.deinit();
-
-    switch (parsed.value) {
-        .null => return .{},
-        .object => |obj| {
-            var probe = NullclawBootstrapMemoryProbe{ .exists = true };
-            if (obj.get("timestamp")) |timestamp_value| {
-                if (timestamp_value == .string and timestamp_value.string.len > 0) {
-                    probe.timestamp = allocator.dupe(u8, timestamp_value.string) catch null;
-                }
-            }
-            return probe;
-        },
-        else => return .{},
-    }
-}
-
 fn readNullclawOnboardingStatus(
     allocator: std.mem.Allocator,
-    s: *state_mod.State,
     paths: paths_mod.Paths,
     component: []const u8,
     name: []const u8,
@@ -606,17 +545,7 @@ fn readNullclawOnboardingStatus(
     }
 
     status.completed = status.onboarding_completed_at != null and !status.bootstrap_exists;
-
-    var bootstrap_probe = NullclawBootstrapMemoryProbe{};
-    if (!status.completed and !status.bootstrap_exists) {
-        bootstrap_probe = probeNullclawBootstrapInMemory(allocator, s, paths, component, name);
-        if (status.bootstrap_seeded_at == null) {
-            status.bootstrap_seeded_at = bootstrap_probe.takeTimestamp();
-        }
-    }
-    defer bootstrap_probe.deinit(allocator);
-
-    status.pending = !status.completed and (status.bootstrap_exists or status.bootstrap_seeded_at != null or bootstrap_probe.exists);
+    status.pending = !status.completed and (status.bootstrap_exists or status.bootstrap_seeded_at != null);
     return status;
 }
 
@@ -888,15 +817,6 @@ fn writeJsonConfigValue(allocator: std.mem.Allocator, config_path: []const u8, v
     try out.writeAll("\n");
 }
 
-const GatewayAccess = struct {
-    token: []u8,
-    changed: bool,
-
-    fn deinit(self: GatewayAccess, allocator: std.mem.Allocator) void {
-        allocator.free(self.token);
-    }
-};
-
 pub const GatewayProxyUpstream = struct {
     port: u16,
     token: []u8,
@@ -917,92 +837,6 @@ pub const GatewayProxyPrepareResult = union(enum) {
     upstream: GatewayProxyUpstream,
 };
 
-fn ensureJsonObjectField(
-    allocator: std.mem.Allocator,
-    obj: *std.json.ObjectMap,
-    key: []const u8,
-    changed: *bool,
-) !*std.json.ObjectMap {
-    const gop = try obj.getOrPut(allocator, key);
-    if (!gop.found_existing or gop.value_ptr.* != .object) {
-        gop.value_ptr.* = .{ .object = .empty };
-        changed.* = true;
-    }
-    return &gop.value_ptr.object;
-}
-
-fn setBoolField(
-    allocator: std.mem.Allocator,
-    obj: *std.json.ObjectMap,
-    key: []const u8,
-    value: bool,
-    changed: *bool,
-) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .bool and existing.bool == value) return;
-    }
-    try obj.put(allocator, key, .{ .bool = value });
-    changed.* = true;
-}
-
-fn setIntegerAtLeast(
-    allocator: std.mem.Allocator,
-    obj: *std.json.ObjectMap,
-    key: []const u8,
-    minimum: i64,
-    changed: *bool,
-) !void {
-    if (obj.get(key)) |existing| {
-        if (existing == .integer and existing.integer >= minimum) return;
-    }
-    try obj.put(allocator, key, .{ .integer = minimum });
-    changed.* = true;
-}
-
-fn ensureNullclawGatewayConfig(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-) !GatewayAccess {
-    if (!std.mem.eql(u8, component, "nullclaw")) return error.UnsupportedComponent;
-
-    const config_path = try paths.instanceConfig(allocator, component, name);
-    defer allocator.free(config_path);
-    const file = try std_compat.fs.openFileAbsolute(config_path, .{});
-    defer file.close();
-    const contents = try file.readToEndAlloc(allocator, 4 * 1024 * 1024);
-    defer allocator.free(contents);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    });
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidConfig;
-
-    const json_allocator = parsed.arena.allocator();
-    var changed = false;
-    const root = &parsed.value.object;
-    const gateway_obj = try ensureJsonObjectField(json_allocator, root, "gateway", &changed);
-    const a2a_obj = try ensureJsonObjectField(json_allocator, root, "a2a", &changed);
-
-    try setBoolField(json_allocator, gateway_obj, "require_pairing", true, &changed);
-    try setIntegerAtLeast(json_allocator, gateway_obj, "max_body_size_bytes", gateway_access.min_body_size, &changed);
-    try setIntegerAtLeast(json_allocator, gateway_obj, "request_timeout_secs", gateway_access.min_timeout_secs, &changed);
-    try setBoolField(json_allocator, a2a_obj, "enabled", true, &changed);
-    try setBoolField(json_allocator, a2a_obj, "multi_modal", true, &changed);
-
-    const token = try gateway_access.ensurePairedToken(allocator, json_allocator, paths, component, name, gateway_obj, &changed);
-    errdefer allocator.free(token);
-
-    if (changed) {
-        try writeJsonConfigValue(allocator, config_path, parsed.value);
-    }
-
-    return .{ .token = token, .changed = changed };
-}
-
 fn resolveGatewayPort(
     allocator: std.mem.Allocator,
     paths: paths_mod.Paths,
@@ -1016,119 +850,19 @@ fn resolveGatewayPort(
     return instance_runtime.readPortFromConfig(allocator, paths, component, name, "gateway.port");
 }
 
-fn isRuntimeRunning(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    manager: *manager_mod.Manager,
-    component: []const u8,
-    name: []const u8,
-    entry: state_mod.InstanceEntry,
-) bool {
-    const snapshot = instance_runtime.resolve(allocator, paths, manager, component, name, entry);
-    return snapshot.status == .running;
-}
-
-fn waitForRuntimeRunning(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
-    manager: *manager_mod.Manager,
-    component: []const u8,
-    name: []const u8,
-    entry: state_mod.InstanceEntry,
-) bool {
-    const deadline = std_compat.time.milliTimestamp() + gateway_ready_timeout_ms;
-    while (true) {
-        manager.tick();
-        const snapshot = instance_runtime.resolve(allocator, paths, manager, component, name, entry);
-        switch (snapshot.status) {
-            .running => return true,
-            .failed, .stopped => return false,
-            else => {},
-        }
-        if (std_compat.time.milliTimestamp() >= deadline) return false;
-        std_compat.thread.sleep(gateway_ready_poll_ms * std.time.ns_per_ms);
-    }
-}
-
 fn gatewayNotReady() ApiResponse {
     return .{
         .status = "503 Service Unavailable",
         .content_type = "application/json",
-        .body = "{\"error\":\"nullclaw gateway is not ready\"}",
+        .body = "{\"error\":\"nullclaw gateway is not running\"}",
     };
 }
 
-fn ensureInstanceRunning(
-    allocator: std.mem.Allocator,
-    s: *state_mod.State,
-    manager: *manager_mod.Manager,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-    entry: state_mod.InstanceEntry,
-    config_changed: bool,
-) ?ApiResponse {
-    if (config_changed and isRuntimeRunning(allocator, paths, manager, component, name, entry)) {
-        const restart_resp = handleRestart(allocator, s, manager, paths, component, name, "");
-        if (!std.mem.eql(u8, restart_resp.status, "200 OK")) return restart_resp;
-        if (!waitForRuntimeRunning(allocator, paths, manager, component, name, entry)) return gatewayNotReady();
-        return null;
-    }
-    if (!isRuntimeRunning(allocator, paths, manager, component, name, entry)) {
-        const start_resp = handleStart(allocator, s, manager, paths, component, name, "");
-        if (!std.mem.eql(u8, start_resp.status, "200 OK")) return start_resp;
-        if (!waitForRuntimeRunning(allocator, paths, manager, component, name, entry)) return gatewayNotReady();
-    }
-    return null;
-}
-
-fn isSuccessStatus(status: []const u8) bool {
-    return status.len >= 1 and status[0] == '2';
-}
-
-fn handleGatewayProxy(
-    allocator: std.mem.Allocator,
-    s: *state_mod.State,
-    manager: *manager_mod.Manager,
-    paths: paths_mod.Paths,
-    component: []const u8,
-    name: []const u8,
-    method: []const u8,
-    upstream_path: []const u8,
-    body: []const u8,
-    event_stream: bool,
-) ApiResponse {
-    if (!std.mem.eql(u8, component, "nullclaw")) {
-        return badRequest("{\"error\":\"gateway proxy routes are only supported for nullclaw instances\"}");
-    }
-    const entry = s.getInstance(component, name) orelse return notFound();
-    const access = ensureNullclawGatewayConfig(allocator, paths, component, name) catch |err| switch (err) {
-        error.UnsupportedComponent => return badRequest("{\"error\":\"unsupported component\"}"),
-        error.FileNotFound => return .{ .status = "404 Not Found", .content_type = "application/json", .body = "{\"error\":\"config not found\"}" },
-        else => return helpers.serverError(),
-    };
-    defer access.deinit(allocator);
-
-    if (ensureInstanceRunning(allocator, s, manager, paths, component, name, entry, access.changed)) |resp| return resp;
-
-    const port = resolveGatewayPort(allocator, paths, manager, component, name, entry) orelse
-        return .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = "{\"error\":\"gateway port unavailable\"}" };
-    const base_url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port}) catch return helpers.serverError();
-    defer allocator.free(base_url);
-
-    const proxied = proxy_api.forward(allocator, .{
-        .method = method,
-        .base_url = base_url,
-        .path = upstream_path,
-        .body = body,
-        .bearer_token = access.token,
-        .accept = if (event_stream) "text/event-stream" else null,
-        .unreachable_body = "{\"error\":\"nullclaw gateway unreachable\"}",
-    });
+fn gatewayNotPrepared() ApiResponse {
     return .{
-        .status = proxied.status,
-        .content_type = if (event_stream and isSuccessStatus(proxied.status)) "text/event-stream" else proxied.content_type,
-        .body = proxied.body,
+        .status = "409 Conflict",
+        .content_type = "application/json",
+        .body = "{\"error\":\"nullclaw gateway pairing is not configured\"}",
     };
 }
 
@@ -1235,16 +969,21 @@ pub fn prepareGatewayProxy(
     defer if (proxy_body_owned and !proxy_body_transferred) allocator.free(proxy_body);
 
     const entry = s.getInstance(parsed.component, parsed.name) orelse return .{ .response = notFound() };
-    const access = ensureNullclawGatewayConfig(allocator, paths, parsed.component, parsed.name) catch |err| switch (err) {
+    var access = nullclaw_gateway_config.loadAccess(allocator, paths, parsed.component, parsed.name) catch |err| switch (err) {
         error.UnsupportedComponent => return .{ .response = badRequest("{\"error\":\"unsupported component\"}") },
-        error.FileNotFound => return .{ .response = .{ .status = "404 Not Found", .content_type = "application/json", .body = "{\"error\":\"config not found\"}" } },
+        error.FileNotFound,
+        error.GatewayConfigMissing,
+        error.GatewayTokenMissing,
+        error.GatewayPairingMissing,
+        => return .{ .response = gatewayNotPrepared() },
         else => return .{ .response = helpers.serverError() },
     };
     errdefer access.deinit(allocator);
 
-    if (ensureInstanceRunning(allocator, s, manager, paths, parsed.component, parsed.name, entry, access.changed)) |resp| {
+    const snapshot = instance_runtime.resolve(allocator, paths, manager, parsed.component, parsed.name, entry);
+    if (snapshot.status != .running) {
         access.deinit(allocator);
-        return .{ .response = resp };
+        return .{ .response = gatewayNotReady() };
     }
 
     const port = resolveGatewayPort(allocator, paths, manager, parsed.component, parsed.name, entry) orelse {
@@ -1252,10 +991,15 @@ pub fn prepareGatewayProxy(
         return .{ .response = .{ .status = "503 Service Unavailable", .content_type = "application/json", .body = "{\"error\":\"gateway port unavailable\"}" } };
     };
 
+    const token = access.token orelse {
+        access.deinit(allocator);
+        return .{ .response = gatewayNotPrepared() };
+    };
+    access.token = null;
     proxy_body_transferred = true;
     return .{ .upstream = .{
         .port = port,
-        .token = access.token,
+        .token = token,
         .upstream_path = route.upstream_path,
         .body = proxy_body,
         .body_owned = proxy_body_owned,
@@ -1598,7 +1342,6 @@ pub const UsageAggregate = struct {
 };
 
 pub const TOKEN_USAGE_LEDGER_FILENAME = "llm_token_usage.jsonl";
-pub const LEGACY_USAGE_LEDGER_FILENAME = "llm_usage.jsonl";
 pub const USAGE_CACHE_VERSION: u32 = 1;
 pub const USAGE_CACHE_MAX_LEDGER_BYTES: usize = 128 * 1024 * 1024;
 pub const USAGE_HOURLY_RETENTION_SECS: i64 = 14 * 24 * 60 * 60;
@@ -1653,16 +1396,7 @@ pub fn isShortUsageWindow(window: []const u8) bool {
 }
 
 pub fn resolveUsageLedgerPath(allocator: std.mem.Allocator, inst_dir: []const u8) ![]u8 {
-    const preferred = try std.fs.path.join(allocator, &.{ inst_dir, TOKEN_USAGE_LEDGER_FILENAME });
-    std_compat.fs.accessAbsolute(preferred, .{}) catch {
-        const legacy = try std.fs.path.join(allocator, &.{ inst_dir, LEGACY_USAGE_LEDGER_FILENAME });
-        if (std_compat.fs.accessAbsolute(legacy, .{})) |_| {
-            allocator.free(preferred);
-            return legacy;
-        } else |_| {}
-        allocator.free(legacy);
-    };
-    return preferred;
+    return std.fs.path.join(allocator, &.{ inst_dir, TOKEN_USAGE_LEDGER_FILENAME });
 }
 
 pub fn usageCachePath(allocator: std.mem.Allocator, paths: paths_mod.Paths, component: []const u8, name: []const u8) ![]u8 {
@@ -2563,6 +2297,16 @@ fn appendInstanceJson(buf: *std.array_list.Managed(u8), entry: state_mod.Instanc
     try buf.appendSlice(",\"status\":\"");
     try buf.appendSlice(status_str);
     try buf.append('"');
+    if (entry.storage_mode.len > 0) {
+        try buf.appendSlice(",\"storage_mode\":\"");
+        try appendEscaped(buf, entry.storage_mode);
+        try buf.append('"');
+    }
+    if (entry.source_path.len > 0) {
+        try buf.appendSlice(",\"source_path\":\"");
+        try appendEscaped(buf, entry.source_path);
+        try buf.append('"');
+    }
 
     if (snapshot.pid) |pid| {
         try buf.appendSlice(",\"pid\":");
@@ -2709,8 +2453,8 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
     const bin_path = start_binary.path;
     const current_version = start_binary.version;
 
-    // Read manifest from binary to get health endpoint and port, falling back
-    // to registry/config defaults for older binaries without manifest support.
+    // Read manifest from binary to get health endpoint and port. Registry/config
+    // defaults remain the deterministic path when manifest probing is unavailable.
     const known_component = registry.findKnownComponent(component);
     var health_endpoint: []const u8 = if (known_component) |known| known.default_health_endpoint else "/health";
     var port: u16 = if (known_component) |known| known.default_port else 0;
@@ -2741,15 +2485,16 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
     if (!launch_mode_overridden) {
         if (manifest_launch_mode) |mode| {
             const should_normalize_launch =
-                (std.mem.eql(u8, launch_cmd, manifest_launch_command) and !std.mem.eql(u8, launch_cmd, mode)) or
-                isLegacyDefaultLaunchMode(component, launch_cmd);
+                std.mem.eql(u8, launch_cmd, manifest_launch_command) and !std.mem.eql(u8, launch_cmd, mode);
             if (should_normalize_launch) {
-                launch_cmd = registry.normalizeLaunchCommand(component, mode);
+                launch_cmd = mode;
                 _ = s.updateInstance(component, name, .{
                     .version = current_version,
                     .auto_start = entry.auto_start,
                     .launch_mode = launch_cmd,
                     .verbose = entry.verbose,
+                    .storage_mode = entry.storage_mode,
+                    .source_path = entry.source_path,
                 }) catch {};
                 s.save() catch {};
             }
@@ -2770,8 +2515,7 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
         }
     }
 
-    const normalized_launch_cmd = registry.normalizeLaunchCommand(component, launch_cmd);
-    var launch = launch_args_mod.resolve(allocator, normalized_launch_cmd, launch_verbose) catch return badRequest("{\"error\":\"invalid launch_mode\"}");
+    var launch = launch_args_mod.resolve(allocator, launch_cmd, launch_verbose) catch return badRequest("{\"error\":\"invalid launch_mode\"}");
     defer launch.deinit();
     // The launch-mode helper decides whether this mode should be supervised via
     // an HTTP health endpoint or process liveness only.
@@ -3174,7 +2918,7 @@ pub fn handleOnboarding(
 ) ApiResponse {
     if (s.getInstance(component, name) == null) return notFound();
 
-    var status = readNullclawOnboardingStatus(allocator, s, paths, component, name) catch
+    var status = readNullclawOnboardingStatus(allocator, paths, component, name) catch
         return helpers.serverError();
     defer status.deinit(allocator);
 
@@ -4119,6 +3863,8 @@ fn restoreDeletedInstance(
     rollback_auto_start: bool,
     rollback_launch_mode: []const u8,
     rollback_verbose: bool,
+    rollback_storage_mode: []const u8,
+    rollback_source_path: []const u8,
     inst_dir: []const u8,
     hidden_inst_dir: ?[]const u8,
 ) void {
@@ -4127,6 +3873,8 @@ fn restoreDeletedInstance(
         .auto_start = rollback_auto_start,
         .launch_mode = rollback_launch_mode,
         .verbose = rollback_verbose,
+        .storage_mode = rollback_storage_mode,
+        .source_path = rollback_source_path,
     }) catch {};
     _ = s.save() catch {};
     if (hidden_inst_dir) |path| {
@@ -4151,6 +3899,16 @@ pub fn handleDelete(
     const rollback_launch_mode = allocator.dupe(u8, existing.launch_mode) catch return helpers.serverError();
     defer allocator.free(rollback_launch_mode);
     const rollback_verbose = existing.verbose;
+    const rollback_storage_mode = if (existing.storage_mode.len > 0)
+        allocator.dupe(u8, existing.storage_mode) catch return helpers.serverError()
+    else
+        "";
+    defer if (rollback_storage_mode.len > 0) allocator.free(rollback_storage_mode);
+    const rollback_source_path = if (existing.source_path.len > 0)
+        allocator.dupe(u8, existing.source_path) catch return helpers.serverError()
+    else
+        "";
+    defer if (rollback_source_path.len > 0) allocator.free(rollback_source_path);
 
     var delete_impact = collectDeleteImpact(allocator, s, paths, component, name) catch return helpers.serverError();
     defer delete_impact.deinit(allocator);
@@ -4173,13 +3931,13 @@ pub fn handleDelete(
         return notFound();
     }
     s.save() catch {
-        restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, inst_dir, hidden_inst_dir);
+        restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, rollback_storage_mode, rollback_source_path, inst_dir, hidden_inst_dir);
         return helpers.serverError();
     };
 
     if (delete_impact.dependents.items.items.len > 0) {
         unlinkDeleteImpact(allocator, paths, component, delete_impact) catch {
-            restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, inst_dir, hidden_inst_dir);
+            restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, rollback_storage_mode, rollback_source_path, inst_dir, hidden_inst_dir);
             _ = s.save() catch {};
             return helpers.serverError();
         };
@@ -4291,13 +4049,241 @@ fn resolveImportBinaryVersion(allocator: std.mem.Allocator, paths: paths_mod.Pat
     return downloadLatestBinaryVersion(allocator, paths, component);
 }
 
-/// POST /api/instances/{component}/import — import a standalone installation.
-/// Copies config and data from ~/.{component}/ into the nullhub instance directory.
-/// A runnable binary is staged during import so the managed instance can start.
-pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8) ApiResponse {
-    if (s.getInstance(component, "default") != null) {
-        return conflict("{\"error\":\"default instance already exists\"}");
+const ImportRequest = struct {
+    path: []const u8 = "",
+    name: []const u8 = "",
+};
+
+const ParsedImportConfig = struct {
+    instance_name: ?[]const u8 = null,
+};
+
+fn duplicateImportRequest(parsed: ImportRequest, allocator: std.mem.Allocator) !ImportRequest {
+    return .{
+        .path = try allocator.dupe(u8, parsed.path),
+        .name = try allocator.dupe(u8, parsed.name),
+    };
+}
+
+fn deinitImportRequest(allocator: std.mem.Allocator, req: ImportRequest) void {
+    allocator.free(req.path);
+    allocator.free(req.name);
+}
+
+fn loadImportRequest(allocator: std.mem.Allocator, body: []const u8) !ImportRequest {
+    if (std.mem.trim(u8, body, &std.ascii.whitespace).len == 0) {
+        return .{
+            .path = try allocator.dupe(u8, ""),
+            .name = try allocator.dupe(u8, ""),
+        };
     }
+
+    const parsed = try std.json.parseFromSlice(ImportRequest, allocator, body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    return duplicateImportRequest(parsed.value, allocator);
+}
+
+fn resolveDefaultImportSourceDir(allocator: std.mem.Allocator, home: []const u8, component: []const u8) ![]u8 {
+    const dot_name = try std.fmt.allocPrint(allocator, ".{s}", .{component});
+    defer allocator.free(dot_name);
+    return std.fs.path.join(allocator, &.{ home, dot_name });
+}
+
+fn resolveImportSourceDir(allocator: std.mem.Allocator, home: []const u8, component: []const u8, req: ImportRequest) ![]u8 {
+    if (req.path.len > 0) return allocator.dupe(u8, req.path);
+    return resolveDefaultImportSourceDir(allocator, home, component);
+}
+
+fn validateImportSourceDir(allocator: std.mem.Allocator, source_dir: []const u8) ?[]const u8 {
+    std_compat.fs.accessAbsolute(source_dir, .{}) catch return "{\"error\":\"path does not exist\"}";
+
+    const config_path = std.fs.path.join(allocator, &.{ source_dir, "config.json" }) catch return "{\"error\":\"config.json not found at path\"}";
+    defer allocator.free(config_path);
+
+    std_compat.fs.accessAbsolute(config_path, .{}) catch return "{\"error\":\"config.json not found at path\"}";
+    return null;
+}
+
+fn readImportConfig(allocator: std.mem.Allocator, source_dir: []const u8) !ParsedImportConfig {
+    const config_path = try std.fs.path.join(allocator, &.{ source_dir, "config.json" });
+    defer allocator.free(config_path);
+
+    const file = try std_compat.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const bytes = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(bytes);
+
+    const parsed = try std.json.parseFromSlice(ParsedImportConfig, allocator, bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    return .{
+        .instance_name = if (parsed.value.instance_name) |name|
+            try allocator.dupe(u8, name)
+        else
+            null,
+    };
+}
+
+fn deinitParsedImportConfig(allocator: std.mem.Allocator, cfg: ParsedImportConfig) void {
+    if (cfg.instance_name) |name| allocator.free(name);
+}
+
+fn isFilesystemSafeImportName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    if (std.mem.eql(u8, name, "import") or std.mem.eql(u8, name, "standalone")) return false;
+    if (std.mem.indexOfScalar(u8, name, 0) != null) return false;
+    for (name) |ch| {
+        const safe = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.';
+        if (!safe) return false;
+    }
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    return true;
+}
+
+fn parseLocalImportOrdinal(name: []const u8) ?usize {
+    const prefixes = [_][]const u8{ "local-import-", "Local Import #" };
+    inline for (prefixes) |prefix| {
+        if (std.mem.startsWith(u8, name, prefix)) {
+            return std.fmt.parseUnsigned(usize, name[prefix.len..], 10) catch null;
+        }
+    }
+    return null;
+}
+
+fn nextLocalImportName(allocator: std.mem.Allocator, s: *state_mod.State, component: []const u8) ![]u8 {
+    const names = try s.instanceNames(component);
+    defer if (names) |owned_names| s.allocator.free(owned_names);
+
+    var next_number: usize = 1;
+    if (names) |owned_names| {
+        for (owned_names) |existing_name| {
+            const n = parseLocalImportOrdinal(existing_name) orelse continue;
+            if (n >= next_number) next_number = n + 1;
+        }
+    }
+
+    return std.fmt.allocPrint(allocator, "local-import-{d}", .{next_number});
+}
+
+fn resolveImportInstanceName(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    component: []const u8,
+    req: ImportRequest,
+    cfg: ParsedImportConfig,
+) ![]u8 {
+    if (req.name.len > 0) return allocator.dupe(u8, req.name);
+    if (cfg.instance_name) |name| return allocator.dupe(u8, name);
+    if (req.path.len == 0) return allocator.dupe(u8, "default");
+    return nextLocalImportName(allocator, s, component);
+}
+
+fn invalidImportNameResponse(allocator: std.mem.Allocator, name: []const u8) ApiResponse {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    buf.appendSlice("{\"error\":\"invalid or duplicate instance name: ") catch return helpers.serverError();
+    appendEscaped(&buf, name) catch return helpers.serverError();
+    buf.appendSlice("\"}") catch return helpers.serverError();
+    const body = buf.toOwnedSlice() catch return helpers.serverError();
+    return badRequest(body);
+}
+
+fn buildImportResponse(allocator: std.mem.Allocator, instance_name: []const u8, source_dir: []const u8) ![]u8 {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+
+    try buf.appendSlice("{\"status\":\"imported\",\"instance\":\"");
+    try appendEscaped(&buf, instance_name);
+    try buf.appendSlice("\",\"path\":\"");
+    try appendEscaped(&buf, source_dir);
+    try buf.appendSlice("\"}");
+    return buf.toOwnedSlice();
+}
+
+fn hasStandaloneInstallAtPath(allocator: std.mem.Allocator, source_dir: []const u8) bool {
+    return validateImportSourceDir(allocator, source_dir) == null;
+}
+
+fn isStandaloneImported(
+    allocator: std.mem.Allocator,
+    s: *state_mod.State,
+    component: []const u8,
+    standalone_dir: []const u8,
+) bool {
+    const real_standalone_dir = std_compat.fs.realpathAlloc(allocator, standalone_dir) catch return false;
+    defer allocator.free(real_standalone_dir);
+
+    const names = s.instanceNames(component) catch return false;
+    defer if (names) |owned_names| s.allocator.free(owned_names);
+
+    if (names) |owned_names| {
+        for (owned_names) |name| {
+            const entry = s.getInstance(component, name) orelse continue;
+            if (!std.mem.eql(u8, entry.storage_mode, imported_standalone_storage_mode)) continue;
+            if (entry.source_path.len == 0) continue;
+
+            const real_source_dir = std_compat.fs.realpathAlloc(allocator, entry.source_path) catch continue;
+            defer allocator.free(real_source_dir);
+            if (std.mem.eql(u8, real_source_dir, real_standalone_dir)) return true;
+        }
+    }
+
+    return false;
+}
+
+fn buildStandaloneResponse(
+    allocator: std.mem.Allocator,
+    standalone_dir: ?[]const u8,
+    already_imported: bool,
+) ![]u8 {
+    if (standalone_dir == null) return allocator.dupe(u8, "{\"standalone\":false}");
+
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    try buf.appendSlice("{\"standalone\":true,\"standalone_path\":\"");
+    try appendEscaped(&buf, standalone_dir.?);
+    try buf.appendSlice("\",\"already_imported\":");
+    try buf.appendSlice(if (already_imported) "true" else "false");
+    try buf.appendSlice("}");
+    return buf.toOwnedSlice();
+}
+
+pub fn handleStandalone(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8) ApiResponse {
+    _ = paths;
+    const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch blk: {
+        if (builtin.os.tag == .windows) {
+            break :blk std_compat.process.getEnvVarOwned(allocator, "USERPROFILE") catch return helpers.serverError();
+        }
+        return helpers.serverError();
+    };
+    defer allocator.free(home);
+
+    const standalone_dir = resolveDefaultImportSourceDir(allocator, home, component) catch return helpers.serverError();
+    defer allocator.free(standalone_dir);
+
+    if (!hasStandaloneInstallAtPath(allocator, standalone_dir)) {
+        const body = buildStandaloneResponse(allocator, null, false) catch return helpers.serverError();
+        return jsonOk(body);
+    }
+
+    const already_imported = isStandaloneImported(allocator, s, component, standalone_dir);
+    const body = buildStandaloneResponse(allocator, standalone_dir, already_imported) catch return helpers.serverError();
+    return jsonOk(body);
+}
+
+/// POST /api/instances/{component}/import — import a standalone installation.
+/// Links the external standalone home into NullHub state without taking ownership
+/// of its files. A runnable binary is staged so the managed instance can start.
+pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8, body: []const u8) ApiResponse {
+    const req = loadImportRequest(allocator, body) catch return badRequest("{\"error\":\"invalid JSON body\"}");
+    defer deinitImportRequest(allocator, req);
 
     const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch blk: {
         if (builtin.os.tag == .windows) {
@@ -4307,16 +4293,32 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
     };
     defer allocator.free(home);
 
-    // 1. Verify standalone dir exists
-    const dot_dir = std.fmt.allocPrint(allocator, "{s}/.{s}", .{ home, component }) catch return helpers.serverError();
-    defer allocator.free(dot_dir);
-    std_compat.fs.accessAbsolute(dot_dir, .{}) catch return notFound();
+    const source_dir = resolveImportSourceDir(allocator, home, component, req) catch return helpers.serverError();
+    defer allocator.free(source_dir);
+
+    if (validateImportSourceDir(allocator, source_dir)) |error_body| {
+        const is_default_path = req.path.len == 0;
+        if (is_default_path and std.mem.eql(u8, error_body, "{\"error\":\"path does not exist\"}")) {
+            return notFound();
+        }
+        return badRequest(error_body);
+    }
+
+    const parsed_config = readImportConfig(allocator, source_dir) catch return badRequest("{\"error\":\"config.json is not valid JSON\"}");
+    defer deinitParsedImportConfig(allocator, parsed_config);
+
+    const instance_name = resolveImportInstanceName(allocator, s, component, req, parsed_config) catch return helpers.serverError();
+    defer allocator.free(instance_name);
+
+    if (!isFilesystemSafeImportName(instance_name) or s.getInstance(component, instance_name) != null) {
+        return invalidImportNameResponse(allocator, instance_name);
+    }
 
     // 2. Create instance directory structure
-    const inst_dir = paths.instanceDir(allocator, component, "default") catch return helpers.serverError();
+    const inst_dir = paths.instanceDir(allocator, component, instance_name) catch return helpers.serverError();
     defer allocator.free(inst_dir);
     if (std_compat.fs.accessAbsolute(inst_dir, .{})) |_| {
-        return conflict("{\"error\":\"default instance directory already exists\"}");
+        return invalidImportNameResponse(allocator, instance_name);
     } else |err| switch (err) {
         error.FileNotFound => {},
         else => return helpers.serverError(),
@@ -4335,27 +4337,30 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
     defer allocator.free(version);
 
     // 4. Symlink the entire standalone dir as the instance dir
-    //    ~/.nullclaw → ~/.nullhub/instances/nullclaw/default
+    //    ~/.nullclaw -> ~/.nullhub/instances/nullclaw/{name}
     //    This preserves all data in place (config, auth, workspace, state, logs)
-    std_compat.fs.symLinkAbsolute(dot_dir, inst_dir, .{ .is_directory = true }) catch return helpers.serverError();
+    std_compat.fs.symLinkAbsolute(source_dir, inst_dir, .{ .is_directory = true }) catch return helpers.serverError();
 
     // 5. Register in state
-    s.addInstance(component, "default", .{
+    s.addInstance(component, instance_name, .{
         .version = version,
         .auto_start = false,
         .launch_mode = defaultLaunchModeForComponent(component),
         .verbose = false,
+        .storage_mode = imported_standalone_storage_mode,
+        .source_path = source_dir,
     }) catch {
         std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
         return helpers.serverError();
     };
     s.save() catch {
-        _ = s.removeInstance(component, "default");
+        _ = s.removeInstance(component, instance_name);
         std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
         return helpers.serverError();
     };
 
-    return jsonOk("{\"status\":\"imported\",\"instance\":\"default\"}");
+    const response_body = buildImportResponse(allocator, instance_name, source_dir) catch return helpers.serverError();
+    return jsonOk(response_body);
 }
 
 /// PATCH /api/instances/{component}/{name} — update settings (auto_start).
@@ -4376,7 +4381,7 @@ pub fn handlePatch(s: *state_mod.State, component: []const u8, name: []const u8,
     defer parsed.deinit();
 
     const new_auto_start = parsed.value.auto_start orelse entry.auto_start;
-    const new_launch_mode = registry.normalizeLaunchCommand(component, parsed.value.launch_mode orelse entry.launch_mode);
+    const new_launch_mode = parsed.value.launch_mode orelse entry.launch_mode;
     const new_verbose = parsed.value.verbose orelse entry.verbose;
 
     var validated_launch = launch_args_mod.resolve(s.allocator, new_launch_mode, new_verbose) catch
@@ -4388,6 +4393,8 @@ pub fn handlePatch(s: *state_mod.State, component: []const u8, name: []const u8,
         .auto_start = new_auto_start,
         .launch_mode = new_launch_mode,
         .verbose = new_verbose,
+        .storage_mode = entry.storage_mode,
+        .source_path = entry.source_path,
     }) catch return .{
         .status = "500 Internal Server Error",
         .content_type = "application/json",
@@ -5044,28 +5051,6 @@ pub fn dispatch(
             if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
             return handleAgentInvoke(allocator, s, paths, parsed.component, parsed.name, body);
         }
-        if (std.mem.eql(u8, action, "agent-stream")) {
-            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
-            const proxy_body = buildAgentStreamA2aBody(allocator, body) catch |err| switch (err) {
-                error.InvalidJson => return badRequest("{\"error\":\"invalid JSON body\"}"),
-                error.MissingMessage => return badRequest("{\"error\":\"message is required\"}"),
-                else => return helpers.serverError(),
-            };
-            defer allocator.free(proxy_body);
-            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/a2a", proxy_body, true);
-        }
-        if (std.mem.eql(u8, action, "a2a")) {
-            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
-            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/a2a", body, false);
-        }
-        if (std.mem.eql(u8, action, "a2a-stream")) {
-            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
-            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/a2a", body, true);
-        }
-        if (std.mem.eql(u8, action, "transcribe")) {
-            if (!std.mem.eql(u8, method, "POST")) return methodNotAllowed();
-            return handleGatewayProxy(allocator, s, manager, paths, parsed.component, parsed.name, method, "/media/transcribe", body, false);
-        }
         if (std.mem.eql(u8, action, "agent-sessions")) {
             return handleAgentSessions(allocator, s, paths, parsed.component, parsed.name, method, target);
         }
@@ -5113,7 +5098,11 @@ pub fn dispatch(
 
     // POST /api/instances/{component}/import — import standalone installation
     if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, parsed.name, "import")) {
-        return handleImport(allocator, s, paths, parsed.component);
+        return handleImport(allocator, s, paths, parsed.component, body);
+    }
+
+    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, parsed.name, "standalone")) {
+        return handleStandalone(allocator, s, paths, parsed.component);
     }
 
     // No action — CRUD on the instance itself.
@@ -5153,9 +5142,6 @@ test "component default launch mode uses registry metadata" {
     try std.testing.expectEqualStrings("gateway", defaultLaunchModeForComponent("nullclaw"));
     try std.testing.expectEqualStrings("serve", defaultLaunchModeForComponent("nullwatch"));
     try std.testing.expectEqualStrings("gateway", defaultLaunchModeForComponent("unknown-component"));
-    try std.testing.expect(isLegacyDefaultLaunchMode("nullwatch", "gateway"));
-    try std.testing.expect(!isLegacyDefaultLaunchMode("nullwatch", "serve"));
-    try std.testing.expect(!isLegacyDefaultLaunchMode("nullclaw", "gateway"));
 }
 
 test "pipeline summaries accept wrapped lists and JSON string definitions" {
@@ -5216,7 +5202,465 @@ fn writeTestInstanceConfig(
     try file.writeAll("\n");
 }
 
-test "ensureNullclawGatewayConfig patches generic gateway capabilities" {
+fn writeAbsoluteFile(path: []const u8, contents: []const u8) !void {
+    const file = try std_compat.fs.createFileAbsolute(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(contents);
+}
+
+fn setTestHomeEnv(home: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (std.c.setenv("HOME", home.ptr, 1) != 0) return error.Unexpected;
+}
+
+fn restoreTestHomeEnv(previous_home: ?[]const u8) void {
+    if (comptime builtin.os.tag == .windows) return;
+    if (previous_home) |home| {
+        _ = std.c.setenv("HOME", home.ptr, 1);
+    } else {
+        _ = std.c.unsetenv("HOME");
+    }
+}
+
+fn withTestHome(
+    allocator: std.mem.Allocator,
+    home: []const u8,
+    comptime callback: *const fn (std.mem.Allocator) anyerror!void,
+) !void {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+
+    try setTestHomeEnv(home);
+    try callback(allocator);
+}
+
+fn readAbsoluteSymlinkTarget(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var buf: [std_compat.fs.max_path_bytes]u8 = undefined;
+    const len = try std.Io.Dir.readLinkAbsolute(std_compat.io(), path, &buf);
+    return allocator.dupe(u8, buf[0..len]);
+}
+
+fn parseImportResponse(allocator: std.mem.Allocator, body: []const u8) !struct {
+    status: []const u8,
+    instance: []const u8,
+    path: []const u8,
+} {
+    const parsed = try std.json.parseFromSlice(struct {
+        status: []const u8,
+        instance: []const u8,
+        path: []const u8,
+    }, allocator, body, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    return parsed.value;
+}
+
+fn parseStandaloneResponse(allocator: std.mem.Allocator, body: []const u8) !struct {
+    standalone: bool,
+    standalone_path: ?[]const u8 = null,
+    already_imported: ?bool = null,
+} {
+    const parsed = try std.json.parseFromSlice(struct {
+        standalone: bool,
+        standalone_path: ?[]const u8 = null,
+        already_imported: ?bool = null,
+    }, allocator, body, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    return parsed.value;
+}
+
+fn createStandaloneImportSource(
+    allocator: std.mem.Allocator,
+    fixture: test_helpers.TempPaths,
+    relative_dir: []const u8,
+    config_json: []const u8,
+) ![]const u8 {
+    const source_dir = try fixture.path(allocator, relative_dir);
+    errdefer allocator.free(source_dir);
+    try ensurePath(source_dir);
+
+    const config_path = try std.fs.path.join(allocator, &.{ source_dir, "config.json" });
+    defer allocator.free(config_path);
+    try writeAbsoluteFile(config_path, config_json);
+    return source_dir;
+}
+
+test "handleImport with custom path imports and registers instance" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "custom-nullclaw", "{\"instance_name\":\"config-name\",\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\",\"name\":\"review-bot\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    const parsed = try parseImportResponse(allocator, resp.body);
+    try std.testing.expectEqualStrings("imported", parsed.status);
+    try std.testing.expectEqualStrings("review-bot", parsed.instance);
+    try std.testing.expectEqualStrings(source_dir, parsed.path);
+
+    const entry = s.getInstance("nullclaw", "review-bot").?;
+    try std.testing.expectEqualStrings(local_binary.dev_local_version, entry.version);
+    try std.testing.expect(!entry.auto_start);
+    try std.testing.expectEqualStrings(imported_standalone_storage_mode, entry.storage_mode);
+    try std.testing.expectEqualStrings(source_dir, entry.source_path);
+
+    const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "review-bot");
+    defer allocator.free(inst_dir);
+    const link_target = try readAbsoluteSymlinkTarget(allocator, inst_dir);
+    defer allocator.free(link_target);
+    try std.testing.expectEqualStrings(source_dir, link_target);
+}
+
+test "handleImport without body imports default path as default" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const home_dir = try state_fixture.path(allocator, "home");
+    defer allocator.free(home_dir);
+    try ensurePath(home_dir);
+    const dot_dir = try std.fs.path.join(allocator, &.{ home_dir, ".nullclaw" });
+    defer allocator.free(dot_dir);
+    try ensurePath(dot_dir);
+    const config_path = try std.fs.path.join(allocator, &.{ dot_dir, "config.json" });
+    defer allocator.free(config_path);
+    try writeAbsoluteFile(config_path, "{\"gateway\":{\"port\":3000}}\n");
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+    try setTestHomeEnv(home_dir);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", "");
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    const parsed = try parseImportResponse(allocator, resp.body);
+    try std.testing.expectEqualStrings("default", parsed.instance);
+    try std.testing.expectEqualStrings(dot_dir, parsed.path);
+    try std.testing.expect(s.getInstance("nullclaw", "default") != null);
+}
+
+test "handleImport reads instance_name from config when name omitted" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "config-named", "{\"instance_name\":\"from-config\",\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    const parsed = try parseImportResponse(allocator, resp.body);
+    try std.testing.expectEqualStrings("from-config", parsed.instance);
+    try std.testing.expect(s.getInstance("nullclaw", "from-config") != null);
+}
+
+test "handleImport auto generates local import name when config lacks one" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Local Import #1", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "local-import-2", .{ .version = "1.0.0" });
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "generated-name", "{\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    const parsed = try parseImportResponse(allocator, resp.body);
+    try std.testing.expectEqualStrings("local-import-3", parsed.instance);
+    try std.testing.expect(s.getInstance("nullclaw", "local-import-3") != null);
+}
+
+test "handleImport returns error for missing path" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const missing_dir = try state_fixture.path(allocator, "missing-dir");
+    defer allocator.free(missing_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{missing_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"path does not exist\"}", resp.body);
+}
+
+test "handleImport returns error for missing config json at path" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try state_fixture.path(allocator, "no-config");
+    defer allocator.free(source_dir);
+    try ensurePath(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"config.json not found at path\"}", resp.body);
+}
+
+test "handleImport returns error for invalid config json" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "invalid-config", "{not-json}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"config.json is not valid JSON\"}", resp.body);
+}
+
+test "handleImport returns error for duplicate instance name" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "review-bot", .{ .version = "1.0.0" });
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "duplicate-name", "{\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\",\"name\":\"review-bot\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"invalid or duplicate instance name: review-bot\"}", resp.body);
+}
+
+test "handleImport returns error for invalid instance name" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "invalid-name", "{\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\",\"name\":\"../bad\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"invalid or duplicate instance name: ../bad\"}", resp.body);
+}
+
+test "handleImport rejects route-reserved instance names" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "reserved-name", "{\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\",\"name\":\"standalone\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"invalid or duplicate instance name: standalone\"}", resp.body);
+}
+
+test "handleStandalone returns standalone false when default install is missing" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const home_dir = try state_fixture.path(allocator, "home-missing");
+    defer allocator.free(home_dir);
+    try ensurePath(home_dir);
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+    try setTestHomeEnv(home_dir);
+
+    const resp = handleStandalone(allocator, &s, mctx.paths, "nullclaw");
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const parsed = try parseStandaloneResponse(allocator, resp.body);
+    try std.testing.expect(!parsed.standalone);
+    try std.testing.expect(parsed.standalone_path == null);
+    try std.testing.expect(parsed.already_imported == null);
+}
+
+test "handleStandalone returns default path when install exists and is not imported" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const home_dir = try state_fixture.path(allocator, "home-standalone");
+    defer allocator.free(home_dir);
+    try ensurePath(home_dir);
+    const dot_dir = try std.fs.path.join(allocator, &.{ home_dir, ".nullclaw" });
+    defer allocator.free(dot_dir);
+    try ensurePath(dot_dir);
+    const config_path = try std.fs.path.join(allocator, &.{ dot_dir, "config.json" });
+    defer allocator.free(config_path);
+    try writeAbsoluteFile(config_path, "{\"gateway\":{\"port\":3000}}\n");
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+    try setTestHomeEnv(home_dir);
+
+    const resp = handleStandalone(allocator, &s, mctx.paths, "nullclaw");
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+
+    const parsed = try parseStandaloneResponse(allocator, resp.body);
+    try std.testing.expect(parsed.standalone);
+    try std.testing.expectEqualStrings(dot_dir, parsed.standalone_path.?);
+    try std.testing.expectEqual(@as(?bool, false), parsed.already_imported);
+}
+
+test "handleStandalone returns already imported after default import" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const home_dir = try state_fixture.path(allocator, "home-imported");
+    defer allocator.free(home_dir);
+    try ensurePath(home_dir);
+    const dot_dir = try std.fs.path.join(allocator, &.{ home_dir, ".nullclaw" });
+    defer allocator.free(dot_dir);
+    try ensurePath(dot_dir);
+    const config_path = try std.fs.path.join(allocator, &.{ dot_dir, "config.json" });
+    defer allocator.free(config_path);
+    try writeAbsoluteFile(config_path, "{\"gateway\":{\"port\":3000}}\n");
+
+    const previous_home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch null;
+    defer if (previous_home) |value| allocator.free(value);
+    defer restoreTestHomeEnv(previous_home);
+    try setTestHomeEnv(home_dir);
+
+    const import_resp = handleImport(allocator, &s, mctx.paths, "nullclaw", "");
+    defer allocator.free(import_resp.body);
+    try std.testing.expectEqualStrings("200 OK", import_resp.status);
+
+    const standalone_resp = handleStandalone(allocator, &s, mctx.paths, "nullclaw");
+    defer allocator.free(standalone_resp.body);
+    try std.testing.expectEqualStrings("200 OK", standalone_resp.status);
+
+    const parsed = try parseStandaloneResponse(allocator, standalone_resp.body);
+    try std.testing.expect(parsed.standalone);
+    try std.testing.expectEqualStrings(dot_dir, parsed.standalone_path.?);
+    try std.testing.expectEqual(@as(?bool, true), parsed.already_imported);
+}
+
+test "nullclaw gateway config patches generic gateway capabilities" {
     const allocator = std.testing.allocator;
     var fixture = try test_helpers.TempPaths.init(allocator);
     defer fixture.deinit();
@@ -5229,9 +5673,10 @@ test "ensureNullclawGatewayConfig patches generic gateway capabilities" {
         "{\"gateway\":{\"port\":43123,\"max_body_size_bytes\":1024},\"a2a\":{\"enabled\":false},\"memory\":{\"profile\":\"minimal_none\",\"backend\":\"none\",\"auto_save\":false}}",
     );
 
-    const access = try ensureNullclawGatewayConfig(allocator, fixture.paths, "nullclaw", "hat");
+    var access = try nullclaw_gateway_config.ensureConfig(allocator, fixture.paths, "nullclaw", "hat", .{});
     defer access.deinit(allocator);
-    try std.testing.expect(std.mem.startsWith(u8, access.token, gateway_access.token_prefix));
+    const token = access.token.?;
+    try std.testing.expect(std.mem.startsWith(u8, token, nullclaw_gateway_config.token_prefix));
     try std.testing.expect(access.changed);
 
     const config_path = try fixture.paths.instanceConfig(allocator, "nullclaw", "hat");
@@ -5246,30 +5691,34 @@ test "ensureNullclawGatewayConfig patches generic gateway capabilities" {
     const gateway = parsed.value.object.get("gateway").?.object;
     const a2a = parsed.value.object.get("a2a").?.object;
     try std.testing.expect(gateway.get("require_pairing").?.bool);
-    try std.testing.expect(gateway.get("max_body_size_bytes").?.integer >= gateway_access.min_body_size);
-    try std.testing.expect(gateway.get("request_timeout_secs").?.integer >= gateway_access.min_timeout_secs);
+    try std.testing.expect(gateway.get("max_body_size_bytes").?.integer >= nullclaw_gateway_config.min_body_size);
+    try std.testing.expect(gateway.get("request_timeout_secs").?.integer >= nullclaw_gateway_config.min_timeout_secs);
     try std.testing.expect(a2a.get("enabled").?.bool);
     try std.testing.expect(a2a.get("multi_modal").?.bool);
 
-    const expected_hash = try gateway_access.hashTokenAlloc(allocator, access.token);
+    const expected_hash = try nullclaw_gateway_config.hashGatewayTokenAlloc(allocator, token);
     defer allocator.free(expected_hash);
     const paired_tokens = gateway.get("paired_tokens").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), paired_tokens.len);
     try std.testing.expectEqualStrings(expected_hash, paired_tokens[0].string);
-    try std.testing.expect(!gateway_access.isNullhubToken(paired_tokens[0].string));
+    try std.testing.expect(!nullclaw_gateway_config.isNullhubGatewayToken(paired_tokens[0].string));
 
-    const token_path = try gateway_access.tokenPath(allocator, fixture.paths, "nullclaw", "hat");
+    const token_path = try nullclaw_gateway_config.gatewayTokenPath(allocator, fixture.paths, "nullclaw", "hat");
     defer allocator.free(token_path);
     const token_file = try std_compat.fs.openFileAbsolute(token_path, .{});
     defer token_file.close();
     const stored_token_bytes = try token_file.readToEndAlloc(allocator, 16 * 1024);
     defer allocator.free(stored_token_bytes);
-    try std.testing.expectEqualStrings(access.token, std.mem.trim(u8, stored_token_bytes, " \t\r\n"));
+    try std.testing.expectEqualStrings(token, std.mem.trim(u8, stored_token_bytes, " \t\r\n"));
 
-    const access2 = try ensureNullclawGatewayConfig(allocator, fixture.paths, "nullclaw", "hat");
+    var access2 = try nullclaw_gateway_config.ensureConfig(allocator, fixture.paths, "nullclaw", "hat", .{});
     defer access2.deinit(allocator);
-    try std.testing.expectEqualStrings(access.token, access2.token);
+    try std.testing.expectEqualStrings(token, access2.token.?);
     try std.testing.expect(!access2.changed);
+
+    var loaded = try nullclaw_gateway_config.loadAccess(allocator, fixture.paths, "nullclaw", "hat");
+    defer loaded.deinit(allocator);
+    try std.testing.expectEqualStrings(token, loaded.token.?);
 }
 
 test "buildAgentStreamA2aBody translates managed agent request to A2A message stream" {
@@ -5286,6 +5735,9 @@ test "buildAgentStreamA2aBody translates managed agent request to A2A message st
     try std.testing.expect(std.mem.indexOf(u8, body, "\"contextId\":\"interview-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"text\":\"hello \\\\\"world\\\\\"\"") != null);
     try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/agent-stream"));
+    try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/a2a"));
+    try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/a2a-stream"));
+    try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/transcribe"));
 }
 
 fn writeTestTrackerWorkflow(
@@ -5831,7 +6283,7 @@ test "handleStart normalizes manifest binary command to runnable launch args" {
     mctx.manager.stopInstance("nullwatch", "watch") catch {};
 }
 
-test "handleStart normalizes legacy default launch mode for nullwatch" {
+test "handleStart preserves explicit launch mode when it differs from manifest mode" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
@@ -5865,9 +6317,9 @@ test "handleStart normalizes legacy default launch mode for nullwatch" {
     try std.testing.expectEqualStrings("200 OK", resp.status);
 
     const entry = s.getInstance("nullwatch", "watch").?;
-    try std.testing.expectEqualStrings("serve", entry.launch_mode);
+    try std.testing.expectEqualStrings("gateway", entry.launch_mode);
     const inst = mctx.manager.instances.get("nullwatch/watch").?;
-    try std.testing.expectEqualStrings("serve", inst.launch_args[0]);
+    try std.testing.expectEqualStrings("gateway", inst.launch_args[0]);
 
     mctx.manager.stopInstance("nullwatch", "watch") catch {};
 }
@@ -6637,51 +7089,7 @@ test "handleOnboarding reports pending bootstrap from workspace state without di
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"bootstrap_seeded_at\":\"2026-03-13T01:17:17Z\"") != null);
 }
 
-test "handleOnboarding falls back to CLI bootstrap memory for legacy sqlite workspace" {
-    const allocator = std.testing.allocator;
-    var state_fixture = try test_helpers.TempPaths.init(allocator);
-    defer state_fixture.deinit();
-    const state_path = try state_fixture.paths.state(allocator);
-    defer allocator.free(state_path);
-    var s = state_mod.State.init(allocator, state_path);
-    defer s.deinit();
-    var mctx = TestManagerCtx.init(allocator);
-    defer mctx.deinit(allocator);
-
-    try s.addInstance("nullclaw", "legacy-agent", .{ .version = "1.0.3" });
-    const script =
-        \\#!/bin/sh
-        \\if [ "$1" = "memory" ] && [ "$2" = "get" ] && [ "$3" = "__bootstrap.prompt.BOOTSTRAP.md" ]; then
-        \\  if [ -z "$NULLCLAW_HOME" ]; then
-        \\    echo "missing home" >&2
-        \\    exit 1
-        \\  fi
-        \\  printf '%s\n' '{"key":"__bootstrap.prompt.BOOTSTRAP.md","category":"core","timestamp":"2026-03-13T02:37:27Z","content":"# bootstrap","session_id":null}'
-        \\  exit 0
-        \\fi
-        \\echo "unexpected args" >&2
-        \\exit 1
-        \\
-    ;
-    try writeTestBinary(allocator, mctx.paths, "nullclaw", "1.0.3", script);
-
-    const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "legacy-agent");
-    defer allocator.free(inst_dir);
-    const workspace_dir = try std.fs.path.join(allocator, &.{ inst_dir, "workspace" });
-    defer allocator.free(workspace_dir);
-    try ensurePath(workspace_dir);
-
-    const resp = handleOnboarding(allocator, &s, mctx.paths, "nullclaw", "legacy-agent");
-    defer allocator.free(resp.body);
-
-    try std.testing.expectEqualStrings("200 OK", resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"bootstrap_exists\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"pending\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"completed\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"bootstrap_seeded_at\":\"2026-03-13T02:37:27Z\"") != null);
-}
-
-test "handleOnboarding stays idle when legacy sqlite bootstrap memory is absent" {
+test "handleOnboarding stays idle when workspace bootstrap state is absent" {
     const allocator = std.testing.allocator;
     var state_fixture = try test_helpers.TempPaths.init(allocator);
     defer state_fixture.deinit();
@@ -6693,17 +7101,6 @@ test "handleOnboarding stays idle when legacy sqlite bootstrap memory is absent"
     defer mctx.deinit(allocator);
 
     try s.addInstance("nullclaw", "empty-agent", .{ .version = "1.0.4" });
-    const script =
-        \\#!/bin/sh
-        \\if [ "$1" = "memory" ] && [ "$2" = "get" ] && [ "$3" = "__bootstrap.prompt.BOOTSTRAP.md" ]; then
-        \\  printf '%s\n' 'null'
-        \\  exit 0
-        \\fi
-        \\echo "unexpected args" >&2
-        \\exit 1
-        \\
-    ;
-    try writeTestBinary(allocator, mctx.paths, "nullclaw", "1.0.4", script);
 
     const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "empty-agent");
     defer allocator.free(inst_dir);
@@ -7098,10 +7495,6 @@ test "dispatch routes POST integration action for nullboiler" {
     try std.testing.expect(std.mem.indexOf(u8, workflow, "\"pipeline_id\": \"pipe-dev\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, workflow, "\"claim_roles\": [\n    \"reviewer\"\n  ]") != null);
     try std.testing.expect(std.mem.indexOf(u8, workflow, "\"transition_to\": \"complete\"") != null);
-
-    const legacy_workflow_path = try std.fs.path.join(allocator, &.{ mctx.paths.root, "instances", "nullboiler", "boiler-a", "tracker-workflow.json" });
-    defer allocator.free(legacy_workflow_path);
-    try std.testing.expectError(error.FileNotFound, std_compat.fs.openFileAbsolute(legacy_workflow_path, .{}));
 }
 
 test "dispatch integration relink preserves advanced tracker config and custom workflows" {
@@ -7408,7 +7801,7 @@ test "handleHistory returns CLI JSON and passes instance home" {
     try std.testing.expect(std.mem.indexOf(u8, show_resp.body, "\"role\":\"user\"") != null);
 }
 
-test "handleMemory wraps legacy CLI failures as JSON errors" {
+test "handleMemory wraps CLI failures as JSON errors" {
     const allocator = std.testing.allocator;
     var state_fixture = try test_helpers.TempPaths.init(allocator);
     defer state_fixture.deinit();
@@ -8295,19 +8688,6 @@ test "dispatch routes agent invoke stream and sessions" {
     defer allocator.free(invoke_resp.body);
     try std.testing.expectEqualStrings("200 OK", invoke_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, invoke_resp.body, "\"response\":\"world\"") != null);
-
-    const stream_resp = dispatch(
-        allocator,
-        &s,
-        &mctx.manager,
-        &mctx.mutex,
-        mctx.paths,
-        "POST",
-        "/api/instances/nullclaw/my-agent/agent-stream",
-        "{\"message\":\"hello\",\"session_key\":\"s-1\",\"provider\":\"openai\",\"model\":\"gpt-5\",\"temperature\":\"0.3\",\"agent\":\"helper\"}",
-    ).?;
-    try std.testing.expectEqualStrings("404 Not Found", stream_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, stream_resp.body, "config not found") != null);
 
     const list_resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/my-agent/agent-sessions", "").?;
     defer allocator.free(list_resp.body);

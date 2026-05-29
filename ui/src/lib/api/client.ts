@@ -1,6 +1,7 @@
-import { createOrchestrationApi } from '$lib/api/orchestration';
-import { createNullTicketsApi } from '$lib/api/nulltickets';
-import { encodePathSegment } from '$lib/orchestration/routes';
+import { createNullBoilerApi } from '$lib/api/nullboiler';
+import { createMissionControlApi } from '$lib/api/missionControl';
+import { createNullTicketsApi, createNullTicketsStoreApi } from '$lib/api/nulltickets';
+import { componentApiPath, encodePathSegment, instanceApiPath } from '$lib/nullstack/path';
 
 const BASE = '/api';
 
@@ -15,6 +16,31 @@ function withQuery(path: string, params: Record<string, string | number | boolea
 }
 
 export { encodePathSegment };
+export type {
+  MissionControlAgent,
+  MissionControlComponentMapping,
+  MissionControlControls,
+  MissionControlEvent,
+  MissionControlFailure,
+  MissionControlGraphEdge,
+  MissionControlGraphNode,
+  MissionControlNullWatchMapping,
+  MissionControlPhase,
+  MissionControlRecovery,
+  MissionControlReplayArtifact,
+  MissionControlReplayList,
+  MissionControlReplayRecord,
+  MissionControlReplaySaveResult,
+  MissionControlState,
+  MissionControlStatus,
+  MissionControlTelemetry,
+  MissionControlTraceRef,
+  MissionControlWorkflowEvidence,
+  MissionControlWorkflowEvidenceCheckpoint,
+  MissionControlWorkflowEvidenceRun,
+  MissionControlWorkflowEvidenceStatus,
+  MissionControlWorkflowMapping,
+} from '$lib/api/missionControl';
 
 export type LogSource = 'instance' | 'nullhub';
 export type ReportOption = { value: string; label: string };
@@ -27,8 +53,17 @@ type InstanceStartOptions = {
 type InstanceDeleteOptions = {
   force?: boolean;
 };
-type ObservabilityTarget = {
+type NullWatchTarget = {
   watch?: string;
+};
+export type ImportInstanceRequest = {
+  path?: string;
+  name?: string;
+};
+export type StandaloneInfo = {
+  standalone: boolean;
+  standalone_path?: string;
+  already_imported?: boolean;
 };
 export type ApiRequestError = Error & {
   status?: number;
@@ -59,6 +94,75 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return JSON.parse(text);
 }
 
+export const nullTicketsApi = createNullTicketsApi((c, n, payload) =>
+  request<any>(instanceApiPath(c, n, '/tickets'), {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
+);
+
+export const nullTicketsStoreApi = createNullTicketsStoreApi(request, withQuery);
+
+export const nullWatchApi = {
+  getNullWatchHealth: (params?: NullWatchTarget) =>
+    request<any>(withQuery('/nullwatch/health', { nullhub_watch: params?.watch })),
+  getNullWatchSummary: (params?: NullWatchTarget) =>
+    request<any>(withQuery('/nullwatch/v1/summary', { nullhub_watch: params?.watch })),
+  getNullWatchRuns: (params?: NullWatchTarget & { run_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; verdict?: string; dataset?: string; limit?: number }) =>
+    request<any>(
+      withQuery('/nullwatch/v1/runs', {
+        nullhub_watch: params?.watch,
+        run_id: params?.run_id,
+        source: params?.source,
+        operation: params?.operation,
+        status: params?.status,
+        model: params?.model,
+        tool_name: params?.tool_name,
+        verdict: params?.verdict,
+        dataset: params?.dataset,
+        limit: params?.limit,
+      }),
+    ),
+  getNullWatchRun: (runId: string, params?: NullWatchTarget) =>
+    request<any>(
+      withQuery(`/nullwatch/v1/runs/${encodeURIComponent(runId)}`, {
+        nullhub_watch: params?.watch,
+      }),
+    ),
+  getNullWatchSpans: (params?: NullWatchTarget & { run_id?: string; trace_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; task_id?: string; session_id?: string; agent_id?: string; limit?: number }) =>
+    request<any>(
+      withQuery('/nullwatch/v1/spans', {
+        nullhub_watch: params?.watch,
+        run_id: params?.run_id,
+        trace_id: params?.trace_id,
+        source: params?.source,
+        operation: params?.operation,
+        status: params?.status,
+        model: params?.model,
+        tool_name: params?.tool_name,
+        task_id: params?.task_id,
+        session_id: params?.session_id,
+        agent_id: params?.agent_id,
+        limit: params?.limit,
+      }),
+    ),
+  getNullWatchEvals: (params?: NullWatchTarget & { run_id?: string; verdict?: string; eval_key?: string; scorer?: string; dataset?: string; limit?: number }) =>
+    request<any>(
+      withQuery('/nullwatch/v1/evals', {
+        nullhub_watch: params?.watch,
+        run_id: params?.run_id,
+        verdict: params?.verdict,
+        eval_key: params?.eval_key,
+        scorer: params?.scorer,
+        dataset: params?.dataset,
+        limit: params?.limit,
+      }),
+    ),
+};
+
+export const missionControlApi = createMissionControlApi(request);
+export const nullBoilerApi = createNullBoilerApi(request, withQuery);
+
 export const api = {
   getStatus: () => request<any>('/status'),
   getGlobalUsage: (window: '24h' | '7d' | '30d' | 'all' = '24h') =>
@@ -77,7 +181,7 @@ export const api = {
   postWizard: (component: string, data: any) =>
     request<any>(`/wizard/${component}`, { method: 'POST', body: JSON.stringify(data) }),
   startInstance: (c: string, n: string, modeOrOptions?: string | InstanceStartOptions) =>
-    request<any>(`/instances/${c}/${n}/start`, {
+    request<any>(instanceApiPath(c, n, '/start'), {
       method: 'POST',
       body:
         typeof modeOrOptions === 'string'
@@ -87,38 +191,38 @@ export const api = {
             : undefined
     }),
   stopInstance: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/stop`, { method: 'POST' }),
+    request<any>(instanceApiPath(c, n, '/stop'), { method: 'POST' }),
   restartInstance: (c: string, n: string, options?: InstanceStartOptions) =>
-    request<any>(`/instances/${c}/${n}/restart`, {
+    request<any>(instanceApiPath(c, n, '/restart'), {
       method: 'POST',
       body: options ? JSON.stringify(options) : undefined
     }),
   deleteInstance: (c: string, n: string, options?: InstanceDeleteOptions) =>
-    request<any>(withQuery(`/instances/${c}/${n}`, { force: options?.force ? 1 : undefined }), {
+    request<any>(withQuery(instanceApiPath(c, n), { force: options?.force ? 1 : undefined }), {
       method: 'DELETE'
     }),
-  getConfig: (c: string, n: string) => request<any>(`/instances/${c}/${n}/config`),
+  getConfig: (c: string, n: string) => request<any>(instanceApiPath(c, n, '/config')),
   getProviderHealth: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/provider-health`),
+    request<any>(instanceApiPath(c, n, '/provider-health')),
   getUsage: (c: string, n: string, window: '24h' | '7d' | '30d' | 'all' = '24h') =>
-    request<any>(`/instances/${c}/${n}/usage?window=${window}`),
+    request<any>(withQuery(instanceApiPath(c, n, '/usage'), { window })),
   getHistory: (c: string, n: string, params?: { sessionId?: string; limit?: number; offset?: number }) =>
     request<any>(
-      withQuery(`/instances/${c}/${n}/history`, {
+      withQuery(instanceApiPath(c, n, '/history'), {
         session_id: params?.sessionId,
         limit: params?.limit,
         offset: params?.offset,
       }),
     ),
   getOnboarding: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/onboarding`),
+    request<any>(instanceApiPath(c, n, '/onboarding')),
   getMemory: (
     c: string,
     n: string,
     params?: { stats?: boolean; key?: string; query?: string; category?: string; limit?: number },
   ) =>
     request<any>(
-      withQuery(`/instances/${c}/${n}/memory`, {
+      withQuery(instanceApiPath(c, n, '/memory'), {
         stats: params?.stats ? 1 : undefined,
         key: params?.key,
         query: params?.query,
@@ -127,119 +231,64 @@ export const api = {
       }),
     ),
   getSkills: (c: string, n: string, name?: string) =>
-    request<any>(withQuery(`/instances/${c}/${n}/skills`, { name })),
+    request<any>(withQuery(instanceApiPath(c, n, '/skills'), { name })),
   getSkillCatalog: (c: string, n: string) =>
-    request<any>(withQuery(`/instances/${c}/${n}/skills`, { catalog: 1 })),
+    request<any>(withQuery(instanceApiPath(c, n, '/skills'), { catalog: 1 })),
   installBundledSkill: (c: string, n: string, bundled: string) =>
-    request<any>(`/instances/${c}/${n}/skills`, {
+    request<any>(instanceApiPath(c, n, '/skills'), {
       method: 'POST',
       body: JSON.stringify({ bundled }),
     }),
   installSkillFromClawhub: (c: string, n: string, clawhub_slug: string) =>
-    request<any>(`/instances/${c}/${n}/skills`, {
+    request<any>(instanceApiPath(c, n, '/skills'), {
       method: 'POST',
       body: JSON.stringify({ clawhub_slug }),
     }),
   installSkillFromSource: (c: string, n: string, source: string) =>
-    request<any>(`/instances/${c}/${n}/skills`, {
+    request<any>(instanceApiPath(c, n, '/skills'), {
       method: 'POST',
       body: JSON.stringify({ source }),
     }),
   removeSkill: (c: string, n: string, skillName: string) =>
-    request<any>(withQuery(`/instances/${c}/${n}/skills`, { name: skillName }), {
+    request<any>(withQuery(instanceApiPath(c, n, '/skills'), { name: skillName }), {
       method: 'DELETE',
     }),
   getIntegration: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/integration`),
+    request<any>(instanceApiPath(c, n, '/integration')),
   linkIntegration: (c: string, n: string, payload: any) =>
-    request<any>(`/instances/${c}/${n}/integration`, {
+    request<any>(instanceApiPath(c, n, '/integration'), {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-  ...createNullTicketsApi((c, n, payload) =>
-    request<any>(`/instances/${c}/${n}/tickets`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-  ),
+  ...nullTicketsApi,
+  ...nullTicketsStoreApi,
   putConfig: (c: string, n: string, config: any) =>
-    request<any>(`/instances/${c}/${n}/config`, { method: 'PUT', body: JSON.stringify(config) }),
+    request<any>(instanceApiPath(c, n, '/config'), { method: 'PUT', body: JSON.stringify(config) }),
   getLogs: (c: string, n: string, lines = 100, source: LogSource = 'instance') =>
-    request<any>(withQuery(`/instances/${c}/${n}/logs`, { lines, source })),
+    request<any>(withQuery(instanceApiPath(c, n, '/logs'), { lines, source })),
   clearLogs: (c: string, n: string, source: LogSource = 'instance') =>
-    request<any>(withQuery(`/instances/${c}/${n}/logs`, { source }), { method: 'DELETE' }),
+    request<any>(withQuery(instanceApiPath(c, n, '/logs'), { source }), { method: 'DELETE' }),
   getUpdates: () => request<any>('/updates'),
   getSettings: () => request<any>('/settings'),
   putSettings: (settings: any) =>
     request<any>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
 
   patchConfig: (c: string, n: string, config: any) =>
-    request<any>(`/instances/${c}/${n}/config`, { method: 'PATCH', body: JSON.stringify(config) }),
+    request<any>(instanceApiPath(c, n, '/config'), { method: 'PATCH', body: JSON.stringify(config) }),
 
   patchInstance: (c: string, n: string, settings: any) =>
-    request<any>(`/instances/${c}/${n}`, { method: 'PATCH', body: JSON.stringify(settings) }),
+    request<any>(instanceApiPath(c, n), { method: 'PATCH', body: JSON.stringify(settings) }),
 
-  getComponentManifest: (name: string) => request<any>(`/components/${name}/manifest`),
+  getComponentManifest: (name: string) => request<any>(`/components/${encodePathSegment(name)}/manifest`),
 
   refreshComponents: () => request<any>('/components/refresh', { method: 'POST' }),
 
-  getObservabilityHealth: (params?: ObservabilityTarget) =>
-    request<any>(withQuery('/observability/health', { nullhub_watch: params?.watch })),
-  getObservabilitySummary: (params?: ObservabilityTarget) =>
-    request<any>(withQuery('/observability/v1/summary', { nullhub_watch: params?.watch })),
-  getObservabilityRuns: (params?: ObservabilityTarget & { run_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; verdict?: string; dataset?: string; limit?: number }) =>
-    request<any>(
-      withQuery('/observability/v1/runs', {
-        nullhub_watch: params?.watch,
-        run_id: params?.run_id,
-        source: params?.source,
-        operation: params?.operation,
-        status: params?.status,
-        model: params?.model,
-        tool_name: params?.tool_name,
-        verdict: params?.verdict,
-        dataset: params?.dataset,
-        limit: params?.limit,
-      }),
-    ),
-  getObservabilityRun: (runId: string, params?: ObservabilityTarget) =>
-    request<any>(
-      withQuery(`/observability/v1/runs/${encodeURIComponent(runId)}`, {
-        nullhub_watch: params?.watch,
-      }),
-    ),
-  getObservabilitySpans: (params?: ObservabilityTarget & { run_id?: string; trace_id?: string; source?: string; operation?: string; status?: string; model?: string; tool_name?: string; task_id?: string; session_id?: string; agent_id?: string; limit?: number }) =>
-    request<any>(
-      withQuery('/observability/v1/spans', {
-        nullhub_watch: params?.watch,
-        run_id: params?.run_id,
-        trace_id: params?.trace_id,
-        source: params?.source,
-        operation: params?.operation,
-        status: params?.status,
-        model: params?.model,
-        tool_name: params?.tool_name,
-        task_id: params?.task_id,
-        session_id: params?.session_id,
-        agent_id: params?.agent_id,
-        limit: params?.limit,
-      }),
-    ),
-  getObservabilityEvals: (params?: ObservabilityTarget & { run_id?: string; verdict?: string; eval_key?: string; scorer?: string; dataset?: string; limit?: number }) =>
-    request<any>(
-      withQuery('/observability/v1/evals', {
-        nullhub_watch: params?.watch,
-        run_id: params?.run_id,
-        verdict: params?.verdict,
-        eval_key: params?.eval_key,
-        scorer: params?.scorer,
-        dataset: params?.dataset,
-        limit: params?.limit,
-      }),
-    ),
+  ...nullWatchApi,
+
+  ...missionControlApi,
 
   applyUpdate: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/update`, { method: 'POST' }),
+    request<any>(instanceApiPath(c, n, '/update'), { method: 'POST' }),
 
   serviceInstall: () => request<any>('/service/install', { method: 'POST' }),
 
@@ -247,8 +296,13 @@ export const api = {
 
   serviceStatus: () => request<any>('/service/status'),
 
-  importInstance: (component: string) =>
-    request<any>(`/instances/${component}/import`, { method: 'POST' }),
+  importInstance: (component: string, data?: ImportInstanceRequest) =>
+    request<any>(componentApiPath(component, '/import'), {
+      method: 'POST',
+      body: data ? JSON.stringify(data) : undefined,
+    }),
+  getStandalone: (component: string) =>
+    request<StandaloneInfo>(componentApiPath(component, '/standalone')),
 
   getUiModules: () => request<{ modules: Record<string, string> }>('/ui-modules'),
   getAvailableUiModules: () => request<{ name: string; repo: string; component: string }[]>('/ui-modules/available'),
@@ -309,5 +363,5 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  ...createOrchestrationApi(request, withQuery),
+  ...nullBoilerApi,
 };
