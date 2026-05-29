@@ -1,7 +1,7 @@
 import { createNullBoilerApi } from '$lib/api/nullboiler';
 import { createMissionControlApi } from '$lib/api/missionControl';
 import { createNullTicketsApi, createNullTicketsStoreApi } from '$lib/api/nulltickets';
-import { encodePathSegment } from '$lib/nullstack/path';
+import { componentApiPath, encodePathSegment, instanceApiPath } from '$lib/nullstack/path';
 
 const BASE = '/api';
 
@@ -95,7 +95,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const nullTicketsApi = createNullTicketsApi((c, n, payload) =>
-  request<any>(`/instances/${c}/${n}/tickets`, {
+  request<any>(instanceApiPath(c, n, '/tickets'), {
     method: 'POST',
     body: JSON.stringify(payload),
   }),
@@ -181,7 +181,7 @@ export const api = {
   postWizard: (component: string, data: any) =>
     request<any>(`/wizard/${component}`, { method: 'POST', body: JSON.stringify(data) }),
   startInstance: (c: string, n: string, modeOrOptions?: string | InstanceStartOptions) =>
-    request<any>(`/instances/${c}/${n}/start`, {
+    request<any>(instanceApiPath(c, n, '/start'), {
       method: 'POST',
       body:
         typeof modeOrOptions === 'string'
@@ -191,38 +191,38 @@ export const api = {
             : undefined
     }),
   stopInstance: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/stop`, { method: 'POST' }),
+    request<any>(instanceApiPath(c, n, '/stop'), { method: 'POST' }),
   restartInstance: (c: string, n: string, options?: InstanceStartOptions) =>
-    request<any>(`/instances/${c}/${n}/restart`, {
+    request<any>(instanceApiPath(c, n, '/restart'), {
       method: 'POST',
       body: options ? JSON.stringify(options) : undefined
     }),
   deleteInstance: (c: string, n: string, options?: InstanceDeleteOptions) =>
-    request<any>(withQuery(`/instances/${c}/${n}`, { force: options?.force ? 1 : undefined }), {
+    request<any>(withQuery(instanceApiPath(c, n), { force: options?.force ? 1 : undefined }), {
       method: 'DELETE'
     }),
-  getConfig: (c: string, n: string) => request<any>(`/instances/${c}/${n}/config`),
+  getConfig: (c: string, n: string) => request<any>(instanceApiPath(c, n, '/config')),
   getProviderHealth: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/provider-health`),
+    request<any>(instanceApiPath(c, n, '/provider-health')),
   getUsage: (c: string, n: string, window: '24h' | '7d' | '30d' | 'all' = '24h') =>
-    request<any>(`/instances/${c}/${n}/usage?window=${window}`),
+    request<any>(withQuery(instanceApiPath(c, n, '/usage'), { window })),
   getHistory: (c: string, n: string, params?: { sessionId?: string; limit?: number; offset?: number }) =>
     request<any>(
-      withQuery(`/instances/${c}/${n}/history`, {
+      withQuery(instanceApiPath(c, n, '/history'), {
         session_id: params?.sessionId,
         limit: params?.limit,
         offset: params?.offset,
       }),
     ),
   getOnboarding: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/onboarding`),
+    request<any>(instanceApiPath(c, n, '/onboarding')),
   getMemory: (
     c: string,
     n: string,
     params?: { stats?: boolean; key?: string; query?: string; category?: string; limit?: number },
   ) =>
     request<any>(
-      withQuery(`/instances/${c}/${n}/memory`, {
+      withQuery(instanceApiPath(c, n, '/memory'), {
         stats: params?.stats ? 1 : undefined,
         key: params?.key,
         query: params?.query,
@@ -231,55 +231,55 @@ export const api = {
       }),
     ),
   getSkills: (c: string, n: string, name?: string) =>
-    request<any>(withQuery(`/instances/${c}/${n}/skills`, { name })),
+    request<any>(withQuery(instanceApiPath(c, n, '/skills'), { name })),
   getSkillCatalog: (c: string, n: string) =>
-    request<any>(withQuery(`/instances/${c}/${n}/skills`, { catalog: 1 })),
+    request<any>(withQuery(instanceApiPath(c, n, '/skills'), { catalog: 1 })),
   installBundledSkill: (c: string, n: string, bundled: string) =>
-    request<any>(`/instances/${c}/${n}/skills`, {
+    request<any>(instanceApiPath(c, n, '/skills'), {
       method: 'POST',
       body: JSON.stringify({ bundled }),
     }),
   installSkillFromClawhub: (c: string, n: string, clawhub_slug: string) =>
-    request<any>(`/instances/${c}/${n}/skills`, {
+    request<any>(instanceApiPath(c, n, '/skills'), {
       method: 'POST',
       body: JSON.stringify({ clawhub_slug }),
     }),
   installSkillFromSource: (c: string, n: string, source: string) =>
-    request<any>(`/instances/${c}/${n}/skills`, {
+    request<any>(instanceApiPath(c, n, '/skills'), {
       method: 'POST',
       body: JSON.stringify({ source }),
     }),
   removeSkill: (c: string, n: string, skillName: string) =>
-    request<any>(withQuery(`/instances/${c}/${n}/skills`, { name: skillName }), {
+    request<any>(withQuery(instanceApiPath(c, n, '/skills'), { name: skillName }), {
       method: 'DELETE',
     }),
   getIntegration: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/integration`),
+    request<any>(instanceApiPath(c, n, '/integration')),
   linkIntegration: (c: string, n: string, payload: any) =>
-    request<any>(`/instances/${c}/${n}/integration`, {
+    request<any>(instanceApiPath(c, n, '/integration'), {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
   ...nullTicketsApi,
   ...nullTicketsStoreApi,
   putConfig: (c: string, n: string, config: any) =>
-    request<any>(`/instances/${c}/${n}/config`, { method: 'PUT', body: JSON.stringify(config) }),
+    request<any>(instanceApiPath(c, n, '/config'), { method: 'PUT', body: JSON.stringify(config) }),
   getLogs: (c: string, n: string, lines = 100, source: LogSource = 'instance') =>
-    request<any>(withQuery(`/instances/${c}/${n}/logs`, { lines, source })),
+    request<any>(withQuery(instanceApiPath(c, n, '/logs'), { lines, source })),
   clearLogs: (c: string, n: string, source: LogSource = 'instance') =>
-    request<any>(withQuery(`/instances/${c}/${n}/logs`, { source }), { method: 'DELETE' }),
+    request<any>(withQuery(instanceApiPath(c, n, '/logs'), { source }), { method: 'DELETE' }),
   getUpdates: () => request<any>('/updates'),
   getSettings: () => request<any>('/settings'),
   putSettings: (settings: any) =>
     request<any>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
 
   patchConfig: (c: string, n: string, config: any) =>
-    request<any>(`/instances/${c}/${n}/config`, { method: 'PATCH', body: JSON.stringify(config) }),
+    request<any>(instanceApiPath(c, n, '/config'), { method: 'PATCH', body: JSON.stringify(config) }),
 
   patchInstance: (c: string, n: string, settings: any) =>
-    request<any>(`/instances/${c}/${n}`, { method: 'PATCH', body: JSON.stringify(settings) }),
+    request<any>(instanceApiPath(c, n), { method: 'PATCH', body: JSON.stringify(settings) }),
 
-  getComponentManifest: (name: string) => request<any>(`/components/${name}/manifest`),
+  getComponentManifest: (name: string) => request<any>(`/components/${encodePathSegment(name)}/manifest`),
 
   refreshComponents: () => request<any>('/components/refresh', { method: 'POST' }),
 
@@ -288,7 +288,7 @@ export const api = {
   ...missionControlApi,
 
   applyUpdate: (c: string, n: string) =>
-    request<any>(`/instances/${c}/${n}/update`, { method: 'POST' }),
+    request<any>(instanceApiPath(c, n, '/update'), { method: 'POST' }),
 
   serviceInstall: () => request<any>('/service/install', { method: 'POST' }),
 
@@ -297,12 +297,12 @@ export const api = {
   serviceStatus: () => request<any>('/service/status'),
 
   importInstance: (component: string, data?: ImportInstanceRequest) =>
-    request<any>(`/instances/${component}/import`, {
+    request<any>(componentApiPath(component, '/import'), {
       method: 'POST',
       body: data ? JSON.stringify(data) : undefined,
     }),
   getStandalone: (component: string) =>
-    request<StandaloneInfo>(`/instances/${component}/standalone`),
+    request<StandaloneInfo>(componentApiPath(component, '/standalone')),
 
   getUiModules: () => request<{ modules: Record<string, string> }>('/ui-modules'),
   getAvailableUiModules: () => request<{ name: string; repo: string; component: string }[]>('/ui-modules/available'),

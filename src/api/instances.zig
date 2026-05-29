@@ -27,6 +27,7 @@ const jsonOk = helpers.jsonOk;
 const notFound = helpers.notFound;
 const badRequest = helpers.badRequest;
 const methodNotAllowed = helpers.methodNotAllowed;
+const imported_standalone_storage_mode = "imported-standalone";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,8 @@ fn persistStartVersion(
         .auto_start = entry.auto_start,
         .launch_mode = entry.launch_mode,
         .verbose = entry.verbose,
+        .storage_mode = entry.storage_mode,
+        .source_path = entry.source_path,
     });
     if (!updated) return error.StateError;
     s.save() catch return error.StateError;
@@ -2294,6 +2297,16 @@ fn appendInstanceJson(buf: *std.array_list.Managed(u8), entry: state_mod.Instanc
     try buf.appendSlice(",\"status\":\"");
     try buf.appendSlice(status_str);
     try buf.append('"');
+    if (entry.storage_mode.len > 0) {
+        try buf.appendSlice(",\"storage_mode\":\"");
+        try appendEscaped(buf, entry.storage_mode);
+        try buf.append('"');
+    }
+    if (entry.source_path.len > 0) {
+        try buf.appendSlice(",\"source_path\":\"");
+        try appendEscaped(buf, entry.source_path);
+        try buf.append('"');
+    }
 
     if (snapshot.pid) |pid| {
         try buf.appendSlice(",\"pid\":");
@@ -2480,6 +2493,8 @@ pub fn handleStart(allocator: std.mem.Allocator, s: *state_mod.State, manager: *
                     .auto_start = entry.auto_start,
                     .launch_mode = launch_cmd,
                     .verbose = entry.verbose,
+                    .storage_mode = entry.storage_mode,
+                    .source_path = entry.source_path,
                 }) catch {};
                 s.save() catch {};
             }
@@ -3848,6 +3863,8 @@ fn restoreDeletedInstance(
     rollback_auto_start: bool,
     rollback_launch_mode: []const u8,
     rollback_verbose: bool,
+    rollback_storage_mode: []const u8,
+    rollback_source_path: []const u8,
     inst_dir: []const u8,
     hidden_inst_dir: ?[]const u8,
 ) void {
@@ -3856,6 +3873,8 @@ fn restoreDeletedInstance(
         .auto_start = rollback_auto_start,
         .launch_mode = rollback_launch_mode,
         .verbose = rollback_verbose,
+        .storage_mode = rollback_storage_mode,
+        .source_path = rollback_source_path,
     }) catch {};
     _ = s.save() catch {};
     if (hidden_inst_dir) |path| {
@@ -3880,6 +3899,16 @@ pub fn handleDelete(
     const rollback_launch_mode = allocator.dupe(u8, existing.launch_mode) catch return helpers.serverError();
     defer allocator.free(rollback_launch_mode);
     const rollback_verbose = existing.verbose;
+    const rollback_storage_mode = if (existing.storage_mode.len > 0)
+        allocator.dupe(u8, existing.storage_mode) catch return helpers.serverError()
+    else
+        "";
+    defer if (rollback_storage_mode.len > 0) allocator.free(rollback_storage_mode);
+    const rollback_source_path = if (existing.source_path.len > 0)
+        allocator.dupe(u8, existing.source_path) catch return helpers.serverError()
+    else
+        "";
+    defer if (rollback_source_path.len > 0) allocator.free(rollback_source_path);
 
     var delete_impact = collectDeleteImpact(allocator, s, paths, component, name) catch return helpers.serverError();
     defer delete_impact.deinit(allocator);
@@ -3902,13 +3931,13 @@ pub fn handleDelete(
         return notFound();
     }
     s.save() catch {
-        restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, inst_dir, hidden_inst_dir);
+        restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, rollback_storage_mode, rollback_source_path, inst_dir, hidden_inst_dir);
         return helpers.serverError();
     };
 
     if (delete_impact.dependents.items.items.len > 0) {
         unlinkDeleteImpact(allocator, paths, component, delete_impact) catch {
-            restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, inst_dir, hidden_inst_dir);
+            restoreDeletedInstance(s, component, name, rollback_version, rollback_auto_start, rollback_launch_mode, rollback_verbose, rollback_storage_mode, rollback_source_path, inst_dir, hidden_inst_dir);
             _ = s.save() catch {};
             return helpers.serverError();
         };
@@ -4108,11 +4137,24 @@ fn deinitParsedImportConfig(allocator: std.mem.Allocator, cfg: ParsedImportConfi
 fn isFilesystemSafeImportName(name: []const u8) bool {
     if (name.len == 0) return false;
     if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    if (std.mem.eql(u8, name, "import") or std.mem.eql(u8, name, "standalone")) return false;
     if (std.mem.indexOfScalar(u8, name, 0) != null) return false;
-    if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
-    if (std.mem.indexOfScalar(u8, name, '\\') != null) return false;
+    for (name) |ch| {
+        const safe = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.';
+        if (!safe) return false;
+    }
     if (std.mem.indexOf(u8, name, "..") != null) return false;
     return true;
+}
+
+fn parseLocalImportOrdinal(name: []const u8) ?usize {
+    const prefixes = [_][]const u8{ "local-import-", "Local Import #" };
+    inline for (prefixes) |prefix| {
+        if (std.mem.startsWith(u8, name, prefix)) {
+            return std.fmt.parseUnsigned(usize, name[prefix.len..], 10) catch null;
+        }
+    }
+    return null;
 }
 
 fn nextLocalImportName(allocator: std.mem.Allocator, s: *state_mod.State, component: []const u8) ![]u8 {
@@ -4122,14 +4164,12 @@ fn nextLocalImportName(allocator: std.mem.Allocator, s: *state_mod.State, compon
     var next_number: usize = 1;
     if (names) |owned_names| {
         for (owned_names) |existing_name| {
-            if (!std.mem.startsWith(u8, existing_name, "Local Import #")) continue;
-            const suffix = existing_name["Local Import #".len..];
-            const n = std.fmt.parseUnsigned(usize, suffix, 10) catch continue;
+            const n = parseLocalImportOrdinal(existing_name) orelse continue;
             if (n >= next_number) next_number = n + 1;
         }
     }
 
-    return std.fmt.allocPrint(allocator, "Local Import #{d}", .{next_number});
+    return std.fmt.allocPrint(allocator, "local-import-{d}", .{next_number});
 }
 
 fn resolveImportInstanceName(
@@ -4141,6 +4181,7 @@ fn resolveImportInstanceName(
 ) ![]u8 {
     if (req.name.len > 0) return allocator.dupe(u8, req.name);
     if (cfg.instance_name) |name| return allocator.dupe(u8, name);
+    if (req.path.len == 0) return allocator.dupe(u8, "default");
     return nextLocalImportName(allocator, s, component);
 }
 
@@ -4173,7 +4214,6 @@ fn hasStandaloneInstallAtPath(allocator: std.mem.Allocator, source_dir: []const 
 fn isStandaloneImported(
     allocator: std.mem.Allocator,
     s: *state_mod.State,
-    paths: paths_mod.Paths,
     component: []const u8,
     standalone_dir: []const u8,
 ) bool {
@@ -4185,12 +4225,13 @@ fn isStandaloneImported(
 
     if (names) |owned_names| {
         for (owned_names) |name| {
-            const inst_dir = paths.instanceDir(allocator, component, name) catch continue;
-            defer allocator.free(inst_dir);
+            const entry = s.getInstance(component, name) orelse continue;
+            if (!std.mem.eql(u8, entry.storage_mode, imported_standalone_storage_mode)) continue;
+            if (entry.source_path.len == 0) continue;
 
-            const real_inst_dir = std_compat.fs.realpathAlloc(allocator, inst_dir) catch continue;
-            defer allocator.free(real_inst_dir);
-            if (std.mem.eql(u8, real_inst_dir, real_standalone_dir)) return true;
+            const real_source_dir = std_compat.fs.realpathAlloc(allocator, entry.source_path) catch continue;
+            defer allocator.free(real_source_dir);
+            if (std.mem.eql(u8, real_source_dir, real_standalone_dir)) return true;
         }
     }
 
@@ -4215,6 +4256,7 @@ fn buildStandaloneResponse(
 }
 
 pub fn handleStandalone(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8) ApiResponse {
+    _ = paths;
     const home = std_compat.process.getEnvVarOwned(allocator, "HOME") catch blk: {
         if (builtin.os.tag == .windows) {
             break :blk std_compat.process.getEnvVarOwned(allocator, "USERPROFILE") catch return helpers.serverError();
@@ -4231,14 +4273,14 @@ pub fn handleStandalone(allocator: std.mem.Allocator, s: *state_mod.State, paths
         return jsonOk(body);
     }
 
-    const already_imported = isStandaloneImported(allocator, s, paths, component, standalone_dir);
+    const already_imported = isStandaloneImported(allocator, s, component, standalone_dir);
     const body = buildStandaloneResponse(allocator, standalone_dir, already_imported) catch return helpers.serverError();
     return jsonOk(body);
 }
 
 /// POST /api/instances/{component}/import — import a standalone installation.
-/// Copies config and data from ~/.{component}/ into the nullhub instance directory.
-/// A runnable binary is staged during import so the managed instance can start.
+/// Links the external standalone home into NullHub state without taking ownership
+/// of its files. A runnable binary is staged so the managed instance can start.
 pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: paths_mod.Paths, component: []const u8, body: []const u8) ApiResponse {
     const req = loadImportRequest(allocator, body) catch return badRequest("{\"error\":\"invalid JSON body\"}");
     defer deinitImportRequest(allocator, req);
@@ -4305,6 +4347,8 @@ pub fn handleImport(allocator: std.mem.Allocator, s: *state_mod.State, paths: pa
         .auto_start = false,
         .launch_mode = defaultLaunchModeForComponent(component),
         .verbose = false,
+        .storage_mode = imported_standalone_storage_mode,
+        .source_path = source_dir,
     }) catch {
         std_compat.fs.deleteFileAbsolute(inst_dir) catch {};
         return helpers.serverError();
@@ -4349,6 +4393,8 @@ pub fn handlePatch(s: *state_mod.State, component: []const u8, name: []const u8,
         .auto_start = new_auto_start,
         .launch_mode = new_launch_mode,
         .verbose = new_verbose,
+        .storage_mode = entry.storage_mode,
+        .source_path = entry.source_path,
     }) catch return .{
         .status = "500 Internal Server Error",
         .content_type = "application/json",
@@ -5270,6 +5316,8 @@ test "handleImport with custom path imports and registers instance" {
     const entry = s.getInstance("nullclaw", "review-bot").?;
     try std.testing.expectEqualStrings(local_binary.dev_local_version, entry.version);
     try std.testing.expect(!entry.auto_start);
+    try std.testing.expectEqualStrings(imported_standalone_storage_mode, entry.storage_mode);
+    try std.testing.expectEqualStrings(source_dir, entry.source_path);
 
     const inst_dir = try mctx.paths.instanceDir(allocator, "nullclaw", "review-bot");
     defer allocator.free(inst_dir);
@@ -5353,6 +5401,7 @@ test "handleImport auto generates local import name when config lacks one" {
     defer mctx.deinit(allocator);
 
     try s.addInstance("nullclaw", "Local Import #1", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "local-import-2", .{ .version = "1.0.0" });
 
     const source_dir = try createStandaloneImportSource(allocator, state_fixture, "generated-name", "{\"gateway\":{\"port\":3000}}\n");
     defer allocator.free(source_dir);
@@ -5364,8 +5413,8 @@ test "handleImport auto generates local import name when config lacks one" {
 
     try std.testing.expectEqualStrings("200 OK", resp.status);
     const parsed = try parseImportResponse(allocator, resp.body);
-    try std.testing.expectEqualStrings("Local Import #2", parsed.instance);
-    try std.testing.expect(s.getInstance("nullclaw", "Local Import #2") != null);
+    try std.testing.expectEqualStrings("local-import-3", parsed.instance);
+    try std.testing.expect(s.getInstance("nullclaw", "local-import-3") != null);
 }
 
 test "handleImport returns error for missing path" {
@@ -5475,6 +5524,28 @@ test "handleImport returns error for invalid instance name" {
     defer allocator.free(resp.body);
     try std.testing.expectEqualStrings("400 Bad Request", resp.status);
     try std.testing.expectEqualStrings("{\"error\":\"invalid or duplicate instance name: ../bad\"}", resp.body);
+}
+
+test "handleImport rejects route-reserved instance names" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    const source_dir = try createStandaloneImportSource(allocator, state_fixture, "reserved-name", "{\"gateway\":{\"port\":3000}}\n");
+    defer allocator.free(source_dir);
+    const body = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}\",\"name\":\"standalone\"}}", .{source_dir});
+    defer allocator.free(body);
+
+    const resp = handleImport(allocator, &s, mctx.paths, "nullclaw", body);
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"invalid or duplicate instance name: standalone\"}", resp.body);
 }
 
 test "handleStandalone returns standalone false when default install is missing" {

@@ -4,7 +4,7 @@
   import { api } from "$lib/api/client";
   import { nullboilerUiRoutes } from "$lib/nullboiler/routes";
   import { nullticketsUiRoutes } from "$lib/nulltickets/routes";
-  import { routePath } from "$lib/nullstack/path";
+  import { instanceRoute, routePath } from "$lib/nullstack/path";
   import {
     BOILER_INSTANCE_CHANGE_EVENT,
     TICKETS_INSTANCE_CHANGE_EVENT,
@@ -39,7 +39,7 @@
 
   function componentEntryHref(component: string): string {
     const names = Object.keys(instances[component] || {}).sort();
-    return names[0] ? `/instances/${component}/${encodeURIComponent(names[0])}` : `/install/${component}`;
+    return names[0] ? instanceRoute(component, names[0]) : `/install/${component}`;
   }
 
   async function loadSidebarState() {
@@ -110,8 +110,8 @@
         <span class="component-name">{component}</span>
         {#each Object.entries(items as Record<string, any>) as [name, info]}
           <a
-            href="/instances/{component}/{name}"
-            class:active={currentPath === `/instances/${component}/${name}`}
+            href={instanceRoute(component, name)}
+            class:active={currentPath === instanceRoute(component, name)}
           >
             <span class="status-dot" class:running={info.status === "running"}
             ></span>

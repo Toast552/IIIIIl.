@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { encodePathSegment } from "$lib/nullstack/path";
+
   let {
     name = "",
     displayName = "",
@@ -12,6 +14,7 @@
     onImportExisting = (_component: string) => {},
   } = $props();
   let comingSoon = $derived(!installable && !installed && !standalone);
+  let installHref = $derived(`/install/${encodePathSegment(name)}`);
 
   function handleImport(e: MouseEvent) {
     e.preventDefault();
@@ -32,15 +35,17 @@
   <p>{description}</p>
 </div>
 {:else}
-<a href="/install/{name}" class="component-card">
+<div class="component-card">
   <div class="card-header">
-    <h3>{displayName}</h3>
+    <a class="card-title-link" href={installHref}>
+      <h3>{displayName}</h3>
+    </a>
     <div class="card-actions">
       {#if alpha}
         <span class="alpha-badge">&lt;Alpha&gt;</span>
       {/if}
       {#if standalone}
-        <button class="import-btn" onclick={handleImport}>
+        <button type="button" class="import-btn" onclick={handleImport}>
           {importLabel}
         </button>
       {:else if installed}
@@ -50,8 +55,10 @@
       {/if}
     </div>
   </div>
-  <p>{description}</p>
-</a>
+  <a class="card-description-link" href={installHref}>
+    <p>{description}</p>
+  </a>
+</div>
 {/if}
 
 <style>
@@ -67,11 +74,15 @@
   }
 
   .component-card:hover:not(.disabled) {
-    text-decoration: none;
     background: var(--bg-hover);
     border-color: var(--accent);
     box-shadow: 0 0 15px var(--border-glow);
     transform: translateY(-2px);
+  }
+
+  .component-card:focus-within:not(.disabled) {
+    border-color: var(--accent);
+    box-shadow: 0 0 15px var(--border-glow);
   }
 
   .component-card.disabled {
@@ -102,6 +113,16 @@
     letter-spacing: 2px;
     color: var(--accent);
     text-shadow: var(--text-glow);
+  }
+
+  .card-title-link,
+  .card-description-link {
+    color: inherit;
+  }
+
+  .card-title-link:hover,
+  .card-description-link:hover {
+    text-decoration: none;
   }
 
   .installed-badge {

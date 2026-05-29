@@ -2,6 +2,18 @@ export function encodePathSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
+export function instanceRoute(component: string, name: string): string {
+  return `/instances/${encodePathSegment(component)}/${encodePathSegment(name)}`;
+}
+
+export function instanceApiPath(component: string, name: string, suffix = ""): string {
+  return `/instances/${encodePathSegment(component)}/${encodePathSegment(name)}${suffix}`;
+}
+
+export function componentApiPath(component: string, suffix = ""): string {
+  return `/instances/${encodePathSegment(component)}${suffix}`;
+}
+
 export function routePath(path: string): string {
   const queryIndex = path.search(/[?#]/);
   return queryIndex >= 0 ? path.slice(0, queryIndex) : path;

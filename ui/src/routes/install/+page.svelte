@@ -6,32 +6,36 @@
 
   let components = $state<any[]>([]);
   let standalone = $state<StandaloneInfo | null>(null);
+  let selectedExistingComponent = $state("nullclaw");
+  let selectedExistingDisplayName = $state("NullClaw");
   let dialogOpen = $state(false);
   let dialogError = $state("");
   let dialogImporting = $state(false);
 
   async function loadPageData() {
     try {
-      const [data, standaloneInfo] = await Promise.all([
-        api.getComponents(),
-        api.getStandalone("nullclaw").catch(() => null),
-      ]);
+      const data = await api.getComponents();
       components = data.components || [];
-      standalone = standaloneInfo;
     } catch (e) {
       console.error(e);
     }
   }
 
+  function componentDisplayName(component: string) {
+    return components.find((entry) => entry.name === component)?.display_name || component;
+  }
+
   async function openExistingDialog(component: string) {
-    if (component !== "nullclaw") return;
+    selectedExistingComponent = component;
+    selectedExistingDisplayName = componentDisplayName(component);
+    standalone = null;
     dialogError = "";
-    dialogOpen = true;
     try {
-      standalone = await api.getStandalone("nullclaw");
+      standalone = await api.getStandalone(component);
     } catch (e) {
       console.error(e);
     }
+    dialogOpen = true;
   }
 
   function closeDialog() {
@@ -44,7 +48,7 @@
     dialogImporting = true;
     dialogError = "";
     try {
-      await api.importInstance("nullclaw", payload);
+      await api.importInstance(selectedExistingComponent, payload);
       dialogOpen = false;
       await loadPageData();
     } catch (e) {
@@ -77,9 +81,9 @@
         alpha={Boolean(comp.alpha)}
         installable={comp.installable !== false}
         installed={comp.installed}
-        standalone={comp.name === "nullclaw" ? comp.standalone : false}
+        standalone={Boolean(comp.standalone)}
         instanceCount={comp.instance_count}
-        importLabel={comp.name === "nullclaw" ? "Add Existing" : "Import"}
+        importLabel="Add Existing"
         onImportExisting={openExistingDialog}
       />
     {/each}
@@ -88,6 +92,8 @@
 
 <AddExistingDialog
   open={dialogOpen}
+  component={selectedExistingComponent}
+  displayName={selectedExistingDisplayName}
   {standalone}
   importing={dialogImporting}
   error={dialogError}

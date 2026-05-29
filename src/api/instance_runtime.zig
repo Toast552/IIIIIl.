@@ -7,6 +7,7 @@ const paths_mod = @import("../core/paths.zig");
 const health_mod = @import("../supervisor/health.zig");
 const registry = @import("../installer/registry.zig");
 const test_helpers = @import("../test_helpers.zig");
+const imported_standalone_storage_mode = "imported-standalone";
 
 pub const Snapshot = struct {
     status: manager_mod.Status,
@@ -104,21 +105,13 @@ fn normalizeHealthHost(allocator: std.mem.Allocator, host: []const u8) ![]u8 {
 }
 
 fn isImportedStandalone(
-    allocator: std.mem.Allocator,
-    paths: paths_mod.Paths,
     component: []const u8,
-    name: []const u8,
     entry: state_mod.InstanceEntry,
 ) bool {
     const known = registry.findKnownComponent(component) orelse return false;
     if (standalonePortConfigKey(component) == null) return false;
     if (!isStandaloneLaunchMode(component, entry.launch_mode, known.default_launch_command)) return false;
-
-    const inst_dir = paths.instanceDir(allocator, component, name) catch return false;
-    defer allocator.free(inst_dir);
-    var link_buf: [std_compat.fs.max_path_bytes]u8 = undefined;
-    _ = std.Io.Dir.readLinkAbsolute(std_compat.io(), inst_dir, &link_buf) catch return false;
-    return true;
+    return std.mem.eql(u8, entry.storage_mode, imported_standalone_storage_mode) and entry.source_path.len > 0;
 }
 
 fn standalonePortConfigKey(component: []const u8) ?[]const u8 {
@@ -166,7 +159,7 @@ fn deriveImportedStandaloneSnapshot(
     entry: state_mod.InstanceEntry,
     manager_snapshot: ?Snapshot,
 ) ?Snapshot {
-    if (!isImportedStandalone(allocator, paths, component, name, entry)) return null;
+    if (!isImportedStandalone(component, entry)) return null;
 
     const known = registry.findKnownComponent(component) orelse return null;
     const port_key = standalonePortConfigKey(component) orelse return null;
@@ -314,6 +307,8 @@ test "resolve treats custom-path imported standalone as running when health pass
         .auto_start = false,
         .launch_mode = "gateway",
         .verbose = false,
+        .storage_mode = imported_standalone_storage_mode,
+        .source_path = source_dir,
     });
 
     try std.testing.expectEqual(manager_mod.Status.running, snapshot.status);
