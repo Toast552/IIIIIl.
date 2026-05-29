@@ -31,6 +31,7 @@ const nulltickets_api = @import("api/nulltickets.zig");
 const nullwatch_api = @import("api/nullwatch.zig");
 const mission_control_api = @import("api/mission_control.zig");
 const mission_core = @import("core/mission_control.zig");
+const nullclaw_gateway_config = @import("core/nullclaw_gateway_config.zig");
 const launch_args_mod = @import("core/launch_args.zig");
 const ui_modules = @import("installer/ui_modules.zig");
 const orchestrator = @import("installer/orchestrator.zig");
@@ -40,7 +41,7 @@ const version = @import("version.zig");
 const test_helpers = @import("test_helpers.zig");
 
 const default_max_request_size: usize = 64 * 1024;
-const gateway_max_request_size: usize = 25 * 1024 * 1024;
+const gateway_max_request_size: usize = @as(usize, @intCast(nullclaw_gateway_config.min_body_size));
 const initial_request_buffer_size: usize = 64 * 1024;
 const mission_workflow_evidence_ttl_ms: i64 = 5000;
 const mission_workflow_scan_limit: usize = 50;
@@ -3366,7 +3367,8 @@ test "contentType returns correct MIME type for .html" {
 test "initial request buffer stays small while media body limit remains high" {
     try std.testing.expect(initial_request_buffer_size <= 128 * 1024);
     try std.testing.expect(default_max_request_size <= 128 * 1024);
-    try std.testing.expect(gateway_max_request_size >= 25 * 1024 * 1024);
+    try std.testing.expect(gateway_max_request_size >= 64 * 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, @intCast(nullclaw_gateway_config.min_body_size)), gateway_max_request_size);
     try std.testing.expectEqual(default_max_request_size, maxRequestBodySize("/api/status"));
     try std.testing.expectEqual(gateway_max_request_size, maxRequestBodySize("/api/instances/nullclaw/demo/a2a"));
 }
