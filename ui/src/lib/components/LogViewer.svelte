@@ -137,7 +137,7 @@
     font-family: var(--font-mono);
     text-transform: uppercase;
     letter-spacing: 0.8px;
-    transition: all 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease, transform 0.15s ease, text-shadow 0.15s ease;
   }
   .source-btn:hover {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -191,7 +191,7 @@
     font-family: var(--font-mono);
     text-transform: uppercase;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .clear-btn:hover {
     background: color-mix(in srgb, var(--accent) 20%, transparent);

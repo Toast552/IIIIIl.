@@ -1570,7 +1570,6 @@
   .field input:focus,
   .field select:focus,
   .field textarea:focus {
-    outline: none;
     border-color: var(--accent);
   }
   .btn {

@@ -580,7 +580,7 @@
     color: var(--fg-dim);
     cursor: pointer;
     padding: 0.25rem 0;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .step-dot:disabled { cursor: default; }
@@ -608,7 +608,7 @@
     font-size: 0.75rem;
     font-weight: 700;
     font-family: var(--font-mono);
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .step-label {
@@ -616,7 +616,7 @@
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 1px;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
 
   .step-line {
@@ -624,7 +624,7 @@
     height: 1px;
     background: var(--border);
     margin: 0 0.75rem;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
   }
   .step-line.completed { background: var(--accent); box-shadow: 0 0 4px var(--border-glow); }
 
@@ -658,8 +658,7 @@
     color: var(--fg);
     font-size: 0.875rem;
     font-family: var(--font-mono);
-    outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
   }
 
@@ -689,8 +688,7 @@
     color: var(--fg);
     font-size: 0.875rem;
     font-family: var(--font-mono);
-    outline: none;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
     cursor: pointer;
   }
@@ -721,7 +719,7 @@
     letter-spacing: 1px;
     cursor: pointer;
     width: 100%;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     margin-top: 1rem;
   }
   .advanced-toggle:hover {
@@ -792,7 +790,7 @@
     font-size: 0.875rem;
     font-weight: 700;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-transform: uppercase;
     letter-spacing: 2px;
     text-shadow: var(--text-glow);
@@ -824,7 +822,7 @@
     font-size: 0.875rem;
     font-weight: 700;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-transform: uppercase;
     letter-spacing: 2px;
   }

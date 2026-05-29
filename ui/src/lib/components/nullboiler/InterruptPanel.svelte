@@ -30,9 +30,9 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<div class="overlay" role="button" tabindex="-1" onclick={reject}>
-  <div class="panel" role="dialog" aria-label="Run interrupted" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === 'Escape') reject(); }}>
+<div class="overlay">
+  <button type="button" class="backdrop" aria-label="Close dialog" onclick={reject}></button>
+  <div class="panel" role="dialog" aria-modal="true" aria-label="Run interrupted" tabindex="-1" onkeydown={(e) => { if (e.key === 'Escape') reject(); }}>
     <div class="panel-header">
       <span class="panel-title">Run Interrupted</span>
     </div>
@@ -70,20 +70,34 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 100;
+  }
+  .backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
     backdrop-filter: blur(2px);
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+  }
+  .backdrop:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -4px;
   }
   .panel {
+    position: relative;
     background: var(--bg-surface);
     border: 1px solid var(--warning);
     border-radius: 4px;
     width: 90%;
     max-width: 520px;
     box-shadow: 0 0 30px color-mix(in srgb, var(--warning) 20%, transparent);
+    overscroll-behavior: contain;
   }
   .panel-header {
     padding: 1rem 1.25rem;
@@ -145,9 +159,10 @@
     font-size: 0.8125rem;
     line-height: 1.5;
     resize: vertical;
-    outline: none;
   }
-  .state-editor:focus {
+  .state-editor:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
     border-color: var(--accent-dim);
     box-shadow: 0 0 6px var(--border-glow);
   }
@@ -175,7 +190,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, text-shadow 0.2s ease;
   }
   .btn-reject {
     background: color-mix(in srgb, var(--error) 10%, transparent);

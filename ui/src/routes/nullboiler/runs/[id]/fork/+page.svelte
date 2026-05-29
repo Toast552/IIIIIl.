@@ -202,7 +202,7 @@
     text-transform: uppercase;
     letter-spacing: 1px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
     text-shadow: var(--text-glow);
   }
   .fork-btn:hover:not(:disabled) {
@@ -273,7 +273,6 @@
     font-size: 0.8125rem;
     line-height: 1.5;
     resize: vertical;
-    outline: none;
   }
   .override-editor:focus {
     border-color: var(--accent-dim);
