@@ -8,19 +8,10 @@
     alpha = false,
     installable = true,
     installed = false,
-    standalone = false,
     instanceCount = 0,
-    importLabel = "Import",
-    onImportExisting = (_component: string) => {},
   } = $props();
-  let comingSoon = $derived(!installable && !installed && !standalone);
+  let comingSoon = $derived(!installable && !installed);
   let installHref = $derived(`/install/${encodePathSegment(name)}`);
-
-  function handleImport(e: MouseEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    onImportExisting(name);
-  }
 </script>
 
 {#if comingSoon}
@@ -44,11 +35,7 @@
       {#if alpha}
         <span class="alpha-badge">&lt;Alpha&gt;</span>
       {/if}
-      {#if standalone}
-        <button type="button" class="import-btn" onclick={handleImport}>
-          {importLabel}
-        </button>
-      {:else if installed}
+      {#if installed}
         <span class="installed-badge"
           >{instanceCount} {instanceCount === 1 ? "instance" : "instances"}</span
         >
@@ -161,34 +148,6 @@
     text-transform: uppercase;
     letter-spacing: 0.8px;
     font-weight: 700;
-  }
-
-  .import-btn {
-    font-size: 0.75rem;
-    background: var(--bg-surface);
-    color: var(--accent);
-    border: 1px solid var(--accent-dim);
-    padding: 0.375rem 0.75rem;
-    border-radius: 2px;
-    cursor: pointer;
-    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    font-weight: bold;
-  }
-
-  .import-btn:hover {
-    background: var(--bg-hover);
-    border-color: var(--accent);
-    box-shadow: 0 0 10px var(--border-glow);
-    text-shadow: 0 0 8px var(--accent);
-  }
-
-  .import-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    box-shadow: none;
-    text-shadow: none;
   }
 
   p {

@@ -1,16 +1,9 @@
 <script lang="ts">
   import { afterNavigate } from "$app/navigation";
-  import AddExistingDialog from "$lib/components/AddExistingDialog.svelte";
   import ComponentCard from "$lib/components/ComponentCard.svelte";
-  import { api, type StandaloneInfo } from "$lib/api/client";
+  import { api } from "$lib/api/client";
 
   let components = $state<any[]>([]);
-  let standalone = $state<StandaloneInfo | null>(null);
-  let selectedExistingComponent = $state("nullclaw");
-  let selectedExistingDisplayName = $state("NullClaw");
-  let dialogOpen = $state(false);
-  let dialogError = $state("");
-  let dialogImporting = $state(false);
 
   async function loadPageData() {
     try {
@@ -18,43 +11,6 @@
       components = data.components || [];
     } catch (e) {
       console.error(e);
-    }
-  }
-
-  function componentDisplayName(component: string) {
-    return components.find((entry) => entry.name === component)?.display_name || component;
-  }
-
-  async function openExistingDialog(component: string) {
-    selectedExistingComponent = component;
-    selectedExistingDisplayName = componentDisplayName(component);
-    standalone = null;
-    dialogError = "";
-    try {
-      standalone = await api.getStandalone(component);
-    } catch (e) {
-      console.error(e);
-    }
-    dialogOpen = true;
-  }
-
-  function closeDialog() {
-    if (dialogImporting) return;
-    dialogOpen = false;
-    dialogError = "";
-  }
-
-  async function handleExistingSubmit(payload: { path?: string; name?: string }) {
-    dialogImporting = true;
-    dialogError = "";
-    try {
-      await api.importInstance(selectedExistingComponent, payload);
-      dialogOpen = false;
-      await loadPageData();
-    } catch (e) {
-      dialogError = (e as Error).message;
-    } finally {
-      dialogImporting = false;
     }
   }
 
@@ -67,9 +23,6 @@
       <h1>Install Component</h1>
       <p class="subtitle">Choose a component to install</p>
     </div>
-    <button class="add-existing-btn" onclick={() => openExistingDialog("nullclaw")}>
-      Add Existing NullClaw
-    </button>
   </div>
 
   <div class="catalog-grid">
@@ -80,26 +33,12 @@
         description={comp.description}
         alpha={Boolean(comp.alpha)}
         installable={comp.installable !== false}
-        installed={comp.installed}
-        standalone={Boolean(comp.standalone)}
+        installed={comp.instance_count > 0}
         instanceCount={comp.instance_count}
-        importLabel="Add Existing"
-        onImportExisting={openExistingDialog}
       />
     {/each}
   </div>
 </div>
-
-<AddExistingDialog
-  open={dialogOpen}
-  component={selectedExistingComponent}
-  displayName={selectedExistingDisplayName}
-  {standalone}
-  importing={dialogImporting}
-  error={dialogError}
-  onClose={closeDialog}
-  onSubmit={handleExistingSubmit}
-/>
 
 <style>
   .install-page {
@@ -132,29 +71,9 @@
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: 1.5rem;
   }
-  .add-existing-btn {
-    padding: 0.7rem 0.95rem;
-    border-radius: 2px;
-    border: 1px solid var(--accent-dim);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    color: var(--accent);
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    font-weight: 700;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .add-existing-btn:hover {
-    box-shadow: 0 0 12px var(--border-glow);
-    border-color: var(--accent);
-  }
   @media (max-width: 640px) {
     .page-header {
       flex-direction: column;
-    }
-
-    .add-existing-btn {
-      width: 100%;
     }
   }
 </style>
