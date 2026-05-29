@@ -365,6 +365,16 @@ fn seedStandaloneInstall(server: *IntegrationServer, component: []const u8, conf
     return standalone_dir;
 }
 
+fn expectJsonPathBasename(allocator: std.mem.Allocator, body: []const u8, field: []const u8, expected: []const u8) !void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value == .object);
+    const value = parsed.value.object.get(field) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(value == .string);
+    try std.testing.expectEqualStrings(expected, std.fs.path.basename(value.string));
+}
+
 test "integration harness serves health and core api routes" {
     var server = try IntegrationServer.start(std.testing.allocator);
     defer server.deinit();
@@ -673,7 +683,7 @@ test "integration harness covers standalone detection and import flow" {
         try std.testing.expectEqual(std.http.Status.ok, resp.status);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"standalone\":true") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"already_imported\":false") != null);
-        try std.testing.expect(std.mem.indexOf(u8, resp.body, "/.nullclaw") != null);
+        try expectJsonPathBasename(std.testing.allocator, resp.body, "standalone_path", ".nullclaw");
     }
 
     {
@@ -693,7 +703,7 @@ test "integration harness covers standalone detection and import flow" {
         try std.testing.expectEqual(std.http.Status.ok, resp.status);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"imported\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"instance\":\"existing-bot\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, resp.body, "/.nullclaw") != null);
+        try expectJsonPathBasename(std.testing.allocator, resp.body, "path", ".nullclaw");
     }
 
     {
