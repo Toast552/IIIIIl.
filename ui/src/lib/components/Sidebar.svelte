@@ -83,10 +83,6 @@
     <a href="/channels" class:active={currentPath === "/channels"}>Channels</a>
   </div>
 
-  <div class="nav-section">
-    <a href="/mission-control" class:active={currentPath.startsWith("/mission-control")}>Mission Control</a>
-  </div>
-
   <div class="nav-bottom">
     <a href="/report" class:active={currentPath === "/report"}>Report Issue</a>
     <a href="/settings" class:active={currentPath === "/settings"}>Settings</a>
