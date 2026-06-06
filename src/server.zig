@@ -3456,6 +3456,8 @@ test "initial request buffer stays small while media body limit remains high" {
     try std.testing.expectEqual(@as(usize, @intCast(nullclaw_gateway_config.min_body_size)), gateway_max_request_size);
     try std.testing.expectEqual(default_max_request_size, maxRequestBodySize("/api/status"));
     try std.testing.expectEqual(gateway_max_request_size, maxRequestBodySize("/api/instances/nullclaw/demo/a2a"));
+    try std.testing.expectEqual(gateway_max_request_size, maxRequestBodySize("/api/instances/nullclaw/Opencode%20Go/a2a"));
+    try std.testing.expectEqual(default_max_request_size, maxRequestBodySize("/api/instances/nullclaw/name%2Fwith%2Fslash/a2a"));
 }
 
 test "contentType returns correct MIME type for .js" {

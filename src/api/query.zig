@@ -34,6 +34,8 @@ pub fn valueRaw(target: []const u8, key: []const u8) ?[]const u8 {
 }
 
 pub fn decodePathSegmentAlloc(allocator: std.mem.Allocator, segment: []const u8) ![]u8 {
+    if (!isSafeEncodedPathSegment(segment)) return error.InvalidPathSegment;
+
     const encoded = try allocator.dupe(u8, segment);
     errdefer allocator.free(encoded);
 
@@ -44,6 +46,43 @@ pub fn decodePathSegmentAlloc(allocator: std.mem.Allocator, segment: []const u8)
     const out = try allocator.dupe(u8, decoded);
     allocator.free(encoded);
     return out;
+}
+
+pub fn isSafeEncodedPathSegment(segment: []const u8) bool {
+    if (segment.len == 0) return false;
+
+    var decoded_len: usize = 0;
+    var first: u8 = 0;
+    var second: u8 = 0;
+    var idx: usize = 0;
+    while (idx < segment.len) {
+        var byte = segment[idx];
+        if (byte == '%') {
+            if (idx + 2 >= segment.len) return false;
+            const high = hexValue(segment[idx + 1]) orelse return false;
+            const low = hexValue(segment[idx + 2]) orelse return false;
+            byte = high * 16 + low;
+            idx += 3;
+        } else {
+            idx += 1;
+        }
+
+        if (byte == 0 or byte == '/' or byte == '\\') return false;
+        if (decoded_len == 0) first = byte;
+        if (decoded_len == 1) second = byte;
+        decoded_len += 1;
+    }
+
+    if (decoded_len == 1 and first == '.') return false;
+    if (decoded_len == 2 and first == '.' and second == '.') return false;
+    return true;
+}
+
+fn hexValue(byte: u8) ?u8 {
+    if (byte >= '0' and byte <= '9') return byte - '0';
+    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
+    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
+    return null;
 }
 
 fn isSafeDecodedPathSegment(segment: []const u8) bool {
@@ -144,6 +183,14 @@ test "parseInstancePathPrefixAlloc decodes additional percent-encoded path chara
     try std.testing.expectEqualStrings("channels/web", parsed.suffix);
 }
 
+test "parseInstancePathPrefixAlloc decodes encoded literal percent signs" {
+    const allocator = std.testing.allocator;
+    const parsed = (try parseInstancePathPrefixAlloc(allocator, "/api/instances/nullclaw/CPU%2050%25/config")).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("CPU 50%", parsed.name);
+}
+
 test "parseInstancePathPrefixAlloc rejects decoded path separators" {
     try std.testing.expectError(
         error.InvalidPathSegment,
@@ -159,6 +206,21 @@ test "parseInstancePathPrefixAlloc rejects decoded traversal segments" {
     try std.testing.expectError(
         error.InvalidPathSegment,
         parseInstancePathPrefixAlloc(std.testing.allocator, "/api/instances/nullclaw/%2E%2E/config"),
+    );
+}
+
+test "parseInstancePathPrefixAlloc rejects malformed percent encodings" {
+    try std.testing.expectError(
+        error.InvalidPathSegment,
+        parseInstancePathPrefixAlloc(std.testing.allocator, "/api/instances/nullclaw/name%/config"),
+    );
+    try std.testing.expectError(
+        error.InvalidPathSegment,
+        parseInstancePathPrefixAlloc(std.testing.allocator, "/api/instances/nullclaw/name%2/config"),
+    );
+    try std.testing.expectError(
+        error.InvalidPathSegment,
+        parseInstancePathPrefixAlloc(std.testing.allocator, "/api/instances/nullclaw/name%GG/config"),
     );
 }
 

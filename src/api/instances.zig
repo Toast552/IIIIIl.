@@ -935,6 +935,7 @@ fn buildAgentStreamA2aBody(allocator: std.mem.Allocator, body: []const u8) ![]u8
 
 pub fn isGatewayProxyPath(target: []const u8) bool {
     const parsed = parsePath(target) orelse return false;
+    if (!parsedPathSegmentsAreSafe(parsed)) return false;
     const action = parsed.action orelse return false;
     return gatewayProxyRouteForAction(action) != null;
 }
@@ -1341,6 +1342,7 @@ pub fn parsePath(target: []const u8) ?ParsedPath {
 
 fn parsePathAlloc(allocator: std.mem.Allocator, target: []const u8) !?ParsedPathOwned {
     const parsed = parsePath(target) orelse return null;
+    if (!parsedPathSegmentsAreSafe(parsed)) return error.InvalidPathSegment;
 
     const component = try query_api.decodePathSegmentAlloc(allocator, parsed.component);
     errdefer allocator.free(component);
@@ -1357,6 +1359,15 @@ fn parsePathAlloc(allocator: std.mem.Allocator, target: []const u8) !?ParsedPath
         .name = name,
         .action = action,
     };
+}
+
+fn parsedPathSegmentsAreSafe(parsed: ParsedPath) bool {
+    if (!query_api.isSafeEncodedPathSegment(parsed.component)) return false;
+    if (!query_api.isSafeEncodedPathSegment(parsed.name)) return false;
+    if (parsed.action) |action| {
+        if (!query_api.isSafeEncodedPathSegment(action)) return false;
+    }
+    return true;
 }
 
 fn parseChannelsPath(target: []const u8) ?ParsedChannelsPath {
@@ -5885,6 +5896,9 @@ test "buildAgentStreamA2aBody translates managed agent request to A2A message st
     try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/a2a"));
     try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/a2a-stream"));
     try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/transcribe"));
+    try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/Opencode%20Go/a2a"));
+    try std.testing.expect(!isGatewayProxyPath("/api/instances/nullclaw/name%2Fwith%2Fslash/a2a"));
+    try std.testing.expect(!isGatewayProxyPath("/api/instances/nullclaw/name%GG/a2a"));
 }
 
 fn writeTestTrackerWorkflow(
@@ -6017,6 +6031,13 @@ test "parsePathAlloc decodes additional percent-encoded special characters" {
     try std.testing.expectEqualStrings("nullclaw", parsed.component);
     try std.testing.expectEqualStrings("NullClaw MiMo (beta) #1", parsed.name);
     try std.testing.expectEqualStrings("status", parsed.action.?);
+}
+
+test "parsePathAlloc rejects malformed percent-encoded names" {
+    try std.testing.expectError(
+        error.InvalidPathSegment,
+        parsePathAlloc(std.testing.allocator, "/api/instances/nullclaw/name%GG/status"),
+    );
 }
 
 test "parseChannelsPathAlloc decodes percent-encoded names" {
