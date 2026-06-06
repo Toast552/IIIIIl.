@@ -45,6 +45,21 @@ pub const ParsedLogsPath = struct {
     is_stream: bool,
 };
 
+pub const ParsedLogsPathOwned = struct {
+    component: []u8,
+    name: []u8,
+    is_stream: bool,
+
+    pub fn deinit(self: ParsedLogsPathOwned, allocator: std.mem.Allocator) void {
+        allocator.free(self.component);
+        allocator.free(self.name);
+    }
+
+    pub fn borrowed(self: ParsedLogsPathOwned) ParsedLogsPath {
+        return .{ .component = self.component, .name = self.name, .is_stream = self.is_stream };
+    }
+};
+
 /// Parse /api/instances/{c}/{n}/logs or /api/instances/{c}/{n}/logs/stream.
 pub fn parseLogsPath(target: []const u8) ?ParsedLogsPath {
     const clean = stripQuery(target);
@@ -74,6 +89,21 @@ pub fn parseLogsPath(target: []const u8) ?ParsedLogsPath {
     }
 
     return .{ .component = component, .name = name, .is_stream = false };
+}
+
+pub fn parseLogsPathAlloc(allocator: std.mem.Allocator, target: []const u8) !?ParsedLogsPathOwned {
+    const parsed = try query.parseInstancePathPrefixAlloc(allocator, target) orelse return null;
+    errdefer parsed.deinit(allocator);
+
+    if (std.mem.eql(u8, parsed.suffix, "logs")) {
+        return .{ .component = parsed.component, .name = parsed.name, .is_stream = false };
+    }
+    if (std.mem.eql(u8, parsed.suffix, "logs/stream")) {
+        return .{ .component = parsed.component, .name = parsed.name, .is_stream = true };
+    }
+
+    parsed.deinit(allocator);
+    return null;
 }
 
 /// Check if a target path matches the logs pattern.
@@ -290,6 +320,15 @@ test "parseLogsPath: with query string" {
     try std.testing.expectEqualStrings("nullclaw", p.component);
     try std.testing.expectEqualStrings("my-agent", p.name);
     try std.testing.expect(!p.is_stream);
+}
+
+test "parseLogsPathAlloc decodes percent-encoded names" {
+    const allocator = std.testing.allocator;
+    const p = (try parseLogsPathAlloc(allocator, "/api/instances/nullclaw/Opencode%20Go/logs/stream?lines=50")).?;
+    defer p.deinit(allocator);
+    try std.testing.expectEqualStrings("nullclaw", p.component);
+    try std.testing.expectEqualStrings("Opencode Go", p.name);
+    try std.testing.expect(p.is_stream);
 }
 
 test "parseLogsPath: rejects non-logs path" {

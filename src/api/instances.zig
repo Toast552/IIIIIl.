@@ -935,6 +935,7 @@ fn buildAgentStreamA2aBody(allocator: std.mem.Allocator, body: []const u8) ![]u8
 
 pub fn isGatewayProxyPath(target: []const u8) bool {
     const parsed = parsePath(target) orelse return false;
+    if (!parsedPathSegmentsAreSafe(parsed)) return false;
     const action = parsed.action orelse return false;
     return gatewayProxyRouteForAction(action) != null;
 }
@@ -948,7 +949,13 @@ pub fn prepareGatewayProxy(
     target: []const u8,
     body: []const u8,
 ) GatewayProxyPrepareResult {
-    const parsed = parsePath(target) orelse return .no_match;
+    const parsed_owned = parsePathAlloc(allocator, target) catch |err| switch (err) {
+        error.InvalidPathSegment => return .{ .response = badRequest("{\"error\":\"invalid path segment\"}") },
+        else => return .{ .response = helpers.serverError() },
+    };
+    const parsed_storage = parsed_owned orelse return .no_match;
+    defer parsed_storage.deinit(allocator);
+    const parsed = parsed_storage.borrowed();
     const action = parsed.action orelse return .no_match;
     const route = gatewayProxyRouteForAction(action) orelse return .no_match;
     if (!std.mem.eql(u8, method, "POST")) return .{ .response = methodNotAllowed() };
@@ -1252,10 +1259,50 @@ pub const ParsedPath = struct {
     action: ?[]const u8,
 };
 
+const ParsedPathOwned = struct {
+    component: []u8,
+    name: []u8,
+    action: ?[]u8,
+
+    fn deinit(self: ParsedPathOwned, allocator: std.mem.Allocator) void {
+        allocator.free(self.component);
+        allocator.free(self.name);
+        if (self.action) |action| allocator.free(action);
+    }
+
+    fn borrowed(self: ParsedPathOwned) ParsedPath {
+        return .{
+            .component = self.component,
+            .name = self.name,
+            .action = self.action,
+        };
+    }
+};
+
 const ParsedChannelsPath = struct {
     component: []const u8,
     name: []const u8,
     channel_type: ?[]const u8,
+};
+
+const ParsedChannelsPathOwned = struct {
+    component: []u8,
+    name: []u8,
+    channel_type: ?[]u8,
+
+    fn deinit(self: ParsedChannelsPathOwned, allocator: std.mem.Allocator) void {
+        allocator.free(self.component);
+        allocator.free(self.name);
+        if (self.channel_type) |channel_type| allocator.free(channel_type);
+    }
+
+    fn borrowed(self: ParsedChannelsPathOwned) ParsedChannelsPath {
+        return .{
+            .component = self.component,
+            .name = self.name,
+            .channel_type = self.channel_type,
+        };
+    }
 };
 
 fn stripQuery(target: []const u8) []const u8 {
@@ -1293,6 +1340,36 @@ pub fn parsePath(target: []const u8) ?ParsedPath {
     return .{ .component = component, .name = name, .action = action };
 }
 
+fn parsePathAlloc(allocator: std.mem.Allocator, target: []const u8) !?ParsedPathOwned {
+    const parsed = parsePath(target) orelse return null;
+    if (!parsedPathSegmentsAreSafe(parsed)) return error.InvalidPathSegment;
+
+    const component = try query_api.decodePathSegmentAlloc(allocator, parsed.component);
+    errdefer allocator.free(component);
+    const name = try query_api.decodePathSegmentAlloc(allocator, parsed.name);
+    errdefer allocator.free(name);
+    const action = if (parsed.action) |value|
+        try query_api.decodePathSegmentAlloc(allocator, value)
+    else
+        null;
+    errdefer if (action) |owned| allocator.free(owned);
+
+    return .{
+        .component = component,
+        .name = name,
+        .action = action,
+    };
+}
+
+fn parsedPathSegmentsAreSafe(parsed: ParsedPath) bool {
+    if (!query_api.isSafeEncodedPathSegment(parsed.component)) return false;
+    if (!query_api.isSafeEncodedPathSegment(parsed.name)) return false;
+    if (parsed.action) |action| {
+        if (!query_api.isSafeEncodedPathSegment(action)) return false;
+    }
+    return true;
+}
+
 fn parseChannelsPath(target: []const u8) ?ParsedChannelsPath {
     const clean = stripQuery(target);
     const prefix = "/api/instances/";
@@ -1318,6 +1395,26 @@ fn parseChannelsPath(target: []const u8) ?ParsedChannelsPath {
         .component = component,
         .name = name,
         .channel_type = if (channel_type_raw) |value| if (value.len > 0) value else null else null,
+    };
+}
+
+fn parseChannelsPathAlloc(allocator: std.mem.Allocator, target: []const u8) !?ParsedChannelsPathOwned {
+    const parsed = parseChannelsPath(target) orelse return null;
+
+    const component = try query_api.decodePathSegmentAlloc(allocator, parsed.component);
+    errdefer allocator.free(component);
+    const name = try query_api.decodePathSegmentAlloc(allocator, parsed.name);
+    errdefer allocator.free(name);
+    const channel_type = if (parsed.channel_type) |value|
+        try query_api.decodePathSegmentAlloc(allocator, value)
+    else
+        null;
+    errdefer if (channel_type) |owned| allocator.free(owned);
+
+    return .{
+        .component = component,
+        .name = name,
+        .channel_type = channel_type,
     };
 }
 
@@ -1754,6 +1851,28 @@ const ParsedCronPath = struct {
     };
 };
 
+const ParsedCronPathOwned = struct {
+    component: []u8,
+    name: []u8,
+    job_id: ?[]u8 = null,
+    action: ParsedCronPath.Action,
+
+    fn deinit(self: ParsedCronPathOwned, allocator: std.mem.Allocator) void {
+        allocator.free(self.component);
+        allocator.free(self.name);
+        if (self.job_id) |job_id| allocator.free(job_id);
+    }
+
+    fn borrowed(self: ParsedCronPathOwned) ParsedCronPath {
+        return .{
+            .component = self.component,
+            .name = self.name,
+            .job_id = self.job_id,
+            .action = self.action,
+        };
+    }
+};
+
 const LoadedCronStore = struct {
     parsed: std.json.Parsed(std.json.Value),
 
@@ -1825,6 +1944,27 @@ fn parseCronPath(target: []const u8) ?ParsedCronPath {
         .name = name,
         .job_id = extra,
         .action = action,
+    };
+}
+
+fn parseCronPathAlloc(allocator: std.mem.Allocator, target: []const u8) !?ParsedCronPathOwned {
+    const parsed = parseCronPath(target) orelse return null;
+
+    const component = try query_api.decodePathSegmentAlloc(allocator, parsed.component);
+    errdefer allocator.free(component);
+    const name = try query_api.decodePathSegmentAlloc(allocator, parsed.name);
+    errdefer allocator.free(name);
+    const job_id = if (parsed.job_id) |value|
+        try query_api.decodePathSegmentAlloc(allocator, value)
+    else
+        null;
+    errdefer if (job_id) |owned| allocator.free(owned);
+
+    return .{
+        .component = component,
+        .name = name,
+        .job_id = job_id,
+        .action = parsed.action,
     };
 }
 
@@ -4920,7 +5060,13 @@ pub fn dispatch(
         return methodNotAllowed();
     }
 
-    if (parseCronPath(target)) |parsed_cron| {
+    const parsed_cron_owned = parseCronPathAlloc(allocator, target) catch |err| switch (err) {
+        error.InvalidPathSegment => return badRequest("{\"error\":\"invalid path segment\"}"),
+        else => return helpers.serverError(),
+    };
+    if (parsed_cron_owned) |parsed_cron_storage| {
+        defer parsed_cron_storage.deinit(allocator);
+        const parsed_cron = parsed_cron_storage.borrowed();
         return switch (parsed_cron.action) {
             .collection => if (std.mem.eql(u8, method, "GET"))
                 handleCronList(allocator, s, paths, parsed_cron.component, parsed_cron.name)
@@ -4989,12 +5135,24 @@ pub fn dispatch(
         };
     }
 
-    if (parseChannelsPath(target)) |parsed_channels| {
+    const parsed_channels_owned = parseChannelsPathAlloc(allocator, target) catch |err| switch (err) {
+        error.InvalidPathSegment => return badRequest("{\"error\":\"invalid path segment\"}"),
+        else => return helpers.serverError(),
+    };
+    if (parsed_channels_owned) |parsed_channels_storage| {
+        defer parsed_channels_storage.deinit(allocator);
+        const parsed_channels = parsed_channels_storage.borrowed();
         if (!std.mem.eql(u8, method, "GET")) return methodNotAllowed();
         return handleChannels(allocator, s, paths, parsed_channels.component, parsed_channels.name, parsed_channels.channel_type);
     }
 
-    const parsed = parsePath(target) orelse return null;
+    const parsed_owned = parsePathAlloc(allocator, target) catch |err| switch (err) {
+        error.InvalidPathSegment => return badRequest("{\"error\":\"invalid path segment\"}"),
+        else => return helpers.serverError(),
+    };
+    const parsed_storage = parsed_owned orelse return null;
+    defer parsed_storage.deinit(allocator);
+    const parsed = parsed_storage.borrowed();
 
     if (parsed.action) |action| {
         if (std.mem.eql(u8, action, "status")) {
@@ -5738,6 +5896,9 @@ test "buildAgentStreamA2aBody translates managed agent request to A2A message st
     try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/a2a"));
     try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/a2a-stream"));
     try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/hat/transcribe"));
+    try std.testing.expect(isGatewayProxyPath("/api/instances/nullclaw/Opencode%20Go/a2a"));
+    try std.testing.expect(!isGatewayProxyPath("/api/instances/nullclaw/name%2Fwith%2Fslash/a2a"));
+    try std.testing.expect(!isGatewayProxyPath("/api/instances/nullclaw/name%GG/a2a"));
 }
 
 fn writeTestTrackerWorkflow(
@@ -5852,6 +6013,43 @@ test "parsePath: onboarding action" {
     try std.testing.expectEqualStrings("onboarding", p.action.?);
 }
 
+test "parsePathAlloc decodes percent-encoded names" {
+    const allocator = std.testing.allocator;
+    const parsed = (try parsePathAlloc(allocator, "/api/instances/nullclaw/Opencode%20Go/provider-health")).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("nullclaw", parsed.component);
+    try std.testing.expectEqualStrings("Opencode Go", parsed.name);
+    try std.testing.expectEqualStrings("provider-health", parsed.action.?);
+}
+
+test "parsePathAlloc decodes additional percent-encoded special characters" {
+    const allocator = std.testing.allocator;
+    const parsed = (try parsePathAlloc(allocator, "/api/instances/nullclaw/NullClaw%20MiMo%20%28beta%29%20%231/status")).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("nullclaw", parsed.component);
+    try std.testing.expectEqualStrings("NullClaw MiMo (beta) #1", parsed.name);
+    try std.testing.expectEqualStrings("status", parsed.action.?);
+}
+
+test "parsePathAlloc rejects malformed percent-encoded names" {
+    try std.testing.expectError(
+        error.InvalidPathSegment,
+        parsePathAlloc(std.testing.allocator, "/api/instances/nullclaw/name%GG/status"),
+    );
+}
+
+test "parseChannelsPathAlloc decodes percent-encoded names" {
+    const allocator = std.testing.allocator;
+    const parsed = (try parseChannelsPathAlloc(allocator, "/api/instances/nullclaw/Opencode%20Go/channels/telegram")).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("nullclaw", parsed.component);
+    try std.testing.expectEqualStrings("Opencode Go", parsed.name);
+    try std.testing.expectEqualStrings("telegram", parsed.channel_type.?);
+}
+
 test "parseChannelsPath: collection route" {
     const p = parseChannelsPath("/api/instances/nullclaw/default/channels").?;
     try std.testing.expectEqualStrings("nullclaw", p.component);
@@ -5877,6 +6075,17 @@ test "parseCronPath: run route" {
     const p = parseCronPath("/api/instances/nullclaw/default/cron/job-1/run").?;
     try std.testing.expectEqualStrings("job-1", p.job_id.?);
     try std.testing.expectEqual(p.action, .run);
+}
+
+test "parseCronPathAlloc decodes percent-encoded names and job ids" {
+    const allocator = std.testing.allocator;
+    const parsed = (try parseCronPathAlloc(allocator, "/api/instances/nullclaw/Opencode%20Go/cron/job%201/run")).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("nullclaw", parsed.component);
+    try std.testing.expectEqualStrings("Opencode Go", parsed.name);
+    try std.testing.expectEqualStrings("job 1", parsed.job_id.?);
+    try std.testing.expectEqual(parsed.action, .run);
 }
 
 test "parseCronPath: rejects unknown verb" {
@@ -6379,6 +6588,65 @@ test "handleDelete removes instance" {
 
     // Verify it was actually removed.
     try std.testing.expect(s.getInstance("nullclaw", "my-agent") == null);
+}
+
+test "dispatch gets instance with percent-encoded name" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.0" });
+
+    const resp = dispatch(
+        allocator,
+        &s,
+        &mctx.manager,
+        &mctx.mutex,
+        mctx.paths,
+        "GET",
+        "/api/instances/nullclaw/Opencode%20Go",
+        "",
+    ).?;
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "Opencode Go") != null);
+}
+
+test "dispatch deletes instance with percent-encoded name" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.0" });
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullclaw", "Opencode Go", "{\"gateway\":{\"port\":3000}}");
+
+    const resp = dispatch(
+        allocator,
+        &s,
+        &mctx.manager,
+        &mctx.mutex,
+        mctx.paths,
+        "DELETE",
+        "/api/instances/nullclaw/Opencode%20Go",
+        "",
+    ).?;
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expectEqualStrings("{\"status\":\"deleted\"}", resp.body);
+    try std.testing.expect(s.getInstance("nullclaw", "Opencode Go") == null);
 }
 
 test "handleDelete removes instance directory from active path" {
@@ -6967,6 +7235,43 @@ test "dispatch routes GET cron action via nullclaw CLI when available" {
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"id\":\"job-cli\"") != null);
 }
 
+test "dispatch routes GET cron action with percent-encoded instance name" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.0" });
+    try writeTestBinary(
+        allocator,
+        mctx.paths,
+        "nullclaw",
+        "1.0.0",
+        \\#!/bin/sh
+        \\set -eu
+        \\if [ "$1" = "cron" ] && [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+        \\  printf '%s\n' '[{"id":"job-cli","expression":"*/10 * * * *","command":"echo cli","paused":false,"one_shot":false}]'
+        \\  exit 0
+        \\fi
+        \\exit 64
+        ,
+    );
+
+    const resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/Opencode%20Go/cron", "").?;
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"jobs\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"id\":\"job-cli\"") != null);
+}
+
 test "dispatch routes POST cron create action" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
 
@@ -7016,6 +7321,70 @@ test "dispatch routes POST cron create action" {
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"job\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"id\":\"job-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"command\":\"echo hello\"") != null);
+}
+
+test "dispatch routes POST cron pause action with percent-encoded instance name" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.0" });
+    const cron_path = try std.fs.path.join(allocator, &.{ mctx.paths.root, "instances", "nullclaw", "Opencode Go", "cron.json" });
+    defer allocator.free(cron_path);
+    try ensurePath(std.fs.path.dirname(cron_path).?);
+    const cron_file = try std_compat.fs.createFileAbsolute(cron_path, .{ .truncate = true });
+    defer cron_file.close();
+    try cron_file.writeAll(
+        \\[
+        \\  {"id":"job 1","expression":"*/20 * * * *","command":"echo go heartbeat","paused":false,"one_shot":false,"job_type":"shell","enabled":true,"delete_after_run":false}
+        \\]
+    );
+
+    try writeTestBinary(
+        allocator,
+        mctx.paths,
+        "nullclaw",
+        "1.0.0",
+        \\#!/bin/sh
+        \\set -eu
+        \\home="${NULLCLAW_HOME:?}"
+        \\if [ "$1" = "cron" ] && [ "$2" = "pause" ] && [ "$3" = "job 1" ]; then
+        \\  cat > "${home}/cron.json" <<'EOF'
+        \\[
+        \\  {"id":"job 1","expression":"*/20 * * * *","command":"echo go heartbeat","paused":true,"one_shot":false,"job_type":"shell","enabled":true,"delete_after_run":false}
+        \\]
+        \\EOF
+        \\  exit 0
+        \\fi
+        \\echo "unexpected args: $*" >&2
+        \\exit 1
+        ,
+    );
+
+    const resp = dispatch(
+        allocator,
+        &s,
+        &mctx.manager,
+        &mctx.mutex,
+        mctx.paths,
+        "POST",
+        "/api/instances/nullclaw/Opencode%20Go/cron/job%201/pause",
+        "",
+    ).?;
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"paused\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"id\":\"job 1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"paused\":true") != null);
 }
 
 test "handleOnboarding reports pending bootstrap for fresh nullclaw workspace" {
@@ -7196,6 +7565,37 @@ test "dispatch routes GET integration action for linked nullboiler" {
     try std.testing.expectEqualStrings("reviewer", current_link.get("claim_role").?.string);
     try std.testing.expectEqualStrings("complete", current_link.get("success_trigger").?.string);
     try std.testing.expectEqual(@as(i64, 2), current_link.get("max_concurrent_tasks").?.integer);
+}
+
+test "dispatch routes GET integration action with percent-encoded instance name" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullwatch", "observer-a", .{ .version = "1.0.0" });
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.0" });
+
+    try writeTestInstanceConfig(allocator, mctx.paths, "nullwatch", "observer-a", "{\"host\":\"127.0.0.1\",\"port\":7711,\"api_token\":\"watch-token\"}");
+    try writeTestInstanceConfig(
+        allocator,
+        mctx.paths,
+        "nullclaw",
+        "Opencode Go",
+        "{\"diagnostics\":{\"backend\":\"otel\",\"otel\":{\"endpoint\":\"http://127.0.0.1:7711\",\"service_name\":\"nullclaw/Opencode Go\",\"headers\":{\"Authorization\":\"Bearer watch-token\",\"x-nullwatch-source\":\"nullclaw\"}}}}",
+    );
+
+    const resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/Opencode%20Go/integration", "").?;
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"kind\":\"nullclaw\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"observer-a\"") != null);
 }
 
 test "dispatch routes nulltickets tickets action to managed instances only" {
@@ -7801,6 +8201,36 @@ test "handleHistory returns CLI JSON and passes instance home" {
     try std.testing.expect(std.mem.indexOf(u8, show_resp.body, "\"role\":\"user\"") != null);
 }
 
+test "dispatch routes GET history action with percent-encoded instance name" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.0" });
+    const script =
+        \\#!/bin/sh
+        \\if [ "$1" = "history" ] && [ "$2" = "list" ]; then
+        \\  printf '%s\n' '{"total":1,"limit":50,"offset":0,"sessions":[{"session_id":"s-1","message_count":2,"first_message_at":"2026-03-10T10:00:00Z","last_message_at":"2026-03-10T10:01:00Z"}]}'
+        \\  exit 0
+        \\fi
+        \\echo "unexpected args" >&2
+        \\exit 1
+        \\
+    ;
+    try writeTestBinary(allocator, mctx.paths, "nullclaw", "1.0.0", script);
+
+    const resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/Opencode%20Go/history?limit=50&offset=0", "").?;
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"session_id\":\"s-1\"") != null);
+}
+
 test "handleMemory wraps CLI failures as JSON errors" {
     const allocator = std.testing.allocator;
     var state_fixture = try test_helpers.TempPaths.init(allocator);
@@ -8040,6 +8470,36 @@ test "handleSkills returns 404 when CLI detail returns null" {
     try std.testing.expectEqualStrings("404 Not Found", resp.status);
 }
 
+test "dispatch routes GET skills action with percent-encoded instance name" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.2-skill-null" });
+    const script =
+        \\#!/bin/sh
+        \\if [ "$1" = "skills" ] && [ "$2" = "info" ] && [ "$3" = "missing" ] && [ "$4" = "--json" ]; then
+        \\  printf '%s\n' 'null'
+        \\  exit 0
+        \\fi
+        \\echo "unexpected args" >&2
+        \\exit 1
+        \\
+    ;
+    try writeTestBinary(allocator, mctx.paths, "nullclaw", "1.0.2-skill-null", script);
+
+    const resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/Opencode%20Go/skills?name=missing", "").?;
+    try std.testing.expectEqualStrings("404 Not Found", resp.status);
+}
+
 test "dispatch routes GET channels action" {
     const allocator = std.testing.allocator;
     var state_fixture = try test_helpers.TempPaths.init(allocator);
@@ -8068,6 +8528,71 @@ test "dispatch routes GET channels action" {
     defer allocator.free(resp.body);
     try std.testing.expectEqualStrings("200 OK", resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"type\":\"telegram\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"account_id\":\"main\"") != null);
+}
+
+test "dispatch routes GET channels action with percent-encoded instance name" {
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.2" });
+    const script =
+        \\#!/bin/sh
+        \\if [ "$1" = "channel" ] && [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+        \\  printf '%s\n' '[{"type":"telegram","account_id":"main","configured":true,"status":"ok"}]'
+        \\  exit 0
+        \\fi
+        \\echo "unexpected args" >&2
+        \\exit 1
+        \\
+    ;
+    try writeTestBinary(allocator, mctx.paths, "nullclaw", "1.0.2", script);
+
+    const resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/Opencode%20Go/channels", "").?;
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"type\":\"telegram\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"account_id\":\"main\"") != null);
+}
+
+test "dispatch routes GET channel detail with percent-encoded instance name" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.2-detail" });
+    const script =
+        \\#!/bin/sh
+        \\if [ "$1" = "channel" ] && [ "$2" = "info" ] && [ "$3" = "telegram" ] && [ "$4" = "--json" ]; then
+        \\  printf '%s\n' '{"type":"telegram","status":"ok","accounts":[{"account_id":"main","configured":true,"status":"ok"}]}'
+        \\  exit 0
+        \\fi
+        \\echo "unexpected args" >&2
+        \\exit 1
+        \\
+    ;
+    try writeTestBinary(allocator, mctx.paths, "nullclaw", "1.0.2-detail", script);
+
+    const resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/Opencode%20Go/channels/telegram", "").?;
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"type\":\"telegram\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"ok\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"account_id\":\"main\"") != null);
 }
 
@@ -8700,6 +9225,57 @@ test "dispatch routes agent invoke stream and sessions" {
     try std.testing.expect(std.mem.indexOf(u8, get_resp.body, "\"turn_count\":1") != null);
 
     const delete_resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "DELETE", "/api/instances/nullclaw/my-agent/agent-sessions?session_id=s-1", "").?;
+    defer allocator.free(delete_resp.body);
+    try std.testing.expectEqualStrings("200 OK", delete_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, delete_resp.body, "\"terminated\":true") != null);
+}
+
+test "dispatch routes agent sessions with percent-encoded instance name" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var state_fixture = try test_helpers.TempPaths.init(allocator);
+    defer state_fixture.deinit();
+    const state_path = try state_fixture.paths.state(allocator);
+    defer allocator.free(state_path);
+    var s = state_mod.State.init(allocator, state_path);
+    defer s.deinit();
+    var mctx = TestManagerCtx.init(allocator);
+    defer mctx.deinit(allocator);
+
+    try s.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.10" });
+    const script =
+        \\#!/bin/sh
+        \\set -eu
+        \\if [ "$1" = "agent" ] && [ "$2" = "sessions" ] && [ "$3" = "list" ] && [ "$4" = "--json" ]; then
+        \\  printf '%s\n' '{"sessions":[{"session_key":"s-1","created_at":"2026-04-17T00:00:00Z","last_active":"2026-04-17T00:01:00Z","turn_count":1,"turn_running":false}],"total":1}'
+        \\  exit 0
+        \\fi
+        \\if [ "$1" = "agent" ] && [ "$2" = "sessions" ] && [ "$3" = "get" ] && [ "$4" = "s-1" ] && [ "$5" = "--json" ]; then
+        \\  printf '%s\n' '{"session_key":"s-1","created_at":"2026-04-17T00:00:00Z","last_active":"2026-04-17T00:01:00Z","turn_count":1,"turn_running":false}'
+        \\  exit 0
+        \\fi
+        \\if [ "$1" = "agent" ] && [ "$2" = "sessions" ] && [ "$3" = "terminate" ] && [ "$4" = "s-1" ] && [ "$5" = "--json" ]; then
+        \\  printf '%s\n' '{"session_key":"s-1","terminated":true}'
+        \\  exit 0
+        \\fi
+        \\echo "unexpected args: $*" >&2
+        \\exit 1
+        \\
+    ;
+    try writeTestBinary(allocator, mctx.paths, "nullclaw", "1.0.10", script);
+
+    const list_resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/Opencode%20Go/agent-sessions", "").?;
+    defer allocator.free(list_resp.body);
+    try std.testing.expectEqualStrings("200 OK", list_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, list_resp.body, "\"session_key\":\"s-1\"") != null);
+
+    const get_resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "GET", "/api/instances/nullclaw/Opencode%20Go/agent-sessions?session_id=s-1", "").?;
+    defer allocator.free(get_resp.body);
+    try std.testing.expectEqualStrings("200 OK", get_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, get_resp.body, "\"turn_count\":1") != null);
+
+    const delete_resp = dispatch(allocator, &s, &mctx.manager, &mctx.mutex, mctx.paths, "DELETE", "/api/instances/nullclaw/Opencode%20Go/agent-sessions?session_id=s-1", "").?;
     defer allocator.free(delete_resp.body);
     try std.testing.expectEqualStrings("200 OK", delete_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, delete_resp.body, "\"terminated\":true") != null);

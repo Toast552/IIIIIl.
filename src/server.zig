@@ -1637,7 +1637,13 @@ pub const Server = struct {
 
         // Config API — /api/instances/{c}/{n}/config
         if (config_api.isConfigPath(target)) {
-            if (config_api.parseConfigPath(target)) |parsed| {
+            const parsed_owned = config_api.parseConfigPathAlloc(allocator, target) catch |err| switch (err) {
+                error.InvalidPathSegment => return .{ .status = "400 Bad Request", .content_type = "application/json", .body = "{\"error\":\"invalid path segment\"}" },
+                else => return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" },
+            };
+            if (parsed_owned) |parsed_storage| {
+                defer parsed_storage.deinit(allocator);
+                const parsed = parsed_storage.borrowed();
                 if (std.mem.eql(u8, method, "GET")) {
                     const resp = config_api.handleGetManaged(allocator, self.state, self.paths, parsed.component, parsed.name, target);
                     return .{ .status = resp.status, .content_type = resp.content_type, .body = resp.body };
@@ -1660,7 +1666,13 @@ pub const Server = struct {
 
         // Logs API — /api/instances/{c}/{n}/logs and /api/instances/{c}/{n}/logs/stream
         if (logs_api.isLogsPath(target)) {
-            if (logs_api.parseLogsPath(target)) |parsed| {
+            const parsed_owned = logs_api.parseLogsPathAlloc(allocator, target) catch |err| switch (err) {
+                error.InvalidPathSegment => return .{ .status = "400 Bad Request", .content_type = "application/json", .body = "{\"error\":\"invalid path segment\"}" },
+                else => return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" },
+            };
+            if (parsed_owned) |parsed_storage| {
+                defer parsed_storage.deinit(allocator);
+                const parsed = parsed_storage.borrowed();
                 if (std.mem.eql(u8, method, "DELETE")) {
                     const source = logs_api.parseSource(target);
                     const resp = logs_api.handleDelete(allocator, self.paths, parsed.component, parsed.name, source);
@@ -1689,7 +1701,13 @@ pub const Server = struct {
         // Instances API — delegate to instances_api.dispatch and updates_api.
         if (std.mem.startsWith(u8, target, "/api/instances")) {
             // Updates API — POST /api/instances/{c}/{n}/update
-            if (updates_api.parseUpdatePath(target)) |up| {
+            const update_owned = updates_api.parseUpdatePathAlloc(allocator, target) catch |err| switch (err) {
+                error.InvalidPathSegment => return .{ .status = "400 Bad Request", .content_type = "application/json", .body = "{\"error\":\"invalid path segment\"}" },
+                else => return .{ .status = "500 Internal Server Error", .content_type = "application/json", .body = "{\"error\":\"internal error\"}" },
+            };
+            if (update_owned) |update_storage| {
+                defer update_storage.deinit(allocator);
+                const up = update_storage.borrowed();
                 if (std.mem.eql(u8, method, "POST")) {
                     const ur = updates_api.handleApplyUpdateRuntime(
                         allocator,
@@ -3348,6 +3366,73 @@ test "route POST /api/instances/{c}/{n}/update returns 404 for empty state" {
     try std.testing.expectEqualStrings("404 Not Found", resp.status);
 }
 
+test "route GET config supports percent-encoded instance names" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+    try ctx.paths.ensureDirs();
+
+    const inst_dir = try ctx.paths.instanceDir(allocator, "nullclaw", "Opencode Go");
+    defer allocator.free(inst_dir);
+    try std_compat.fs.makeDirAbsolute(inst_dir);
+
+    const config_path = try ctx.paths.instanceConfig(allocator, "nullclaw", "Opencode Go");
+    defer allocator.free(config_path);
+    var file = try std_compat.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("{\"gateway\":{\"port\":3000}}");
+
+    const resp = ctx.route(allocator, "GET", "/api/instances/nullclaw/Opencode%20Go/config", "");
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "3000") != null);
+}
+
+test "route GET config rejects decoded traversal instance names" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+
+    const resp = ctx.route(allocator, "GET", "/api/instances/nullclaw/%2E%2E/config", "");
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expectEqualStrings("{\"error\":\"invalid path segment\"}", resp.body);
+}
+
+test "route GET logs supports percent-encoded instance names" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+    try ctx.paths.ensureDirs();
+
+    const logs_dir = try ctx.paths.instanceLogs(allocator, "nullclaw", "Opencode Go");
+    defer allocator.free(logs_dir);
+    try std_compat.fs.makeDirAbsolute(logs_dir);
+
+    const log_path = try std.fs.path.join(allocator, &.{ logs_dir, "stdout.log" });
+    defer allocator.free(log_path);
+    var file = try std_compat.fs.createFileAbsolute(log_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("hello\n");
+
+    const resp = ctx.route(allocator, "GET", "/api/instances/nullclaw/Opencode%20Go/logs", "");
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "hello") != null);
+}
+
+test "route POST update supports percent-encoded instance names" {
+    const allocator = std.testing.allocator;
+    var ctx = TestContext.init(allocator);
+    defer ctx.deinit(allocator);
+
+    try ctx.state.addInstance("nullclaw", "Opencode Go", .{ .version = "1.0.0" });
+
+    const resp = ctx.route(allocator, "POST", "/api/instances/nullclaw/Opencode%20Go/update", "");
+    defer allocator.free(resp.body);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "Opencode Go") != null);
+}
+
 test "Server init sets fields" {
     const paths = try paths_mod.Paths.init(std.testing.allocator, null);
     var mgr = manager_mod.Manager.init(std.testing.allocator, paths);
@@ -3371,6 +3456,8 @@ test "initial request buffer stays small while media body limit remains high" {
     try std.testing.expectEqual(@as(usize, @intCast(nullclaw_gateway_config.min_body_size)), gateway_max_request_size);
     try std.testing.expectEqual(default_max_request_size, maxRequestBodySize("/api/status"));
     try std.testing.expectEqual(gateway_max_request_size, maxRequestBodySize("/api/instances/nullclaw/demo/a2a"));
+    try std.testing.expectEqual(gateway_max_request_size, maxRequestBodySize("/api/instances/nullclaw/Opencode%20Go/a2a"));
+    try std.testing.expectEqual(default_max_request_size, maxRequestBodySize("/api/instances/nullclaw/name%2Fwith%2Fslash/a2a"));
 }
 
 test "contentType returns correct MIME type for .js" {

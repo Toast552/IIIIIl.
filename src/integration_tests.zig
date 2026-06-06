@@ -505,6 +505,59 @@ test "integration harness covers settings and config route contracts" {
     }
 }
 
+test "integration harness decodes percent-encoded instance route names" {
+    var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
+        fn call(srv: *IntegrationServer) !void {
+            try seedManagedInstance(srv, "nullboiler", "Opencode Go");
+        }
+    }.call);
+    defer server.deinit();
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/Opencode%20Go" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"stopped\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/instances/nullboiler/Opencode%20Go/config",
+            .method = .PUT,
+            .body = "{\"gateway\":{\"port\":43125},\"provider\":\"encoded\"}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"saved\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/Opencode%20Go/config?path=gateway.port" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"path\":\"gateway.port\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"value\":43125") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{
+            .path = "/api/instances/nullboiler/Opencode%20Go",
+            .method = .PATCH,
+            .body = "{\"auto_start\":true}",
+        });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"updated\"") != null);
+    }
+
+    {
+        const resp = try server.fetch(.{ .path = "/api/instances/nullboiler/%2E%2E/config" });
+        defer resp.deinit(std.testing.allocator);
+        try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "invalid path segment") != null);
+    }
+}
+
 test "integration harness covers settings and config failure paths" {
     var server = try IntegrationServer.startWithSeed(std.testing.allocator, struct {
         fn call(srv: *IntegrationServer) !void {
